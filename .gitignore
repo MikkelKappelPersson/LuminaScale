@@ -36,6 +36,10 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Build and job output logs
+*.err
+*.out
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -193,6 +197,29 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Large binary and container files
+*.sif
+*.simg
+
+# Model checkpoints and weights
+*.pt
+*.pth
+*.ckpt
+*.h5
+
+# Data and output directories (often large)
+/data/
+/datasets/
+/outputs/
+/checkpoints/
+/runs/
+*.npy
+*.npz
+
+# HPC and Slurm outputs (often large text files)
+slurm-*.out
+slurm-*.err
 
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to

@@ -2,36 +2,68 @@
 name: ai-cloud
 description: "Use when: working with AAU AI Cloud HPC cluster. Covers Singularity container building, job submission, resource quotas (normal/unprivileged/deadline), and job monitoring via Slurm. Commands for building, running, and inspecting GPU/CPU workloads."
 ---
-
 # AI Cloud HPC Skill
 
 **Use when**: Building Singularity containers, submitting jobs to AI Cloud, monitoring job queues, managing Slurm parameters, requesting beyond-default resources.
 
-**Scope**: AAU's AI Cloud cluster (https://hpc.aau.dk/ai-cloud/). Singularity 3.5+, Slurm scheduler, GPU/CPU job management.
+**Scope**: AAU’s AI Cloud cluster ([https://hpc.aau.dk/ai-cloud/](https://hpc.aau.dk/ai-cloud/)). Singularity 3.5+, Slurm scheduler, GPU/CPU job management.
 
 ---
 
 ## Quick Reference
 
-| Task | Command | Notes |
-|------|---------|-------|
-| View job queue | `squeue` | All jobs; use `squeue --me` for your own |
-| Submit job | `sbatch script.sh` | Via batch script |
-| Run interactive | `srun command` | Direct execution with default QOS |
-| Build container | `sbatch build.sh` | Requires Singularity def file |
-| Cancel job | `scancel JOBID` | Remove by job ID |
-| Check GPU util | `nvidia-smi` | GPU resource usage (on compute node) |
+Task
+
+Command
+
+Notes
+
+View job queue
+
+`squeue`
+
+All jobs; use `squeue --me` for your own
+
+Submit job
+
+`sbatch script.sh`
+
+Via batch script
+
+Run interactive
+
+`srun command`
+
+Direct execution with default QOS
+
+Build container
+
+`sbatch build.sh`
+
+Requires Singularity def file
+
+Cancel job
+
+`scancel JOBID`
+
+Remove by job ID
+
+Check GPU util
+
+`nvidia-smi`
+
+GPU resource usage (on compute node)
 
 ---
 
-## 1. Building Singularity Containers
+## 1\. Building Singularity Containers
 
 ### Workflow
 
-1. **Create definition file** (`.def`) with base image + software
-2. **Create batch build script** to submit to scheduler
-3. **Submit build** with `sbatch`
-4. **Test container** with `srun`
+1.  **Create definition file** (`.def`) with base image + software
+2.  **Create batch build script** to submit to scheduler
+3.  **Submit build** with `sbatch`
+4.  **Test container** with `srun`
 
 ### Step 1: Create Definition File
 
@@ -71,10 +103,11 @@ From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
 ```
 
 **Key sections**:
-- `%post`: Install packages, runs as root
-- `%environment`: Set env vars (applies at runtime)
-- `%test`: Validation checks
-- `%runscript`: Default command when container executes
+
+-   `%post`: Install packages, runs as root
+-   `%environment`: Set env vars (applies at runtime)
+-   `%test`: Validation checks
+-   `%runscript`: Default command when container executes
 
 ### Step 2: Create Build Batch Script
 
@@ -85,7 +118,6 @@ From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
 #SBATCH --error=build.err
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=80G
-#SBATCH --time=01:00:00
 
 # Setup Singularity cache
 export SINGULARITY_TMPDIR=$HOME/.singularity/tmp
@@ -119,7 +151,7 @@ srun --gres=gpu:1 singularity exec --nv output.sif python -c "import torch; prin
 
 ---
 
-## 2. Running Jobs on AI Cloud
+## 2\. Running Jobs on AI Cloud
 
 ### Job Submission Basics
 
@@ -165,9 +197,10 @@ srun --account=deadline --time=14-00:00:00 python script.py
 ```
 
 **Apply at**: [AI Cloud: Request deadline resources](https://aau.service-now.com/serviceportal?id=sc_cat_item&sys_id=22a816638322be5053711d447daad379)
-- 12 extra concurrent jobs + 12 extra GPUs for 14 days
-- Processed same day
-- Cannot reapply for 14 days after grant expires
+
+-   12 extra concurrent jobs + 12 extra GPUs for 14 days
+-   Processed same day
+-   Cannot reapply for 14 days after grant expires
 
 ### Resource Allocation
 
@@ -180,8 +213,9 @@ sbatch --cpus-per-task=8 --mem=32G --gres=gpu:2 job.sh
 ```
 
 **Common allocations**:
-- Single GPU training: `--gres=gpu:1`
-- Multi-GPU: `--gres=gpu:2` or `--gres=gpu:A100:2` (specific GPU type)
+
+-   Single GPU training: `--gres=gpu:1`
+-   Multi-GPU: `--gres=gpu:2` or `--gres=gpu:A100:2` (specific GPU type)
 
 ### Time Limits
 
@@ -222,7 +256,7 @@ Submit: `sbatch job_script.sh`
 
 ---
 
-## 3. Monitoring & Inspecting Jobs
+## 3\. Monitoring & Inspecting Jobs
 
 ### View Job Queue
 
@@ -238,14 +272,15 @@ squeue -o "%all"
 ```
 
 **Output columns**:
-- `JOBID`: Unique job identifier
-- `PARTITION`: Cluster partition (e.g., `prioritized`, `batch`)
-- `NAME`: Job name (user-specified)
-- `USER`: Submitting user
-- `ST`: Job state (`R`=running, `PD`=pending, `CA`=cancelled, `CD`=completed)
-- `TIME`: Elapsed runtime
-- `NODES`: Number of compute nodes
-- `NODELIST(REASON)`: Node(s) or why pending (e.g., `(Dependency)`, `(Resources)`)
+
+-   `JOBID`: Unique job identifier
+-   `PARTITION`: Cluster partition (e.g., `prioritized`, `batch`)
+-   `NAME`: Job name (user-specified)
+-   `USER`: Submitting user
+-   `ST`: Job state (`R`\=running, `PD`\=pending, `CA`\=cancelled, `CD`\=completed)
+-   `TIME`: Elapsed runtime
+-   `NODES`: Number of compute nodes
+-   `NODELIST(REASON)`: Node(s) or why pending (e.g., `(Dependency)`, `(Resources)`)
 
 ### Jobs Example
 
@@ -299,7 +334,7 @@ scancel --user=$USER
 
 ---
 
-## 4. Container Execution Examples
+## 4\. Container Execution Examples
 
 ### Single GPU Training
 
@@ -337,7 +372,7 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ---
 
-## 5. Key Configurations & Best Practices
+## 5\. Key Configurations & Best Practices
 
 ### Environment Setup
 
@@ -362,40 +397,56 @@ srun bash -c 'env | grep SLURM'
 
 ### Container Best Practices
 
-1. **Use `--fakeroot`** when building (avoids root requirement)
-2. **Pin versions** in definition files (reproducibility)
-3. **Test locally** before submitting large jobs
-4. **Use `--nv`** flag with `singularity exec` for GPU support
+1.  **Use `--fakeroot`** when building (avoids root requirement)
+2.  **Pin versions** in definition files (reproducibility)
+3.  **Test locally** before submitting large jobs
+4.  **Use `--nv`** flag with `singularity exec` for GPU support
 
 ### Resource Estimation
 
-- **GPU memory**: Check model size vs. GPU VRAM (A100: 40GB, A10: 24GB)
-- **CPU/RAM**: Rule of thumb: 1 CPU per GPU + 4-8GB RAM per GPU
-- **Time limits**: Add 20% buffer; check job logs for actual runtime
+-   **GPU memory**: Check model size vs. GPU VRAM (A100: 40GB, A10: 24GB)
+-   **CPU/RAM**: Rule of thumb: 1 CPU per GPU + 4-8GB RAM per GPU
+-   **Time limits**: Add 20% buffer; check job logs for actual runtime
 
 ---
 
-## 6. Troubleshooting
+## 6\. Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| Container build fails | Check `.out` file; ensure sandbox space available |
-| Job stuck in `PD` (pending) | Check `(Reason)` in squeue; may be waiting for resources or dependencies |
-| Out of GPU memory | Reduce batch size; request larger GPU; check `nvidia-smi` |
-| Container not found | Use absolute path: `/path/to/container.sif`; check permissions |
-| Test section fails | Review `%test` in def file; test manually inside container first |
+Issue
+
+Solution
+
+Container build fails
+
+Check `.out` file; ensure sandbox space available
+
+Job stuck in `PD` (pending)
+
+Check `(Reason)` in squeue; may be waiting for resources or dependencies
+
+Out of GPU memory
+
+Reduce batch size; request larger GPU; check `nvidia-smi`
+
+Container not found
+
+Use absolute path: `/path/to/container.sif`; check permissions
+
+Test section fails
+
+Review `%test` in def file; test manually inside container first
 
 ---
 
 ## References
 
-- **AI Cloud Home**: https://hpc.aau.dk/ai-cloud/
-- **Building Containers**: https://hpc.aau.dk/ai-cloud/additional-guides/building-your-own-container-image/
-- **Running Jobs**: https://hpc.aau.dk/ai-cloud/getting-started/run-jobs/
-- **Beyond Default Quota**: https://hpc.aau.dk/ai-cloud/additional-guides/run-jobs-beyond-the-default-qota/
-- **Queue Monitoring**: https://hpc.aau.dk/ai-cloud/additional-guides/checking-the-queue/
-- **Singularity Docs**: https://docs.sylabs.io/guides/3.0/user-guide/
-- **Slurm Docs**: https://slurm.schedmd.com/
+-   **AI Cloud Home**: [https://hpc.aau.dk/ai-cloud/](https://hpc.aau.dk/ai-cloud/)
+-   **Building Containers**: [https://hpc.aau.dk/ai-cloud/additional-guides/building-your-own-container-image/](https://hpc.aau.dk/ai-cloud/additional-guides/building-your-own-container-image/)
+-   **Running Jobs**: [https://hpc.aau.dk/ai-cloud/getting-started/run-jobs/](https://hpc.aau.dk/ai-cloud/getting-started/run-jobs/)
+-   **Beyond Default Quota**: [https://hpc.aau.dk/ai-cloud/additional-guides/run-jobs-beyond-the-default-qota/](https://hpc.aau.dk/ai-cloud/additional-guides/run-jobs-beyond-the-default-qota/)
+-   **Queue Monitoring**: [https://hpc.aau.dk/ai-cloud/additional-guides/checking-the-queue/](https://hpc.aau.dk/ai-cloud/additional-guides/checking-the-queue/)
+-   **Singularity Docs**: [https://docs.sylabs.io/guides/3.0/user-guide/](https://docs.sylabs.io/guides/3.0/user-guide/)
+-   **Slurm Docs**: [https://slurm.schedmd.com/](https://slurm.schedmd.com/)
 
 ---
 

@@ -1,11 +1,17 @@
 Bootstrap: docker
 From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
 
-%environment
-    export LC_ALL=C
-
 %post
-    apt-get update && apt-get install -y
+    apt-get update && apt-get install -y python3-venv
+
+    # Create and activate virtual environment
+    python3 -m venv /opt/venv
+
+    # Use the venv Python for all subsequent installations
+    . /opt/venv/bin/activate
+
+    # Upgrade pip/setuptools first
+    pip install --no-cache-dir --upgrade pip setuptools wheel
 
     # Install Python dependencies
     pip install --no-cache-dir \
@@ -15,12 +21,15 @@ From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
         imageio \
         numpy \
         tensorboard \
-        tqdm
-
+        tqdm \
+        torch  # PyTorch should be available from base image but ensure it's in venv
 
     # Create working directory
     mkdir -p /work
-    cd /work
+
+%environment
+    export LC_ALL=C
+    export PATH=/opt/venv/bin:$PATH
 
 %runscript
     exec bash "$@"

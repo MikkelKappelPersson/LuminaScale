@@ -9,7 +9,7 @@ LuminaScale implements neural models for:
 
 ## Code Style & Language
 
--   **Python 3.11+** (PyTorch ecosystem)
+-   **Python 3.12+** (PyTorch ecosystem)
 -   **Type hints** on all function signatures; use `typing` module and `from __future__ import annotations` for forward refs.
 -   **Docstrings**: Google style (see examples in `src/models/`).
 -   **Formatting**: Black (line length 100), isort, flake8 (ignore E501 if docstring exceeds).

@@ -11,8 +11,8 @@ LuminaScale implements neural models for:
 
 -   **Python 3.12+** (PyTorch ecosystem)
 -   **Type hints** on all function signatures; use `typing` module and `from __future__ import annotations` for forward refs.
--   **Docstrings**: Google style (see examples in `src/models/`).
--   **Formatting**: Black (line length 100), isort, flake8 (ignore E501 if docstring exceeds).
+-   **Docstrings**: Module-level only; code should be self-documenting through clear naming and type hints.
+-   **Formatting**: Black (line length 100), isort, flake8 (ignore E501 if line length exceeds).
 -   **Linting**: ruff with default config, ignore: E501 (line length handled by Black).
 
 ## Architecture

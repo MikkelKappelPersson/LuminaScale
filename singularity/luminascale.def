@@ -1,0 +1,46 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
+
+%environment
+    export LC_ALL=C
+
+%post
+    apt-get update && apt-get install -y
+
+    # Install Python dependencies
+    pip install --no-cache-dir \
+        hydra-core \
+        omegaconf \
+        scikit-image \
+        imageio \
+        numpy \
+        tensorboard \
+        tqdm
+
+
+    # Create working directory
+    mkdir -p /work
+    cd /work
+
+%runscript
+    exec bash "$@"
+
+%test
+    python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+    python -c "import hydra; print(f'Hydra version: {hydra.__version__}')"
+
+%labels
+    Author Mikkel Kappel Persson
+    Version v0.1.0
+    Project LuminaScale
+    Description "Neural Bit-Depth Expansion & ACES Color Space Normalization"
+
+%help
+    LuminaScale: Neural Bit-Depth Expansion & ACES Color Space Normalization
+
+    A containerized research environment for training and evaluating neural models
+    that expand bit-depth and normalize color to ACES working space.
+
+    Usage:
+      singularity exec luminascale.sif python scripts/train.py
+      singularity exec --nv luminascale.sif python scripts/train.py training=hpc_slurm

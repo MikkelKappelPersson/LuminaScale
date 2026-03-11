@@ -1,46 +1,65 @@
 Bootstrap: docker
 From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
 
+%files
+    ../pixi.toml /opt/pixi.toml
+    ../pixi.lock /opt/pixi.lock
+
 %post
-    apt-get update && apt-get install -y python3-venv
+    apt-get update && apt-get install -y \
+        curl \
+        ca-certificates \
+        cmake \
+        git \
+        build-essential \
+        libceres-dev \
+        nlohmann-json3-dev \
+        libopencv-dev \
+        openimageio-tools \
+        libopenimageio-dev \
+        cuda-toolkit-13-0
 
-    # Create and activate virtual environment
-    python3 -m venv /opt/venv
+    # Install pixi
+    curl -fsSL https://pixi.sh/install.sh | bash
+    export PATH="/root/.pixi/bin:$PATH"
 
-    # Use the venv Python for all subsequent installations
-    . /opt/venv/bin/activate
+    # Create working directory and setup pixi environment
+    mkdir -p /opt/project
+    cd /opt/project
+    cp /opt/pixi.toml ./pixi.toml
+    if [ -f /opt/pixi.lock ]; then cp /opt/pixi.lock ./pixi.lock; fi
 
-    # Upgrade pip/setuptools first
-    pip install --no-cache-dir --upgrade pip setuptools wheel
+    # Install dependencies via pixi
+    pixi install
 
-    # Install Python dependencies
-    pip install --no-cache-dir \
-        hydra-core \
-        omegaconf \
-        scikit-image \
-        imageio \
-        numpy \
-        tensorboard \
-        tqdm \
-        torch  # PyTorch should be available from base image but ensure it's in venv
+    # Build and install rawtoaces with CUDA support
+    cd /tmp
+    git clone https://github.com/AcademySoftwareFoundation/rawtoaces.git
+    cd rawtoaces
+    cmake -S . -B build \
+        -DCMAKE_CUDA_COMPILER=/usr/bin/nvcc \
+        -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
+    cmake --build build
+    cmake --install build
+    cd /tmp && rm -rf rawtoaces
 
-    # Create working directory
-    mkdir -p /work
+    # Clean up to reduce image size
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 %environment
     export LC_ALL=C
-    export PATH=/opt/venv/bin:$PATH
+    export PATH="/root/.pixi/bin:/opt/project/.pixi/envs/default/bin:$PATH"
 
 %runscript
     exec bash "$@"
 
 %test
     python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
-    python -c "import hydra; print(f'Hydra version: {hydra.__version__}')"
+    python -c "import hydra; print(f'Hydra available')"
 
 %labels
     Author Mikkel Kappel Persson
-    Version v0.1.0
+    Version v0.2.0
     Project LuminaScale
     Description "Neural Bit-Depth Expansion & ACES Color Space Normalization"
 
@@ -51,5 +70,6 @@ From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
     that expand bit-depth and normalize color to ACES working space.
 
     Usage:
-      singularity exec luminascale.sif python scripts/train.py
-      singularity exec --nv luminascale.sif python scripts/train.py training=hpc_slurm
+      singularity exec luminascale.sif python -c "print('hello world')"
+      singularity exec --nv luminascale.sif python scripts/train.py
+      srun singularity exec --nv luminascale.sif python scripts/train.py

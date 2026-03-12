@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
+From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
 
 %files
     pixi.toml /opt/pixi.toml
@@ -17,6 +17,7 @@ From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
         libopencv-dev \
         openimageio-tools \
         libopenimageio-dev \
+        liblensfun-dev \
         python3-pip
 
     # Install pixi
@@ -30,17 +31,20 @@ From: pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel
     if [ -f /opt/pixi.lock ]; then cp /opt/pixi.lock ./pixi.lock; fi
 
     # Install dependencies via pixi
+    export CONDA_OVERRIDE_CUDA=12.8
     pixi install
 
-    # Build and install rawtoaces with CUDA support (within pixi environment)
+    # Build and install rawtoaces with CUDA support
+    export PIXI_ENV_DIR="/opt/project/.pixi/envs/default"
+    export PATH="$PIXI_ENV_DIR/bin:$PATH"
     cd /tmp
     git clone https://github.com/AcademySoftwareFoundation/rawtoaces.git
     cd rawtoaces
-    pixi run cmake -S . -B build \
-        -DCMAKE_CUDA_COMPILER=/usr/bin/nvcc \
+    cmake -S . -B build \
+        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
         -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
-    pixi run cmake --build build
-    pixi run cmake --install build
+    cmake --build build
+    cmake --install build
     cd /tmp && rm -rf rawtoaces
 
     # Clean up to reduce image size

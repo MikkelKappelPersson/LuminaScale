@@ -14,6 +14,6 @@ mkdir -p $SINGULARITY_CACHEDIR $SINGULARITY_TMPDIR
 input_def="singularity/luminascale.def"
 
 # The resulting container image
-output_sif="singularity/luminascale.sif"
+output_sif="luminascale.sif"
 
 singularity build --fakeroot $output_sif $input_def

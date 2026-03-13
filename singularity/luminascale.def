@@ -1,10 +1,6 @@
 Bootstrap: docker
 From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
 
-%files
-    pixi.toml /opt/pixi.toml
-    pixi.lock /opt/pixi.lock
-
 %post
     apt-get update && apt-get install -y \
         curl \
@@ -12,54 +8,68 @@ From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
         cmake \
         git \
         build-essential \
+        exiftool \
+        libeigen3-dev \
         libceres-dev \
         nlohmann-json3-dev \
         libopencv-dev \
         openimageio-tools \
         libopenimageio-dev \
         liblensfun-dev \
-        python3-pip
+        libglib2.0-dev \
+        libtiff-dev \
+        libpng-dev \
+        python3-venv
 
-    # Install pixi
-    curl -fsSL https://pixi.sh/install.sh | bash
-    export PATH="/root/.pixi/bin:$PATH"
+    # Create Python virtual environment with system packages (PyTorch from base image)
+    python3 -m venv /opt/venv --system-site-packages
+    
+    # Activate venv and install dependencies
+    . /opt/venv/bin/activate
+    pip install --upgrade pip setuptools wheel
+    pip install --no-cache-dir \
+        hydra-core \
+        omegaconf \
+        scikit-image \
+        imageio \
+        tensorboard \
+        tqdm \
+        matplotlib \
+        jupyter \
+        scipy \
+        numpy \
+        nanobind \
+        openimageio
 
-    # Create working directory and setup pixi environment
-    mkdir -p /opt/project
-    cd /opt/project
-    cp /opt/pixi.toml ./pixi.toml
-    if [ -f /opt/pixi.lock ]; then cp /opt/pixi.lock ./pixi.lock; fi
-
-    # Install dependencies via pixi
-    export CONDA_OVERRIDE_CUDA=12.8
-    pixi install
-
-    # Build and install rawtoaces with CUDA support
-    export PIXI_ENV_DIR="/opt/project/.pixi/envs/default"
-    export PATH="$PIXI_ENV_DIR/bin:$PATH"
+    # Build and install rawtoaces (CPU-based, no CUDA support needed)
     cd /tmp
     git clone https://github.com/AcademySoftwareFoundation/rawtoaces.git
     cd rawtoaces
-    cmake -S . -B build \
-        -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
-        -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
-    cmake --build build
+    cmake -S . -B build
+    cmake --build build -j$(nproc)
     cmake --install build
     cd /tmp && rm -rf rawtoaces
+
+    # Create working directory
+    mkdir -p /opt/project
 
     # Clean up to reduce image size
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 %environment
     export LC_ALL=C
-    export PATH="/root/.pixi/bin:/opt/project/.pixi/envs/default/bin:$PATH"
+    export PYTHONUNBUFFERED=1
+    export PATH="/opt/venv/bin:${PATH}"
+    export VIRTUAL_ENV="/opt/venv"
 
 %runscript
     exec bash "$@"
 
 %test
     python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
-    python -c "import hydra; print(f'Hydra available')"
+    python -c "import hydra; print('Hydra available')"
+    rawtoaces --version
+    python -c "import sys; print(f'Python: {sys.executable}')"
 
 %labels
     Author Mikkel Kappel Persson
@@ -73,7 +83,15 @@ From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
     A containerized research environment for training and evaluating neural models
     that expand bit-depth and normalize color to ACES working space.
 
-    Usage:
-      singularity exec luminascale.sif python -c "print('hello world')"
-      singularity exec --nv luminascale.sif python scripts/train.py
+    Pre-installed packages: PyTorch 2.10, CUDA 12.8, Hydra, SciPy, rawtoaces, and more
+    Python venv: /opt/venv (activated by default)
+
+    Quick start:
       srun singularity exec --nv luminascale.sif python scripts/train.py
+      srun singularity exec luminascale.sif python -c "import torch; print(torch.cuda.is_available())"
+    
+    Install additional packages (creates/updates local venv):
+      srun singularity exec luminascale.sif pip install new-package
+    
+    Interactive shell:
+      srun singularity shell --nv luminascale.sif

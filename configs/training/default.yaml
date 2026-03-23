@@ -1,0 +1,14 @@
+# Local development configuration for dequantization training
+# Usage: python scripts/train_dequantization_net.py --config-name=default
+
+hdr_dir: ${oc.env:HDR_DIR,./data/hdr}
+ldr_dir: ${oc.env:LDR_DIR,./data/ldr}
+output_dir: ./checkpoints
+batch_size: 8
+epochs: 100
+learning_rate: 1e-4
+device: cuda
+checkpoint_freq: 10
+num_workers: 4
+model:
+  base_channels: 16

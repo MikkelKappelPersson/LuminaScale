@@ -160,6 +160,9 @@ venv.bak/
 # mkdocs documentation
 /site
 
+#temp dir
+/temp
+
 # mypy
 .mypy_cache/
 .dmypy.json

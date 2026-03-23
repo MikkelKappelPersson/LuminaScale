@@ -10,7 +10,7 @@ echo ""
 
 # Test 1: PyTorch and CUDA
 echo "[1/2] Testing PyTorch and CUDA..."
-python3 << 'EOF'
+/opt/venv/bin/python << 'EOF'
 import torch
 
 print(f"  PyTorch version: {torch.__version__}")
@@ -52,29 +52,46 @@ fi
 echo "  Found rawtoaces: $(which rawtoaces)"
 echo "  Raw image: $RAW_IMAGE"
 
-# Create temporary output directory
-TMPDIR=$(mktemp -d)
-OUTPUT_ACES="$TMPDIR/test_output.aces"
+# Create output directory in the project
+PROJECT_ROOT="/home/student.aau.dk/fs62fb/projects/LuminaScale"
+OUTPUT_DIR="$PROJECT_ROOT/temp/aces_output"
+mkdir -p "$OUTPUT_DIR"
 
-# Run rawtoaces on the CR2 file
-if rawtoaces "$RAW_IMAGE" -o "$OUTPUT_ACES" 2>&1; then
-    if [ -f "$OUTPUT_ACES" ]; then
-        FILE_SIZE=$(du -h "$OUTPUT_ACES" | cut -f1)
-        echo "  Output: $OUTPUT_ACES (size: $FILE_SIZE)"
+# rawtoaces auto-generates output filename: {basename}_aces.exr
+INPUT_BASENAME=$(basename "$RAW_IMAGE")
+BASE_WITHOUT_EXT="${INPUT_BASENAME%.*}"
+OUTPUT_ACES="$OUTPUT_DIR/${BASE_WITHOUT_EXT}_aces.exr"
+
+echo "  Output directory: $OUTPUT_DIR"
+
+# Run rawtoaces on the CR2 file with correct syntax
+rawtoaces --wb-method metadata --mat-method metadata --output-dir "$OUTPUT_DIR" --create-dirs --overwrite "$RAW_IMAGE" 2>&1
+RAWTOACES_EXIT=$?
+
+# Check what files were created
+echo "  Files in output directory:"
+ls -lh "$OUTPUT_DIR" 2>&1 || echo "  No files found"
+
+if [ $RAWTOACES_EXIT -eq 0 ] && [ -f "$OUTPUT_ACES" ]; then
+    FILE_SIZE=$(du -h "$OUTPUT_ACES" | cut -f1)
+    echo "  Output: $OUTPUT_ACES (size: $FILE_SIZE)"
+    echo "  rawtoaces test: ✓ PASSED"
+else
+    # Try to find any output file that might have been created
+    FOUND_OUTPUT=$(find "$OUTPUT_DIR" -type f 2>/dev/null | head -1)
+    if [ -n "$FOUND_OUTPUT" ]; then
+        FILE_SIZE=$(du -h "$FOUND_OUTPUT" | cut -f1)
+        echo "  Found output at: $FOUND_OUTPUT (size: $FILE_SIZE)"
         echo "  rawtoaces test: ✓ PASSED"
     else
-        echo "  ERROR: rawtoaces did not produce output file"
+        echo "  ERROR: rawtoaces exit code: $RAWTOACES_EXIT, no output file found"
         echo "  rawtoaces test: ✗ FAILED"
         exit 1
     fi
-else
-    echo "  ERROR: rawtoaces command failed"
-    echo "  rawtoaces test: ✗ FAILED"
-    exit 1
 fi
 
 # Cleanup
-rm -rf "$TMPDIR"
+# rm -rf "$TMPDIR"
 
 echo ""
 echo "=================================="

@@ -47,8 +47,8 @@ class DequantizationNet(nn.Module):
         decoder_in_ch = in_ch
         for level in range(num_levels - 1, -1, -1):
             out_ch = base_channels * (2 ** level)
-            skip_ch = out_ch if level > 0 else in_channels
-            block = self._make_decoder_block(decoder_in_ch + skip_ch, out_ch)
+            # Fix: The skip connection from encoder level N has 'out_ch' channels
+            block = self._make_decoder_block(decoder_in_ch + out_ch, out_ch)
             self.decoder_blocks.append(block)
             decoder_in_ch = out_ch
 

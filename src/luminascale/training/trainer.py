@@ -14,35 +14,67 @@ logger = logging.getLogger(__name__)
 
 
 class DequantizationDataset(Dataset):
-    """Dataset for paired LDR (low-quality) and HDR (high-quality) images."""
+    """Dataset for paired LDR (pre-baked) and HDR images."""
 
     def __init__(
-        self, hdr_dir: str | Path, ldr_dir: str | Path, file_pattern: str = "*.png"
+        self,
+        hdr_dir: str | Path,
+        ldr_dir: str | Path | None = None,
+        file_pattern: str = "*.exr",
+        crop_size: int = 512,
     ) -> None:
         from luminascale.utils.io import image_to_tensor
 
         self.hdr_dir = Path(hdr_dir)
-        self.ldr_dir = Path(ldr_dir)
-
+        # Default to 'ldr_look' sibling directory if not provided
+        self.ldr_dir = Path(ldr_dir) if ldr_dir else self.hdr_dir.parent / "ldr_look"
+        
         self.hdr_files = sorted(self.hdr_dir.glob(file_pattern))
+        self.crop_size = crop_size
+
         if not self.hdr_files:
             raise ValueError(f"No HDR images found in {hdr_dir}")
 
-        logger.info(f"Found {len(self.hdr_files)} HDR-LDR pairs")
+        # Verify LDR files exist
+        self.paired_files = []
+        for hdr_path in self.hdr_files:
+            ldr_path = self.ldr_dir / f"{hdr_path.stem}.png"
+            if ldr_path.exists():
+                self.paired_files.append((hdr_path, ldr_path))
+        
+        if not self.paired_files:
+            raise ValueError(f"No matching LDR images found in {self.ldr_dir}. Did you run bake_dataset.py?")
+
+        logger.info(f"Found {len(self.paired_files)} paired LDR/HDR images")
         self.image_to_tensor = image_to_tensor
 
     def __len__(self) -> int:
-        return len(self.hdr_files)
+        return len(self.paired_files)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        hdr_path = self.hdr_files[idx]
-        ldr_path = self.ldr_dir / hdr_path.name
+        hdr_path, ldr_path = self.paired_files[idx]
 
-        if not ldr_path.exists():
-            raise FileNotFoundError(f"LDR image not found: {ldr_path}")
+        # 1. Load pre-baked LDR (fast PNG decode)
+        import imageio.v3 as iio
+        ldr_pixels = iio.imread(ldr_path)
+        
+        # 2. Convert to tensor [0, 1]
+        ldr_tensor = torch.from_numpy(ldr_pixels).permute(2, 0, 1).float() / 255.0
 
-        ldr_tensor = self.image_to_tensor(ldr_path)
+        # 3. Load HDR reference
         hdr_tensor = self.image_to_tensor(hdr_path)
+
+        # 4. Random Crop (common to both)
+        c, h, w = ldr_tensor.shape
+        if h < self.crop_size or w < self.crop_size:
+            import torch.nn.functional as F
+            ldr_tensor = F.interpolate(ldr_tensor.unsqueeze(0), size=(self.crop_size, self.crop_size), mode='bilinear').squeeze(0)
+            hdr_tensor = F.interpolate(hdr_tensor.unsqueeze(0), size=(self.crop_size, self.crop_size), mode='bilinear').squeeze(0)
+        else:
+            top = torch.randint(0, h - self.crop_size + 1, (1,)).item()
+            left = torch.randint(0, w - self.crop_size + 1, (1,)).item()
+            ldr_tensor = ldr_tensor[:, top:top+self.crop_size, left:left+self.crop_size]
+            hdr_tensor = hdr_tensor[:, top:top+self.crop_size, left:left+self.crop_size]
 
         return ldr_tensor, hdr_tensor
 
@@ -86,6 +118,32 @@ class DequantizationTrainer:
         self.device = device
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         self.logger = logger
+
+        # Log system information
+        self._log_system_info()
+
+    def _log_system_info(self) -> None:
+        """Log CPU, GPU, and CUDA information."""
+        import psutil
+        
+        cpu_count = psutil.cpu_count(logical=False)
+        cpu_threads = psutil.cpu_count(logical=True)
+        ram_gb = psutil.virtual_memory().total / (1024**3)
+        
+        self.logger.info(f"System: {cpu_count} CPU cores ({cpu_threads} threads), {ram_gb:.1f} GB RAM")
+        
+        if self.device.type == "cuda":
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(self.device)
+                vram_free, vram_total = torch.cuda.mem_get_info(self.device)
+                self.logger.info(
+                    f"CUDA: Using GPU '{gpu_name}' "
+                    f"({vram_free / 1024**2:.0f}MB / {vram_total / 1024**2:.0f}MB VRAM free)"
+                )
+            else:
+                self.logger.warning("CUDA device requested but torch.cuda.is_available() is False!")
+        else:
+            self.logger.info(f"Using CPU device: {self.device}")
 
     def train_epoch(self, dataloader: DataLoader) -> float:
         """Train for one epoch and return average loss."""
@@ -133,7 +191,7 @@ class DequantizationTrainer:
         for epoch in range(num_epochs):
             avg_loss = self.train_epoch(train_dataloader)
             self.logger.info(
-                f"Epoch {epoch + 1}/{num_epochs}, Avg Loss: {avg_loss:.6f}"
+                f"Epoch {epoch + 1}/{num_epochs}, Avg Loss: {avg_loss:.4f}"
             )
 
             if checkpoint_dir and (epoch + 1) % checkpoint_freq == 0:

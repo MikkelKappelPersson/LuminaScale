@@ -26,14 +26,32 @@ def image_to_tensor(image_path: Path | str) -> torch.Tensor:
     The bit depth is inferred from the numpy dtype of the loaded image.
 
     Args:
-        image_path: Path or string pointing to an image file that PIL can
-            open (PNG, JPEG, TIFF, etc.).
+        image_path: Path or string pointing to an image file.
+            Supports formats PIL can open, plus EXR using OpenImageIO.
 
     Returns:
         Tensor of shape ``[C, H, W]`` with ``dtype=torch.float32`` and
         values scaled to ``[0.0, 1.0]``.
     """
-    # Load image, convert to RGB
+    image_path = Path(image_path)
+    
+    # Handle EXR using OpenImageIO
+    if image_path.suffix.lower() == ".exr":
+        buf = oiio.ImageBuf(str(image_path))
+        if not buf.initialized:
+            raise ValueError(f"Could not load EXR file: {image_path}")
+        
+        # OpenImageIO returns [H, W, C]
+        array = np.asarray(buf.get_pixels(), dtype=np.float32)
+        
+        # Ensure RGB
+        if array.shape[2] > 3:
+            array = array[:, :, :3]
+            
+        tensor = torch.from_numpy(array).float()
+        return tensor.permute(2, 0, 1)
+
+    # Standard formats via PIL
     with Image.open(image_path) as img:
         if img.mode != "RGB":
             img = img.convert("RGB")
@@ -216,7 +234,7 @@ def aces_to_display(
     return np.asarray(pixels, dtype=np.float32)
 
 
-def apply_random_look_to_image(
+def aces_to_srgb_with_look(
     aces_image_path: Path | str,
     cdl_params: CDLParameters,
     display: str = "sRGB - Display",

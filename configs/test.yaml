@@ -1,0 +1,14 @@
+# Small test configuration for debugging the training pipeline
+# Usage: python scripts/train_dequantization_net.py --config-name=test
+
+# Explicitly define values
+hdr_dir: /mnt/Projects/Projects/med8_project/LuminaScale/dataset/temp/aces
+output_dir: /mnt/Projects/Projects/med8_project/LuminaScale/dataset/temp/test_run
+batch_size: 2
+epochs: 1
+learning_rate: 1e-4
+checkpoint_freq: 1
+device: cuda
+num_workers: 0
+model:
+  base_channels: 8

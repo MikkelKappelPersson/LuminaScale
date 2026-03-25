@@ -14,6 +14,10 @@ from pathlib import Path
 import torch
 from PIL import Image
 import numpy as np
+import OpenImageIO as oiio
+import tempfile
+import os
+from .look_generator import CDLParameters  # <--- ADD THIS IMPORT
 
 
 def image_to_tensor(image_path: Path | str) -> torch.Tensor:
@@ -148,3 +152,134 @@ def convert_to_aces(
         "errors": errors,
         "output_dir": str(aces_dir),
     }
+
+
+def aces_to_display(
+    aces_image_path: Path | str,
+    looks: str | None = None,
+    display: str = "sRGB - Display",
+    view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
+) -> np.ndarray:
+    """Convert ACES image to display-referred using OpenImageIO's ociodisplay.
+
+    Applies the Academy Color Encoding System (ACES) rendering transform
+    (RRT + ODT) to convert from scene-referred ACES to display-referred [0, 1].
+    Optionally applies OCIO looks for creative color grading variations.
+
+    Args:
+        aces_image_path: Path to ACES EXR image file.
+        looks: OCIO look to apply (e.g., "ACES 1.3 Reference Gamut Compression"),
+               or None for baseline (no looks).
+        display: OCIO display name. Default uses sRGB display. Available displays
+                 can be checked with get_available_looks() or by inspecting OCIO config.
+        view: OCIO view name for the display. Default uses ACES 2.0 SDR view.
+
+    Returns:
+        Numpy array of shape ``[H, W, C]`` with ``dtype=float32`` and values
+        in ``[0.0, 1.0]`` range (display-referred).
+
+    Raises:
+        ImportError: If OpenImageIO is not installed.
+        FileNotFoundError: If image file does not exist.
+        RuntimeError: If ociodisplay conversion fails.
+    """
+    if oiio is None:
+        raise ImportError(
+            "OpenImageIO is required for aces_to_display. "
+            "Install it via: pixi install openimageio"
+        )
+
+    aces_path = Path(aces_image_path)
+    if not aces_path.exists():
+        raise FileNotFoundError(f"ACES image not found: {aces_path}")
+
+    # Load ACES image
+    buf_aces = oiio.ImageBuf(str(aces_path))
+
+    # Apply ociodisplay (RRT + ODT transforms) with optional looks
+    buf_display = oiio.ImageBufAlgo.ociodisplay(
+        buf_aces,
+        display=display,
+        view=view,
+        fromspace="",
+        looks=looks or "",
+        unpremult=True,
+    )
+
+    if not buf_display.initialized:
+        raise RuntimeError(
+            f"ociodisplay conversion failed for {aces_path.name}"
+        )
+
+    # Extract pixels and return as numpy array [H, W, C]
+    pixels = buf_display.get_pixels()
+    return np.asarray(pixels, dtype=np.float32)
+
+
+def apply_random_look_to_image(
+    aces_image_path: Path | str,
+    cdl_params: CDLParameters,
+    display: str = "sRGB - Display",
+    view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
+) -> np.ndarray:
+    """
+    Applies a specific CDL look to an ACES image and returns the display-referred array.
+    """
+    if oiio is None:
+        raise ImportError("OpenImageIO is required.")
+
+    # 1. Write the CDL to a temporary file for OIIO to read
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".cc", delete=False) as f:
+        f.write(cdl_params.to_cdl_xml())
+        cdl_file_path = f.name
+
+    try:
+        # 2. Load the ACES source
+        buf = oiio.ImageBuf(str(aces_image_path))
+
+        # 3. Apply the CDL (FileTransform)
+        # Note: We assume the image is already in the 'process_space' (ACEScg)
+        buf_graded = oiio.ImageBufAlgo.ociofiletransform(buf, cdl_file_path)
+
+        # 4. Convert to Display Space (RRT+ODT)
+        buf_display = oiio.ImageBufAlgo.ociodisplay(
+            buf_graded, display=display, view=view, unpremult=True
+        )
+
+        if not buf_display.initialized:
+            raise RuntimeError("OIIO Display transformation failed.")
+
+        return np.asarray(buf_display.get_pixels(), dtype=np.float32)
+
+    finally:
+        if os.path.exists(cdl_file_path):
+            os.remove(cdl_file_path)
+
+
+def apply_lut_to_image(
+    aces_image_path: Path | str,
+    lut_path: Path | str,
+) -> np.ndarray:
+    if oiio is None:
+        raise ImportError("OpenImageIO is required.")
+
+    # 1. Load Linear ACEScg
+    buf = oiio.ImageBuf(str(aces_image_path))
+
+    # 2. Convert to sRGB - Texture (This handles the highlight compression)
+    buf_srgb = oiio.ImageBufAlgo.colorconvert(
+        buf, fromspace="ACEScg", tospace="sRGB - Texture"
+    )
+
+    # 3. Apply the LUT
+    buf_graded = oiio.ImageBufAlgo.ociofiletransform(buf_srgb, str(lut_path))
+
+    # 4. FINAL STEP: If images are too bright/washed out,
+    # the LUT has already applied the display transform.
+    # We just return the pixels. If they look too dark, we can add
+    # a simple sRGB gamma convert here.
+
+    if not buf_graded.initialized:
+        raise RuntimeError(f"OIIO failed to apply LUT: {lut_path}")
+
+    return np.asarray(buf_graded.get_pixels(), dtype=np.float32)

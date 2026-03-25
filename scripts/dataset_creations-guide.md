@@ -1,4 +1,4 @@
-# guide to create the full dataset
+# Guide to create the full dataset
 
 in order to run quality check and create aces EXR files, run:
 ````
@@ -10,7 +10,7 @@ for pixi:
 pixi run python scripts/quality_filtered_aces_conversion.py
 ```
 
-only some images:
+Only some images:
 ```
 pixi run python scripts/quality_filtered_aces_conversion.py --max-images=10
 ```

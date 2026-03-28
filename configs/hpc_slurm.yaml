@@ -12,6 +12,5 @@ checkpoint_freq: 5  # More frequent checkpoints in long-running jobs
 num_workers: 8  # More CPU workers for data loading
 
 # Data paths (override in sbatch script or pass --srgb_dir /lustre/...)
-hdr_dir: ${oc.env:HDR_DIR,/lustre/scratch/fs62fb/data/hdr}
-srgb_dir: ${oc.env:SRGB_DIR,/lustre/scratch/fs62fb/data/srgb_looks}
+lmdb_path: ${oc.env:LMDB_PATH,/lustre/scratch/fs62fb/dataset/training_data.lmdb}
 output_dir: ${oc.env:OUTPUT_DIR,/lustre/scratch/fs62fb/checkpoints}

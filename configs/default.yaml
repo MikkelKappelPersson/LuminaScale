@@ -1,8 +1,7 @@
 # Local development configuration for dequantization training
 # Usage: python scripts/train_dequantization_net.py --config-name=default
 
-hdr_dir: ${oc.env:HDR_DIR,./data/hdr}
-srgb_dir: ${oc.env:SRGB_DIR,./data/srgb_looks}
+lmdb_path: ${oc.env:LMDB_PATH,./dataset/training_data.lmdb}
 output_dir: ./checkpoints
 batch_size: 8
 epochs: 100

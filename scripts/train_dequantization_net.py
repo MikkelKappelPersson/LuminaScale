@@ -58,11 +58,16 @@ def main(cfg: DictConfig) -> None:
 
     logger.info(f"Device: {device}")
     logger.info(f"HDR directory: {cfg.hdr_dir}")
-    logger.info(f"sRGB directory: {cfg.get('srgb_dir', 'Not specified (using default)')}")
+    logger.info(f"sRGB directory: {cfg.get('srgb_dir', 'Not specified')}")
+    logger.info(f"LMDB path: {cfg.get('lmdb_path', 'None')}")
     logger.info(f"Output directory: {cfg.output_dir}")
 
     # Create dataset and dataloader
-    dataset = DequantizationDataset(cfg.hdr_dir, srgb_dir=cfg.get("srgb_dir"))
+    dataset = DequantizationDataset(
+        hdr_dir=cfg.hdr_dir, 
+        srgb_dir=cfg.get("srgb_dir"),
+        lmdb_path=cfg.get("lmdb_path")
+    )
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=cfg.batch_size,

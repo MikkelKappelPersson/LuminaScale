@@ -38,8 +38,7 @@ def image_to_tensor(image_path: Path | str) -> torch.Tensor:
     # Handle EXR using OpenImageIO
     if image_path.suffix.lower() == ".exr":
         buf = oiio.ImageBuf(str(image_path))
-        if not buf.initialized:
-            raise ValueError(f"Could not load EXR file: {image_path}")
+        assert buf.initialized, f"Could not load EXR file: {image_path}"
         
         # OpenImageIO returns [H, W, C]
         array = np.asarray(buf.get_pixels(), dtype=np.float32)
@@ -65,8 +64,7 @@ def image_to_tensor(image_path: Path | str) -> torch.Tensor:
     }
     bit_depth = dtype_to_bits.get(array.dtype, 8)
 
-    if bit_depth not in [8, 10, 12, 16]:
-        raise ValueError(f"Unsupported bit-depth: {bit_depth}")
+    assert bit_depth in [8, 10, 12, 16], f"Unsupported bit-depth: {bit_depth}"
 
     max_value = (2 ** bit_depth) - 1
 
@@ -110,8 +108,7 @@ def convert_to_aces(
     raw_dir = Path(raw_dir).resolve()
     aces_dir = Path(aces_dir).resolve()
 
-    if not raw_dir.exists():
-        raise FileNotFoundError(f"RAW directory not found: {raw_dir}")
+    assert raw_dir.exists(), f"RAW directory not found: {raw_dir}"
 
     # Create output directory
     aces_dir.mkdir(parents=True, exist_ok=True)
@@ -125,7 +122,7 @@ def convert_to_aces(
             timeout=5,
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        raise RuntimeError(
+        assert False, (
             "rawtoaces command not found or not executable. "
             "Please ensure rawtoaces is installed and in your PATH."
         )
@@ -195,21 +192,14 @@ def aces_to_display(
     Returns:
         Numpy array of shape ``[H, W, C]`` with ``dtype=float32`` and values
         in ``[0.0, 1.0]`` range (display-referred).
-
-    Raises:
-        ImportError: If OpenImageIO is not installed.
-        FileNotFoundError: If image file does not exist.
-        RuntimeError: If ociodisplay conversion fails.
     """
-    if oiio is None:
-        raise ImportError(
-            "OpenImageIO is required for aces_to_display. "
-            "Install it via: pixi install openimageio"
-        )
+    assert oiio is not None, (
+        "OpenImageIO is required for aces_to_display. "
+        "Install it via: pixi install openimageio"
+    )
 
     aces_path = Path(aces_image_path)
-    if not aces_path.exists():
-        raise FileNotFoundError(f"ACES image not found: {aces_path}")
+    assert aces_path.exists(), f"ACES image not found: {aces_path}"
 
     # Load ACES image
     buf_aces = oiio.ImageBuf(str(aces_path))
@@ -224,14 +214,8 @@ def aces_to_display(
         unpremult=True,
     )
 
-    if not buf_display.initialized:
-        raise RuntimeError(
-            f"ociodisplay conversion failed for {aces_path.name}"
-        )
-
-    # Extract pixels and return as numpy array [H, W, C]
-    pixels = buf_display.get_pixels()
-    return np.asarray(pixels, dtype=np.float32)
+    assert buf_display.initialized, f"ociodisplay conversion failed for {aces_path.name}"
+    return np.asarray(buf_display.get_pixels(), dtype=np.float32)
 
 
 def aces_to_srgb_with_look(
@@ -240,13 +224,12 @@ def aces_to_srgb_with_look(
     display: str = "sRGB - Display",
     view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
 ) -> np.ndarray:
-    """
-    Applies a specific CDL look to an ACES image and returns the display-referred array.
-    """
-    if oiio is None:
-        raise ImportError("OpenImageIO is required.")
+    """Apply CDL look to ACES image and convert to display space using OIIO.
 
-    # 1. Write the CDL to a temporary file for OIIO to read
+    This avoids direct PyOpenColorIO dependency by using OIIO's ImageBufAlgo.
+    """
+    assert oiio is not None, "OpenImageIO is required."
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=".cc", delete=False) as f:
         f.write(cdl_params.to_cdl_xml())
         cdl_file_path = f.name
@@ -265,7 +248,7 @@ def aces_to_srgb_with_look(
         )
 
         if not buf_display.initialized:
-            raise RuntimeError("OIIO Display transformation failed.")
+            assert False, "OIIO Display transformation failed."
 
         return np.asarray(buf_display.get_pixels(), dtype=np.float32)
 
@@ -278,8 +261,7 @@ def apply_lut_to_image(
     aces_image_path: Path | str,
     lut_path: Path | str,
 ) -> np.ndarray:
-    if oiio is None:
-        raise ImportError("OpenImageIO is required.")
+    assert oiio is not None, "OpenImageIO is required."
 
     # 1. Load Linear ACEScg
     buf = oiio.ImageBuf(str(aces_image_path))
@@ -297,7 +279,6 @@ def apply_lut_to_image(
     # We just return the pixels. If they look too dark, we can add
     # a simple sRGB gamma convert here.
 
-    if not buf_graded.initialized:
-        raise RuntimeError(f"OIIO failed to apply LUT: {lut_path}")
+    assert buf_graded.initialized, f"OIIO failed to apply LUT: {lut_path}"
 
     return np.asarray(buf_graded.get_pixels(), dtype=np.float32)

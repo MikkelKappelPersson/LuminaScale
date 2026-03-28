@@ -2,7 +2,7 @@
 # Usage: python scripts/train_dequantization_net.py --config-name=test
 
 # Explicitly define values
-lmdb_path: /mnt/MKP01/med8_project/LuminaScale/dataset/training_data.lmdb
+lmdb_path: /run/media/mikkelkp/66763EB0763E813B/Med_8/training_data.lmdb
 output_dir: /mnt/MKP01/med8_project/LuminaScale/dataset/temp/test_run
 batch_size: 1
 epochs: 1

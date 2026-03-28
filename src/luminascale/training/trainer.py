@@ -49,8 +49,7 @@ class DequantizationDataset(Dataset):
             self.srgb_dir = Path(srgb_dir) if srgb_dir else self.hdr_dir.parent / "srgb_looks"
             
             self.hdr_files = sorted(self.hdr_dir.glob(file_pattern))
-            if not self.hdr_files:
-                raise ValueError(f"No HDR images found in {hdr_dir}")
+            assert self.hdr_files, f"No HDR images found in {hdr_dir}"
 
             self.paired_files = []
             for hdr_path in self.hdr_files:
@@ -58,8 +57,7 @@ class DequantizationDataset(Dataset):
                 if srgb_path.exists():
                     self.paired_files.append((hdr_path, srgb_path))
             
-            if not self.paired_files:
-                raise ValueError(f"No matching sRGB images found in {self.srgb_dir}. Did you run bake/pack scripts?")
+            assert self.paired_files, f"No matching sRGB images found in {self.srgb_dir}. Did you run bake/pack scripts?"
 
             logger.info(f"Initialized Folder dataset with {len(self.paired_files)} images")
             self.image_to_tensor = image_to_tensor

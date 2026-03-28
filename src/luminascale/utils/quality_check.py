@@ -171,119 +171,50 @@ def batch_quality_check(
 
 
 def load_image_as_uint8(path: Path | str, verbose: bool = False) -> Optional[np.ndarray]:
-    """Load RAW camera image and convert to uint8 (0-255).
+    """Load image and convert to uint8 (0-255) using OpenImageIO.
     
-    Tries loaders in order: imageio (best), rawpy, OpenImageIO (may be tone-mapped).
-    For accurate quality metrics, imageio or rawpy is strongly recommended.
-    """
-    path_str = str(path).lower()
-    
-    try:
-        raw_extensions = {'.cr2', '.crw', '.nef', '.nrw', '.arw', '.raf', '.dng', '.raw'}
-        if any(path_str.endswith(ext) for ext in raw_extensions):
-            # Try imageio first
-            try:
-                import imageio
-                img_array = imageio.imread(str(path))
-                
-                if verbose:
-                    print(f"  [imageio] dtype={img_array.dtype}, shape={img_array.shape}")
-                
-                # Normalize to 0-255
-                if img_array.dtype in [np.float32, np.float64]:
-                    img_min, img_max = img_array.min(), img_array.max()
-                    if img_max > img_min:
-                        normalized = ((img_array - img_min) / (img_max - img_min) * 255).astype(np.uint8)
-                    else:
-                        normalized = img_array.astype(np.uint8)
-                else:
-                    normalized = img_array.astype(np.uint8)
-                
-                if normalized.ndim == 3 and normalized.shape[2] > 3:
-                    normalized = normalized[:, :, :3]
-                elif normalized.ndim == 2:
-                    normalized = np.stack([normalized] * 3, axis=2)
-                
-                if verbose:
-                    print(f"  [imageio SUCCESS]")
-                return normalized
-            except ImportError:
-                pass
-            except Exception as e:
-                if verbose:
-                    print(f"  [imageio FAILED] {e}")
-            
-            # Try rawpy
-            try:
-                import rawpy
-                with rawpy.imread(str(path)) as raw:
-                    raw_data = raw.raw_image.astype(np.float32)
-                    
-                    if verbose:
-                        print(f"  [rawpy] dtype={raw_data.dtype}, shape={raw_data.shape}")
-                    
-                    img_min, img_max = raw_data.min(), raw_data.max()
-                    if img_max > img_min:
-                        normalized = ((raw_data - img_min) / (img_max - img_min) * 255).astype(np.uint8)
-                    else:
-                        normalized = raw_data.astype(np.uint8)
-                    
-                    if normalized.ndim == 2:
-                        normalized = np.stack([normalized] * 3, axis=2)
-                    
-                    if verbose:
-                        print(f"  [rawpy SUCCESS]")
-                    return normalized
-            except ImportError:
-                pass
-            except Exception as e:
-                if verbose:
-                    print(f"  [rawpy FAILED] {e}")
-            
-            # OpenImageIO as last resort
-            try:
-                import OpenImageIO as oiio
-                inp = oiio.ImageInput.open(str(path))
-                if inp:
-                    image_spec = inp.spec()
-                    img_array = inp.read_image()
-                    inp.close()
-                    
-                    if verbose and img_array.max() <= 1.0:
-                        print(f"  [OpenImageIO] WARNING: Tone-mapped [0,1] data")
-                    
-                    h, w, c = image_spec.height, image_spec.width, image_spec.nchannels
-                    img_array = img_array.reshape(h, w, c)
-                    
-                    # Normalize
-                    if img_array.dtype in [np.float32, np.float64]:
-                        img_min, img_max = img_array.min(), img_array.max()
-                        if img_max > img_min and img_max <= 1.0:
-                            normalized = (img_array * 255).astype(np.uint8)
-                        elif img_max > img_min:
-                            normalized = ((img_array - img_min) / (img_max - img_min) * 255).astype(np.uint8)
-                        else:
-                            normalized = img_array.astype(np.uint8)
-                    else:
-                        normalized = img_array.astype(np.uint8)
-                    
-                    if normalized.ndim == 3 and normalized.shape[2] > 3:
-                        normalized = normalized[:, :, :3]
-                    elif normalized.ndim == 2:
-                        normalized = np.stack([normalized] * 3, axis=2)
-                    
-                    if verbose:
-                        print(f"  [OpenImageIO SUCCESS]")
-                    return normalized
-            except ImportError:
-                pass
-            except Exception as e:
-                if verbose:
-                    print(f"  [OpenImageIO FAILED] {e}")
-            
-            return None
+    Args:
+        path: Path to image file.
+        verbose: Print debug info during loading.
         
+    Returns:
+        Numpy array [H, W, 3] as uint8, or None if loading fails.
+    """
+    import OpenImageIO as oiio
+    
+    buf = oiio.ImageBuf(str(path))
+    if not buf.initialized:
+        if verbose:
+            print(f"  [OpenImageIO FAILED] Could not open {path}")
         return None
-    except Exception as e:
-        print(f"Error loading {path}: {e}")
-        return None
+
+    # Get pixels as float32 for normalization
+    img_array = buf.get_pixels(oiio.TypeFloat)
+    assert img_array is not None, f"Failed to get pixels from {path}"
+    
+    if verbose:
+        print(f"  [OpenImageIO] shape={img_array.shape}, dtype={img_array.dtype}")
+
+    # Ensure RGB
+    if img_array.shape[2] > 3:
+        img_array = img_array[:, :, :3]
+    elif img_array.shape[2] == 1:
+        img_array = np.stack([img_array.squeeze(2)] * 3, axis=2)
+
+    # Normalize to 0-255
+    img_min, img_max = img_array.min(), img_array.max()
+    
+    if img_max > img_min:
+        # If it's already in [0, 1] (typical for tone-mapped/standard images)
+        if img_max <= 1.0:
+            normalized = (img_array * 255).astype(np.uint8)
+        else:
+            # HDR normalization: scale full range to 0-255
+            normalized = ((img_array - img_min) / (img_max - img_min) * 255).astype(np.uint8)
+    else:
+        normalized = img_array.astype(np.uint8)
+
+    if verbose:
+        print(f"  [OpenImageIO SUCCESS]")
+        
+    return normalized

@@ -2,7 +2,7 @@
 # Usage: python scripts/train_dequantization_net.py --config-name=default
 
 hdr_dir: ${oc.env:HDR_DIR,./data/hdr}
-ldr_dir: ${oc.env:LDR_DIR,./data/ldr}
+srgb_dir: ${oc.env:SRGB_DIR,./data/srgb_looks}
 output_dir: ./checkpoints
 batch_size: 8
 epochs: 100

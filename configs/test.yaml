@@ -3,12 +3,13 @@
 
 # Explicitly define values
 hdr_dir: /mnt/Projects/Projects/med8_project/LuminaScale/dataset/temp/aces
+srgb_dir: /mnt/Projects/Projects/med8_project/LuminaScale/dataset/temp/srgb_looks
 output_dir: /mnt/Projects/Projects/med8_project/LuminaScale/dataset/temp/test_run
-batch_size: 2
+batch_size: 8
 epochs: 1
 learning_rate: 1e-4
 checkpoint_freq: 1
 device: cuda
-num_workers: 0
+num_workers: 8
 model:
-  base_channels: 8
+  base_channels: 32

@@ -5,7 +5,7 @@ This script iterates through ACES EXR files, applies a random CDL look,
 and saves the result as an 8-bit sRGB PNG to eliminate the CPU bottleneck during training.
 
 Usage:
-    python scripts/bake_dataset.py --input-dir dataset/temp/aces --output-dir dataset/temp/ldr_look
+    python scripts/bake_dataset.py --input-dir dataset/temp/aces --output-dir dataset/temp/srgb_looks
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ src_dir = project_root / "src"
 sys.path.insert(0, str(src_dir))
 
 from luminascale.utils.look_generator import get_single_random_look
-from luminascale.utils.io import aces_to_srgb_with_look
+from luminascale.utils.io import aces_to_srgb_with_look, aces_to_display
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bake LDR dataset from ACES EXRs")
@@ -37,8 +37,14 @@ def main() -> int:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=str(project_root / "dataset" / "temp" / "ldr_look"),
-        help="Output directory for generated LDR PNGs",
+        default=str(project_root / "dataset" / "temp" / "srgb_looks"),
+        help="Output directory for generated sRGB PNGs",
+    )
+    parser.add_argument(
+        "--natural-ratio",
+        type=float,
+        default=0.5,
+        help="Ratio of images to have NO look (natural) applied (0.0=all graded, 0.5=half natural)",
     )
     
     args = parser.parse_args()
@@ -57,15 +63,20 @@ def main() -> int:
         return 1
         
     print(f"🚀 Baking {len(exr_files)} images from {input_dir} to {output_dir}")
+    print(f"📊 Natural ratio: {args.natural_ratio:.2f} (approx. every {1.0/args.natural_ratio:.1f} image)")
     
-    for img_path in tqdm(exr_files, desc="Baking"):
+    for i, img_path in enumerate(tqdm(exr_files, desc="Baking")):
         try:
-            # 1. Generate unique random look
-            random_look = get_single_random_look()
+            # Decide if this should be a "natural" image or "graded"
+            is_natural = (i % int(1.0 / args.natural_ratio)) == 0 if args.natural_ratio > 0 else False
             
-            # 2. Convert ACES -> Graded -> sRGB
-            # Returns a float32 array in [0, 1] range
-            pixels = aces_to_srgb_with_look(img_path, random_look)
+            if is_natural:
+                # ACES -> sRGB (Natural)
+                pixels = aces_to_display(img_path)
+            else:
+                # ACES -> Graded -> sRGB (Look)
+                random_look = get_single_random_look()
+                pixels = aces_to_srgb_with_look(img_path, random_look)
             
             # 3. Ensure RGB format and clip
             if pixels.shape[2] == 4:

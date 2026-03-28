@@ -11,7 +11,7 @@ learning_rate: 5e-5  # Slightly smaller LR for stability with larger batches
 checkpoint_freq: 5  # More frequent checkpoints in long-running jobs
 num_workers: 8  # More CPU workers for data loading
 
-# Data paths (override in sbatch script or pass --hdr_dir /lustre/...)
+# Data paths (override in sbatch script or pass --srgb_dir /lustre/...)
 hdr_dir: ${oc.env:HDR_DIR,/lustre/scratch/fs62fb/data/hdr}
-ldr_dir: ${oc.env:LDR_DIR,/lustre/scratch/fs62fb/data/ldr}
+srgb_dir: ${oc.env:SRGB_DIR,/lustre/scratch/fs62fb/data/srgb_looks}
 output_dir: ${oc.env:OUTPUT_DIR,/lustre/scratch/fs62fb/checkpoints}

@@ -19,15 +19,15 @@ class DequantizationDataset(Dataset):
     def __init__(
         self,
         hdr_dir: str | Path,
-        ldr_dir: str | Path | None = None,
+        srgb_dir: str | Path | None = None,
         file_pattern: str = "*.exr",
         crop_size: int = 512,
     ) -> None:
         from luminascale.utils.io import image_to_tensor
 
         self.hdr_dir = Path(hdr_dir)
-        # Default to 'ldr_look' sibling directory if not provided
-        self.ldr_dir = Path(ldr_dir) if ldr_dir else self.hdr_dir.parent / "ldr_look"
+        # Default to 'srgb_looks' sibling directory if not provided
+        self.srgb_dir = Path(srgb_dir) if srgb_dir else self.hdr_dir.parent / "srgb_looks"
         
         self.hdr_files = sorted(self.hdr_dir.glob(file_pattern))
         self.crop_size = crop_size
@@ -35,48 +35,48 @@ class DequantizationDataset(Dataset):
         if not self.hdr_files:
             raise ValueError(f"No HDR images found in {hdr_dir}")
 
-        # Verify LDR files exist
+        # Verify sRGB files exist
         self.paired_files = []
         for hdr_path in self.hdr_files:
-            ldr_path = self.ldr_dir / f"{hdr_path.stem}.png"
-            if ldr_path.exists():
-                self.paired_files.append((hdr_path, ldr_path))
+            srgb_path = self.srgb_dir / f"{hdr_path.stem}.png"
+            if srgb_path.exists():
+                self.paired_files.append((hdr_path, srgb_path))
         
         if not self.paired_files:
-            raise ValueError(f"No matching LDR images found in {self.ldr_dir}. Did you run bake_dataset.py?")
+            raise ValueError(f"No matching sRGB images found in {self.srgb_dir}. Did you run bake_dataset.py?")
 
-        logger.info(f"Found {len(self.paired_files)} paired LDR/HDR images")
+        logger.info(f"Found {len(self.paired_files)} paired sRGB/HDR images")
         self.image_to_tensor = image_to_tensor
 
     def __len__(self) -> int:
         return len(self.paired_files)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        hdr_path, ldr_path = self.paired_files[idx]
+        hdr_path, srgb_path = self.paired_files[idx]
 
-        # 1. Load pre-baked LDR (fast PNG decode)
+        # 1. Load pre-baked sRGB (fast PNG decode)
         import imageio.v3 as iio
-        ldr_pixels = iio.imread(ldr_path)
+        srgb_pixels = iio.imread(srgb_path)
         
         # 2. Convert to tensor [0, 1]
-        ldr_tensor = torch.from_numpy(ldr_pixels).permute(2, 0, 1).float() / 255.0
+        srgb_tensor = torch.from_numpy(srgb_pixels).permute(2, 0, 1).float() / 255.0
 
         # 3. Load HDR reference
         hdr_tensor = self.image_to_tensor(hdr_path)
 
         # 4. Random Crop (common to both)
-        c, h, w = ldr_tensor.shape
+        c, h, w = srgb_tensor.shape
         if h < self.crop_size or w < self.crop_size:
             import torch.nn.functional as F
-            ldr_tensor = F.interpolate(ldr_tensor.unsqueeze(0), size=(self.crop_size, self.crop_size), mode='bilinear').squeeze(0)
+            srgb_tensor = F.interpolate(srgb_tensor.unsqueeze(0), size=(self.crop_size, self.crop_size), mode='bilinear').squeeze(0)
             hdr_tensor = F.interpolate(hdr_tensor.unsqueeze(0), size=(self.crop_size, self.crop_size), mode='bilinear').squeeze(0)
         else:
             top = torch.randint(0, h - self.crop_size + 1, (1,)).item()
             left = torch.randint(0, w - self.crop_size + 1, (1,)).item()
-            ldr_tensor = ldr_tensor[:, top:top+self.crop_size, left:left+self.crop_size]
+            srgb_tensor = srgb_tensor[:, top:top+self.crop_size, left:left+self.crop_size]
             hdr_tensor = hdr_tensor[:, top:top+self.crop_size, left:left+self.crop_size]
 
-        return ldr_tensor, hdr_tensor
+        return srgb_tensor, hdr_tensor
 
 
 def exposure_mask(

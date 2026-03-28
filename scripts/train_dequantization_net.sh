@@ -25,7 +25,7 @@ source ~/.venv/bin/activate 2>/dev/null || source ~/miniconda3/bin/activate lumi
 
 # Set data paths (override with --hdr_dir if needed)
 export HDR_DIR="${HDR_DIR:-/lustre/scratch/fs62fb/data/hdr}"
-export LDR_DIR="${LDR_DIR:-/lustre/scratch/fs62fb/data/ldr}"
+export SRGB_DIR="${SRGB_DIR:-/lustre/scratch/fs62fb/data/srgb_looks}"
 export OUTPUT_DIR="${OUTPUT_DIR:-/lustre/scratch/fs62fb/checkpoints}"
 
 # Ensure output directories exist
@@ -37,7 +37,7 @@ python scripts/train_dequantization_net.py \
   --config-path=configs \
   --config-name=hpc_slurm \
   hdr_dir="$HDR_DIR" \
-  ldr_dir="$LDR_DIR" \
+  srgb_dir="$SRGB_DIR" \
   output_dir="$OUTPUT_DIR"
 
 echo "Training completed with exit code: $?"

@@ -11,67 +11,11 @@ LuminaScale implements neural models for:
 
 -   **Python 3.12+** (PyTorch ecosystem)
 -   **Type hints** on all function signatures; use `typing` module and `from __future__ import annotations` for forward refs.
--   **Docstrings**: Module-level only; code should be self-documenting through clear naming and type hints.
+-   **Docstrings**: code should be self-documenting through clear naming and type hints.
 -   **Formatting**: Black (line length 100), isort, flake8 (ignore E501 if line length exceeds).
 -   **Linting**: ruff with default config, ignore: E501 (line length handled by Black).
+-   **Fail Fast**: Avoid exceptions and instead fail fast or use asserts if needed.
 
-## Architecture
-
-### Directory Structure
-
-```
-LuminaScale/
-├── src/
-│   └── luminascale/
-│       ├── __init__.py
-│       ├── models/
-│       │   ├── __init__.py
-│       │   ├── bde.py           # Bit-depth expansion models
-│       │   └── aces_norm.py      # ACES normalization modules
-│       ├── data/
-│       │   ├── __init__.py
-│       │   ├── loaders.py        # PyTorch DataLoaders
-│       │   └── transforms.py     # Augmentation and preprocessing
-│       ├── training/
-│       │   ├── __init__.py
-│       │   └── trainer.py        # Training loop, Hydra config loading
-│       ├── eval/
-│       │   ├── __init__.py
-│       │   ├── metrics.py        # PSNR, SSIM, ΔE for color spaces
-│       │   └── inference.py      # Batch inference and export
-│       └── utils/
-│           ├── __init__.py
-│           ├── io.py             # File loading/saving
-│           └── color_ops.py      # Color space transforms (RGB, ACES, etc.)
-├── configs/
-│   ├── model/
-│   │   ├── bde_unet.yaml
-│   │   └── aces_mlp.yaml
-│   ├── training/
-│   │   ├── default.yaml
-│   │   └── hpc_slurm.yaml        # HPC-tuned settings
-│   └── config.yaml               # Root Hydra config
-├── tests/
-│   ├── test_models.py
-│   ├── test_data.py
-│   └── test_metrics.py
-├── notebooks/
-│   └── exploration.ipynb         # EDA and experiments
-├── scripts/
-│   ├── train.py                  # Main entry point
-│   ├── eval.py                   # Evaluation script
-│   └── export.py                 # Model export for inference
-├── singularity/
-│   └── luminascale.def           # Container for HPC (references skill: singularity-container-ops)
-├── pyproject.toml
-├── README.md
-├── LICENSE
-└── .github/
-    ├── copilot-instructions.md   # This file
-    └── skills/
-        └── singularity/
-            └── SKILL.md          # Singularity HPC container operations
-```
 
 ## Domain Knowledge (Reference)
 
@@ -82,4 +26,4 @@ LuminaScale/
 
 ---
 
-**Version**: 1.0 | **Last updated**: 2026-03-10
+**Version**: 2.0 | **Last updated**: 2026-03-26

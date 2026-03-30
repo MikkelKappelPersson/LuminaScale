@@ -296,7 +296,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/scikit-image-0.26.0-np2py312h4ae17e4_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/scipy-1.17.1-py312h54fa4ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/send2trash-2.1.0-pyha191276_1.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/setuptools-82.0.1-pyh332efcf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/setuptools-81.0.0-pyh332efcf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/six-1.17.0-pyhe01879c_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/sleef-3.9.0-ha0421bc_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/snappy-1.2.2-h03e3b7b_1.conda
@@ -4480,17 +4480,17 @@ packages:
   - pkg:pypi/send2trash?source=hash-mapping
   size: 24108
   timestamp: 1770937597662
-- conda: https://conda.anaconda.org/conda-forge/noarch/setuptools-82.0.1-pyh332efcf_0.conda
-  sha256: 82088a6e4daa33329a30bc26dc19a98c7c1d3f05c0f73ce9845d4eab4924e9e1
-  md5: 8e194e7b992f99a5015edbd4ebd38efd
+- conda: https://conda.anaconda.org/conda-forge/noarch/setuptools-81.0.0-pyh332efcf_0.conda
+  sha256: 6ecf738d5590bf228f09c4ecd1ea91d811f8e0bd9acdef341bc4d6c36beb13a3
+  md5: d629a398d7bf872f9ed7b27ab959de15
   depends:
   - python >=3.10
   license: MIT
   license_family: MIT
   purls:
-  - pkg:pypi/setuptools?source=compressed-mapping
-  size: 639697
-  timestamp: 1773074868565
+  - pkg:pypi/setuptools?source=hash-mapping
+  size: 676888
+  timestamp: 1770456470072
 - conda: https://conda.anaconda.org/conda-forge/noarch/six-1.17.0-pyhe01879c_1.conda
   sha256: 458227f759d5e3fcec5d9b7acce54e10c9e1f4f4b7ec978f3bfd54ce4ee9853d
   md5: 3339e3b65d58accf4ca4fb8748ab16b3

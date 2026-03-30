@@ -11,11 +11,6 @@ import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-try:
-    import PyOpenColorIO as OCIO
-except ImportError:
-    OCIO = None
-
 
 @dataclass
 class CDLParameters:

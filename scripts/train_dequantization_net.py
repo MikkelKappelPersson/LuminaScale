@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Add project root to sys.path to allow imports without modifying environment
@@ -64,13 +65,15 @@ def main(cfg: DictConfig) -> None:
     dataset = DequantizationDataset(
         hdr_dir=cfg.get("hdr_dir"), 
         srgb_dir=cfg.get("srgb_dir"),
-        lmdb_path=cfg.get("lmdb_path")
+        lmdb_path=cfg.get("lmdb_path"),
+        patches_per_image=cfg.get("patches_per_image", 1)
     )
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=cfg.batch_size,
-        shuffle=True,
+        shuffle=False,  # Keep patches from same image together to maximize cache hit rate
         num_workers=cfg.get("num_workers", 4),
+        pin_memory=True,
     )
 
     # Create model
@@ -81,8 +84,16 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Total parameters: {total_params:,}")
 
     # Create trainer and train
+    # Use a timestamp-based run name to separate runs in TensorBoard and checkpoints
+    if hasattr(cfg, "output_dir"):
+        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_dir = Path(cfg.output_dir) / "tensorboard" / run_name
+    else:
+        log_dir = None
+        run_name = None
+    
     trainer = DequantizationTrainer(
-        model=model, device=device, learning_rate=cfg.learning_rate
+        model=model, device=device, learning_rate=cfg.learning_rate, log_dir=log_dir
     )
 
     trainer.train(
@@ -90,6 +101,7 @@ def main(cfg: DictConfig) -> None:
         num_epochs=cfg.epochs,
         checkpoint_dir=cfg.output_dir,
         checkpoint_freq=cfg.checkpoint_freq,
+        run_name=run_name,
     )
 
 

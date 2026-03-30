@@ -362,6 +362,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/zipp-3.23.0-pyhcf101f3_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
+      - pypi: https://files.pythonhosted.org/packages/b4/18/bea3ee9c76c01729870d9cbe7c9255ee2479e61302c85afce8709e4d2886/opencolorio-2.5.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/81/9c/5ea545f62790bc4f8b9c04d433963f9fe5f08548c8663e89a54f1db7002d/openimageio-3.1.11.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -3531,6 +3532,10 @@ packages:
   - pkg:pypi/omegaconf?source=hash-mapping
   size: 166453
   timestamp: 1670575519562
+- pypi: https://files.pythonhosted.org/packages/b4/18/bea3ee9c76c01729870d9cbe7c9255ee2479e61302c85afce8709e4d2886/opencolorio-2.5.1-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+  name: opencolorio
+  version: 2.5.1
+  sha256: 0e48a14c463b20a5775176f1ba99dd785a30c248a99256bb6be3ea971d3daa90
 - pypi: https://files.pythonhosted.org/packages/81/9c/5ea545f62790bc4f8b9c04d433963f9fe5f08548c8663e89a54f1db7002d/openimageio-3.1.11.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
   name: openimageio
   version: 3.1.11.0

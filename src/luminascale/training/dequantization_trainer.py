@@ -158,6 +158,87 @@ def masked_l2_loss(
     return loss
 
 
+class Stage2DequantizationDataset(Dataset):
+    """Stage 2: Load 32-bit ACES from LMDB and quantize to 8-bit on GPU (ACES→ACES dequantization)."""
+
+    def __init__(
+        self,
+        lmdb_path: str | Path,
+        device: torch.device,
+        crop_size: int = 512,
+        patches_per_image: int = 1,
+    ) -> None:
+        self.crop_size = crop_size
+        self.patches_per_image = max(1, patches_per_image)
+        self.device = device
+        self.lmdb_path = Path(lmdb_path)
+        
+        # Open LMDB
+        self.env = lmdb.open(
+            str(self.lmdb_path),
+            readonly=True,
+            lock=False,
+            readahead=False,
+            meminit=False,
+        )
+        with self.env.begin(write=False) as txn:
+            self.keys = pickle.loads(txn.get(b"__keys__"))
+        
+        # Image cache to avoid reloading
+        self._last_img_idx = -1
+        self._cached_aces_32bit = None
+        
+        logger.info(
+            f"Initialized Stage 2 Dataset with {len(self.keys)} images. "
+            f"Generating {self.patches_per_image} patches per image ({len(self)} total samples)."
+        )
+    
+    def __len__(self) -> int:
+        return len(self.keys) * self.patches_per_image
+    
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (8-bit ACES quantized, 32-bit ACES target) both on device."""
+        img_idx = (idx // self.patches_per_image) % len(self.keys)
+        
+        # Load 32-bit ACES from LMDB (cache to avoid reloading)
+        if img_idx != self._last_img_idx:
+            key = self.keys[img_idx]
+            with self.env.begin(write=False) as txn:
+                data = pickle.loads(txn.get(key.encode("ascii")))
+            
+            # Load and move to device immediately
+            aces_32bit_np = data["hdr"]  # Shape: [H, W, 3], range: [0, ~10+]
+            self._cached_aces_32bit = torch.from_numpy(aces_32bit_np).permute(2, 0, 1).float().to(self.device)
+            self._last_img_idx = img_idx
+        
+        aces_32bit = self._cached_aces_32bit
+        
+        # Random crop
+        c, h, w = aces_32bit.shape
+        if h < self.crop_size or w < self.crop_size:
+            import torch.nn.functional as F
+            aces_32bit = F.interpolate(
+                aces_32bit.unsqueeze(0),
+                size=(self.crop_size, self.crop_size),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0)
+        else:
+            top = torch.randint(0, h - self.crop_size + 1, (1,), device=self.device).item()
+            left = torch.randint(0, w - self.crop_size + 1, (1,), device=self.device).item()
+            aces_32bit = aces_32bit[:, top:top+self.crop_size, left:left+self.crop_size]
+        
+        # Quantize 32-bit ACES to 8-bit on GPU
+        # aces_32bit is raw ACES data [0, ~10+], quantize to 8-bit by scaling to [0, 255]
+        aces_8bit_quantized = torch.clamp(aces_32bit * 255.0 / 10.0, 0, 255).round()
+        
+        # Normalize both to [0, 1] range for stable training
+        aces_8bit_normalized = aces_8bit_quantized / 255.0      # [0, 1]
+        aces_32bit_normalized = aces_32bit / 10.0                # [0, 1] (approx)
+        
+        return aces_8bit_normalized, aces_32bit_normalized
+
+
 class DequantizationTrainer:
     """Orchestrates training for Dequantization-Net."""
 

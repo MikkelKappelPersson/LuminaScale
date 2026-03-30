@@ -1,3 +1,3 @@
-from luminascale.training.trainer import DequantizationTrainer
+from luminascale.training.dequantization_trainer import DequantizationTrainer
 
 __all__ = ["DequantizationTrainer"]

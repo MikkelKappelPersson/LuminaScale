@@ -1,90 +1,150 @@
-# .Project Plan: AI-Restorative Color & Bit-Depth Model
+# Project Plan: AI-Restorative Color & Bit-Depth Model
 
-## 1\. Project Objective
+**Version:** 2.0  
+**Last Modified:** 2026-03-30  
+**Status:** Sequential Two-Stage Architecture
 
-Build a Machine Learning model capable of processing 8-bit, “arbitrarily stylized,” or AI-generated images and transforming them into a clean, 16-bit-equivalent **ACES2065-1** color space. The model must simultaneously solve for **structural quantization (banding)** and **global color normalization**.
+## 1. Project Objective
 
-## 2\. Model Architecture: The “Sequential Cascade” Strategy
+Build a Machine Learning model capable of processing 8-bit, "arbitrarily stylized," or AI-generated images and transforming them into a clean, 16-bit-equivalent **ACES2065-1** color space. The model must sequentially solve **color space normalization** followed by **structural bit-depth expansion**, inspired by the HDR reconstruction pipeline in *"Single-Image HDR Reconstruction by Learning to Reverse the Camera Pipeline"* (arXiv:2004.01179).
 
-Instead of a single-shot black box, the model uses a two-stage sequential approach to isolate structural repair from mathematical color mapping.
+## 2. Model Architecture: Sequential Two-Stage Cascade
 
-### Stage 0: Pre-Processing (Non-ML)
+The model decomposes the problem into two independent, sequentially-trained stages before end-to-end joint fine-tuning. This approach isolates bit-depth expansion from color conversion, enabling cleaner learning and better error isolation.
 
--   **Action:** Cast the input 8-bit integer image ($\[0, 255\]$) directly to **32-bit Float** ($\[0.0, 1.0\]$).
-    
--   **Purpose:** Provides the “mathematical headroom” necessary for interpolation without rounding errors.
-    
+### Stage 1: Dequantization Net (sRGB → sRGB)
 
-### Stage 1: Structural Head (BDE - Bit Depth Expansion)
+- **Architecture:** Deep U-Net with skip connections
+  
+- **Operation:** Maps 8-bit sRGB images (quantized, with compression artifacts) into smooth 32-bit sRGB equivalents.
+  
+- **Training Data:** 8-bit sRGB inputs paired against 32-bit sRGB ground truth.
+  
+- **Job:** Learn to reverse quantization (banding) artifacts and smooth gradients within sRGB color space.
+  
+- **Output:** 32-bit sRGB images (clean, smooth gradients, no banding).
+  
+- **Loss:** MSE on sRGB values, with optional gradient penalty for banding suppression.
+  
+- **Normalization:** Input: `/255.0` → [0,1], Target: `/1.0` → [0,1]
+  
 
--   **Architecture:** Spatial-aware network: UNet with skip connections \[\[
-    
--   **Operation:** Analyzes local pixel neighborhoods to identify “stair-step” quantization patterns.
-    
--   **Job:** Interpolates missing values to create smooth gradients while preserving edges.
-    
--   **Output:** A “clean” 16-bit-equivalent image still in the source’s arbitrary/stylized color state.
-    
+### Stage 2: Color Conversion Net (sRGB → ACES)
 
-### Stage 2: Global Head (Color Space Normalization)
+- **Architecture:** U-Net with residual connections.
+  
+- **Operation:** Transforms 32-bit sRGB images (from Stage 1 output or ground truth) into 32-bit ACES2065-1 linear space.
+  
+- **Training Data:** 32-bit sRGB (ground truth, smooth) paired against 32-bit ACES ground truth.
+  
+- **Job:** Learn the colorimetric transformation from sRGB color space to ACES, including exposure/brightness adjustment.
+  
+- **Output:** 32-bit ACES images (correct color space, full linear range).
+  
+- **Loss:** MSE on ACES values, with optional perceptual loss in display space.
+  
+- **Normalization:** Input: `/1.0` → [0,1], Target: `/6.0` → [0,1]
+  
 
--   **Architecture:** Global Context Encoder (Downsampled input) + $1 \\times 1$ Convolution / MLP.
-    
--   **Operation:** Identifies the global “intent” of the image (e.g., “This is a landscape with extreme teal-shift”).
-    
--   **Job:** Maps the “cleaned” pixels into the ACES2065-1gamut and linear gamma.
-    
--   **Integration:** Uses a **Global Skip Connection** to ensure fine texture from Stage 1 is maintained during the color shift.
-    
+### Stage 3: Joint Fine-Tuning (End-to-End)
 
-## 3\. Dataset Strategy: Procedural Degradation
+- **Operation:** Both networks trained simultaneously on full pipeline: 8-bit sRGB input → [Stage 1 Dequant] → [Stage 2 Color Convert] → 32-bit ACES output.
+  
+- **Purpose:** Reduce error accumulation; Stage 1 learns to output smooth sRGB in a way that facilitates Stage 2's color conversion.
+  
+- **Loss:** Weighted combination:
+  
+  $$L_{total} = \lambda_{deq} \cdot L_{MSE,deq} + \lambda_{color} \cdot L_{MSE,color} + \lambda_p \cdot L_{perceptual}$$
+  
+  Suggested weights: $\lambda_{deq} = 1.0$, $\lambda_{color} = 1.0$, $\lambda_p = 0.001$
 
-The model will be trained on “Perfect” 16-bit ACES2065-1 data that has been synthetically “damaged” to simulate AI-generated and stylized 8-bit inputs.
+## 3. Dataset Strategy: LMDB-Based Sequential Training
 
-### The “Ground Truth” (Target)
+The model is trained on paired LMDB data preprocessed by the `pack_lmdb.py` utility, containing 8-bit sRGB images and corresponding 32-bit ACES ground truth.
 
--   **Source:** High-quality 16-bit/32-bit floating point images.
-    
--   **Format:** Linear ACES2065-1
-    
+**Dataset Location:** `/mnt/MKP01/med8_project/LuminaScale/dataset/training_data.lmdb`
 
-### The “Input Generation” (Synthetic Damage)
+### Training Data Structure (LMDB)
 
-To teach the model to handle “unknown” and “stylized” inputs, each training sample is created by applying the following random functions:
+The training dataset is packed into LMDB format with the following key structure:
 
-1.  **Arbitrary Color Warping:** \* Apply a random $3 \\times 3$ matrix with coefficients between $-0.5$ and $2.5$ to simulate extreme saturation and hue twists.
-    
-2.  **Stylized Contrast Curves:** \* Apply random **Sigmoid** or **Power** functions to simulate “crushed” blacks and “blown out” AI highlights.
-    
-3.  **AI Artifact Simulation:**
-    
-    -   Add low-frequency **Chroma Noise** (color blotches) to mimic AI diffusion errors.
-        
-    -   Apply a random **Unsharp Mask** to simulate the over-sharpening common in AI generators.
-        
-4.  **The 8-bit Break:**
-    
-    -   **Quantization:** Round values to 8-bit integers without dithering. This “bakes in” the banding that the BDE head must learn to solve.
+```python
+{
+  "ldr": np.uint8 array [0, 255],       # 8-bit sRGB (quantized, arbitrary looks)
+  "hdr": np.float32 array [0, 6.0],     # 32-bit ACES (normalized by 6.0)
+}
+```
 
-## 4\. Loss Functions & Training Logic
+### Stage 1: Dequantization Pre-Training (sRGB → sRGB)
 
-To ensure the BDE head doesn’t just “blur” the image and the Color head doesn’t “hallucinate” colors, a compound loss is used:
+- **Input:** `ldr` from LMDB (8-bit sRGB, quantized)
+  
+- **Target:** 32-bit sRGB ground truth (one-time generated from 8-bit by linear upsampling or inverse tone-mapping)
+  
+- **Purpose:** Train network to reverse quantization artifacts and smooth banding within sRGB.
+  
+- **Note:** 32-bit sRGB ground truth should be generated once, either by:
+  1. Inverse tone-mapping of sRGB → assumed linear, then smoothed, or
+  2. Using sRGB as the reference and upsampling to 32-bit float with careful handling of gamma
+  
 
--   **Pixel Loss (**$L\_{MSE}$**):** Accuracy check against the 16-bit ACES target.
-    
--   **Gradient Loss (**$L\_{Grad}$**):** Penalizes sharp steps in smooth areas (the “Anti-Banding” enforcer).
-    
--   **Perceptual Loss (**$L\_{VGG}$**):** Compares feature maps to ensure the image maintains “natural” textures and doesn’t look “plastic.”
-    
--   **Style Loss (Gram Matrix):** Specifically helps the model ignore the “stylization” of the input and focus on the underlying structure.
-    
+### Stage 2: Color Conversion Pre-Training (sRGB → ACES)
 
-## 5\. Implementation Roadmap
+- **Input:** 32-bit sRGB (ground truth, smooth from Stage 1 training data)
+  
+- **Target:** `hdr` from LMDB (32-bit ACES ground truth)
+  
+- **Purpose:** Train network to map from sRGB color space to ACES, learning color correction and exposure adjustment.
+  
 
-1.  **Data Gen Script:** Build the Python/PyTorch pipeline to generate “Damaged” 8-bit inputs from 16-bit sources on-the-fly.
-    
-2.  **Base Training:** Train the BDE head alone on a “Same-Color-Space” de-banding task.
-    
-3.  **Full Cascade Training:** Connect the Color head and train end-to-end with the ACES2065-1  target.
-    
-4.  **Refinement:** Fine-tune using only “AI-Generated” samples to sharpen the model’s ability to handle specific diffusion artifacts.
+### Stage 3: Joint Fine-Tuning Data Flow
+
+- **Input:** `ldr` from LMDB (8-bit sRGB)
+  
+- **Stage 1 Output:** Smoothed 32-bit sRGB
+  
+- **Stage 2 Output:** Final 32-bit ACES
+  
+- **Target:** `hdr` from LMDB (32-bit ACES ground truth)
+  
+
+## 4. Loss Functions & Training Logic
+
+### Stage 1: Dequantization Pre-Training
+
+- **Pixel Loss ($L_{MSE}$):** Mean squared error against 32-bit sRGB target.
+  
+- **Gradient Loss (optional, $L_{Grad}$):** Penalizes sharp steps in smooth areas to suppress banding artifacts.
+  
+
+### Stage 2: Color Conversion Pre-Training
+
+- **Pixel Loss ($L_{MSE}$):** Mean squared error against target ACES values.
+  
+- **Perceptual Loss (optional, $L_p$):** Feature-space similarity (e.g., VGG on display-referenced space) to preserve visual quality.
+  
+
+### Stage 3: Joint Fine-Tuning
+
+- **Dequant Loss ($L_{deq}$):** MSE between Stage 1 output (32-bit sRGB) and ground truth smooth sRGB.
+  
+- **Color Loss ($L_{color}$):** MSE between Stage 2 output and ground truth ACES.
+  
+- **Perceptual Loss ($L_p$):** Feature-space similarity to prevent hallucination.
+  
+- **Total Loss:**
+  $$L_{total} = \lambda_{deq} \cdot L_{deq} + \lambda_{color} \cdot L_{color} + \lambda_p \cdot L_p$$
+
+## 5. Implementation Roadmap
+
+1. **✓ Dataset Preparation:** LMDB with 8-bit sRGB and 32-bit ACES pairs created via `pack_lmdb.py`.
+   
+2. **Stage 1 Dataset Gen:** Generate 32-bit sRGB ground truth from 8-bit sRGB inputs. Create Stage 1 training pairs.
+   
+3. **→ Stage 1 Training:** Train Dequantization Net on 8-bit sRGB → 32-bit sRGB task. Validate convergence.
+   
+4. **Stage 2 Training:** Train Color Conversion Net on 32-bit sRGB → 32-bit ACES task.
+   
+5. **Joint Fine-Tuning:** Load both checkpoints and train end-to-end with weighted loss combination.
+   
+6. **Validation & Deployment:** Test on held-out real-world 8-bit sRGB images; export inference pipeline.

@@ -35,7 +35,7 @@ from omegaconf import DictConfig
 
 from luminascale.models import create_dequantization_net
 from luminascale.training import DequantizationTrainer
-from luminascale.training.trainer import DequantizationDataset
+from luminascale.training.dequantization_trainer import DequantizationDataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

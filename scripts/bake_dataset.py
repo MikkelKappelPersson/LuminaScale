@@ -24,7 +24,7 @@ src_dir = project_root / "src"
 sys.path.insert(0, str(src_dir))
 
 from luminascale.utils.look_generator import get_single_random_look
-from luminascale.utils.io import aces_to_srgb_with_look, aces_to_display
+from luminascale.utils.io import oiio_aces_to_srgb_with_look, oiio_aces_to_display
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bake LDR dataset from ACES EXRs")
@@ -72,11 +72,11 @@ def main() -> int:
             
             if is_natural:
                 # ACES -> sRGB (Natural)
-                pixels = aces_to_display(img_path)
+                pixels = oiio_aces_to_display(img_path)
             else:
                 # ACES -> Graded -> sRGB (Look)
                 random_look = get_single_random_look()
-                pixels = aces_to_srgb_with_look(img_path, random_look)
+                pixels = oiio_aces_to_srgb_with_look(img_path, random_look)
             
             # 3. Ensure RGB format and clip
             if pixels.shape[2] == 4:

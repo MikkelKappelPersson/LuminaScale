@@ -11,7 +11,7 @@ learning_rate: 1e-4
 checkpoint_freq: 1
 device: cuda
 num_workers: 0
-patches_per_image: 64
+patches_per_image: 32
 model:
   base_channels: 32
 # TensorBoard logging is auto-enabled; view with:

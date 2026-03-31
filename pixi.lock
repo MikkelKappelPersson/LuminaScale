@@ -313,6 +313,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/tinycss2-1.4.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/tk-8.6.13-noxft_h366c992_103.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/tomli-2.4.0-pyhcf101f3_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/torch-tb-profiler-0.4.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/torchvision-0.22.0-cuda_py312_h4a51b5c_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/torchvision-extra-decoders-0.0.2-py312hd1393df_3.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/tornado-6.5.3-py312h4c3975b_0.conda
@@ -4726,6 +4727,19 @@ packages:
   - pkg:pypi/tomli?source=compressed-mapping
   size: 21453
   timestamp: 1768146676791
+- conda: https://conda.anaconda.org/conda-forge/noarch/torch-tb-profiler-0.4.3-pyhd8ed1ab_0.conda
+  sha256: 9c0dc7544b6e79903d099b0aa3ebb38ca90f6a35bcc68e48a113ba727c4f02a0
+  md5: a258bc08c6750480bbb21a6326b5bc1e
+  depends:
+  - pandas >=1.0.0
+  - python >=3.9
+  - tensorboard >=1.15,!=2.1.0
+  license: BSD-3-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/torch-tb-profiler?source=hash-mapping
+  size: 865493
+  timestamp: 1736032961686
 - conda: https://conda.anaconda.org/conda-forge/linux-64/torchvision-0.22.0-cuda_py312_h4a51b5c_1.conda
   sha256: 74dbde08cecb0a16b878641f9e370e03092bdd0e42a61fe5a355f4d17b72e8a5
   md5: fa782723d2f11a32be4ee37b29c35477

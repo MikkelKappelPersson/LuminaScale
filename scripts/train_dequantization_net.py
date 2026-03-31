@@ -11,12 +11,13 @@ Override config on CLI:
         --config-name=default \
         batch_size=16 \
         epochs=50 \
-        hdr_dir=/custom/path
+        lmdb_path=/path/to/training_data.lmdb
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -35,7 +36,7 @@ from omegaconf import DictConfig
 
 from luminascale.models import create_dequantization_net
 from luminascale.training import DequantizationTrainer
-from luminascale.training.dequantization_trainer import DequantizationDataset
+from luminascale.training.dequantization_trainer import OnTheFlyBDEDataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,6 +55,14 @@ def main(cfg: DictConfig) -> None:
     # If the config has a 'training' key, use it (handles cases where we nested)
     if "training" in cfg:
         cfg = cfg.training
+    
+    # Set OCIO environment variable for color management
+    ocio_config = project_root / "config" / "aces" / "studio-config.ocio"
+    if ocio_config.exists():
+        os.environ["OCIO"] = str(ocio_config)
+        logger.info(f"OCIO config: {ocio_config}")
+    else:
+        logger.warning(f"OCIO config not found at {ocio_config}")
 
     device = torch.device(cfg.device)
 
@@ -62,18 +71,22 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Output directory: {cfg.output_dir}")
 
     # Create dataset and dataloader
-    dataset = DequantizationDataset(
-        hdr_dir=cfg.get("hdr_dir"), 
-        srgb_dir=cfg.get("srgb_dir"),
+    dataset = OnTheFlyBDEDataset(
         lmdb_path=cfg.get("lmdb_path"),
+        device=device,
+        crop_size=cfg.get("crop_size", 512),
         patches_per_image=cfg.get("patches_per_image", 1)
     )
+    
+    # For CUDA devices, disable multiprocessing to avoid CUDA re-initialization errors
+    num_workers = 0 if "cuda" in str(device) else cfg.get("num_workers", 4)
+    
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=cfg.batch_size,
         shuffle=False,  # Keep patches from same image together to maximize cache hit rate
-        num_workers=cfg.get("num_workers", 4),
-        pin_memory=True,
+        num_workers=num_workers,
+        pin_memory=False,  # Disable pin_memory since dataset already returns GPU tensors
     )
 
     # Create model
@@ -103,6 +116,10 @@ def main(cfg: DictConfig) -> None:
         checkpoint_freq=cfg.checkpoint_freq,
         run_name=run_name,
     )
+    
+    # Clean up GPU resources
+    dataset.cleanup()
+    logger.info("Training complete. GPU resources released.")
 
 
 if __name__ == "__main__":

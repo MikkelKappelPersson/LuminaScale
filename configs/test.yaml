@@ -4,13 +4,13 @@
 # Explicitly define values
 lmdb_path: /mnt/MKP01/med8_project/LuminaScale/dataset/training_data.lmdb
 output_dir: /mnt/MKP01/med8_project/LuminaScale/dataset/temp/test_run
-batch_size: 8
+batch_size: 4
 epochs: 1
 # Conservative (√8 ≈ 2.8): 1e-4 × 2.8 = 2.8e-4
 learning_rate: 1e-4
 checkpoint_freq: 1
 device: cuda
-num_workers: 16
+num_workers: 0
 patches_per_image: 64
 model:
   base_channels: 32

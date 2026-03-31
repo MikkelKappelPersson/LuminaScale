@@ -14,8 +14,8 @@ import lmdb
 import numpy as np
 import torch
 
-from luminascale.utils.gpu_cdl_processor import GPUCDLProcessor
-from luminascale.utils.gpu_torch_processor import GPUTorchProcessor
+from .gpu_cdl_processor import GPUCDLProcessor
+from .gpu_torch_processor import GPUTorchProcessor
 
 logger = logging.getLogger(__name__)
 

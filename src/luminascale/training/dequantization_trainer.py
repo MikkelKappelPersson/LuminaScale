@@ -15,8 +15,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 
-from luminascale.utils.dataset_pair_generator import DatasetPairGenerator
-from luminascale.utils.look_generator import get_single_random_look
+from ..utils.dataset_pair_generator import DatasetPairGenerator
+from ..utils.look_generator import get_single_random_look
 
 logger = logging.getLogger(__name__)
 

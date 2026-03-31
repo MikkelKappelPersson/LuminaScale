@@ -29,12 +29,11 @@ from luminascale.utils.io import image_to_tensor
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def pack_dataset(aces_dir: Path, srgb_dir: Path, output_path: Path, map_size: int = 10**12) -> None:
-    """Pack ACES and sRGB image pairs into an LMDB database.
+def pack_dataset(aces_dir: Path, output_path: Path, map_size: int = 10**12) -> None:
+    """Pack ACES image files into an LMDB database.
     
     Args:
         aces_dir: Directory containing .exr ACES ground truth files.
-        srgb_dir: Directory containing .png sRGB look/input files.
         output_path: Path where the .lmdb file will be created.
         map_size: Maximum size of the database in bytes (default 1TB).
     """
@@ -55,11 +54,6 @@ def pack_dataset(aces_dir: Path, srgb_dir: Path, output_path: Path, map_size: in
     with env.begin(write=True) as txn:
         for exr_path in tqdm(aces_files, desc="Packing LMDB"):
             img_name = exr_path.stem
-            png_path = srgb_dir / f"{img_name}.png"
-            
-            if not png_path.exists():
-                logger.warning(f"No matching PNG found for {exr_path.name}, skipping.")
-                continue
                 
             try:
                 # 1. Load HDR (ACES) - convert to float32 numpy [C, H, W]
@@ -67,23 +61,19 @@ def pack_dataset(aces_dir: Path, srgb_dir: Path, output_path: Path, map_size: in
                 hdr_tensor = image_to_tensor(exr_path)
                 hdr_array = hdr_tensor.numpy().astype(np.float32)
                 
-                # 2. Load LDR (sRGB) - keep as uint8 numpy [C, H, W]
-                ldr_pixels = iio.imread(png_path)
-                # Convert HWC to CHW to match torch convention
-                ldr_array = np.transpose(ldr_pixels, (2, 0, 1)).astype(np.uint8)
+                # 2. Create raw byte buffer
+                # Layout: [Header][HDR_bytes]
+                # Header: Shape info [H, W, Channels] as int32
+                H, W, C = hdr_array.shape[1], hdr_array.shape[2], hdr_array.shape[0]
+                header = np.array([H, W, C], dtype=np.int32).tobytes()
                 
-                # 3. Create a data packet
-                # We store shape info to avoid ambiguity during unpacking
-                data_packet = {
-                    "hdr": hdr_array,
-                    "ldr": ldr_array,
-                    "shape": hdr_array.shape, # (C, H, W)
-                }
+                hdr_bytes = hdr_array.tobytes()
                 
-                # 4. Serialize and store
+                # 3. Store raw bytes
+                # Layout: [header (12B)][hdr (H*W*C*4B)]
                 txn.put(
                     img_name.encode("ascii"),
-                    pickle.dumps(data_packet, protocol=pickle.HIGHEST_PROTOCOL)
+                    header + hdr_bytes
                 )
                 keys.append(img_name)
                 
@@ -94,12 +84,11 @@ def pack_dataset(aces_dir: Path, srgb_dir: Path, output_path: Path, map_size: in
         txn.put(b"__keys__", pickle.dumps(keys))
 
     env.close()
-    logger.info(f"Successfully packed {len(keys)} pairs into {output_path}")
+    logger.info(f"Successfully packed {len(keys)} images into {output_path}")
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Pack ACES and sRGB images into LMDB")
+    parser = argparse.ArgumentParser(description="Pack ACES images into LMDB")
     parser.add_argument("--aces-dir", type=str, default="dataset/temp/aces", help="Path to ACES EXRs")
-    parser.add_argument("--srgb-dir", type=str, default="dataset/temp/srgb_looks", help="Path to sRGB PNGs")
     parser.add_argument("--output-path", type=str, default="dataset/training_data.lmdb", help="Output LMDB path")
     parser.add_argument("--map-size", type=int, default=10**12, help="Max DB size in bytes (1TB default)")
     
@@ -107,7 +96,6 @@ def main() -> int:
     
     pack_dataset(
         Path(args.aces_dir),
-        Path(args.srgb_dir),
         Path(args.output_path),
         args.map_size
     )

@@ -23,10 +23,18 @@ pixi run python scripts/quality_filtered_aces_conversion.py --max-images=10
 
 ## LDR
 
-to generate LDR sRGB dataset with 50 with looks 50% neutral use
-```
+To generate LDR sRGB dataset (using the **GPU-accelerated** pipeline) with a 50% neutral/graded split:
+
+```bash
+# Generate 8-bit PNGs (standard)
 pixi run python scripts/bake_dataset.py
+
+# Generate 32-bit Float EXRs (for high-fidelity LDR)
+pixi run python scripts/bake_dataset.py --float32 --output-dir dataset/temp/srgb_32bit
 ```
+
+### Why use GPU Baking?
+The new bake script uses `ocio_aces_to_srgb_with_look` which leverages a headless EGL GPU renderer. This is significantly faster than the OIIO CPU implementation, especially when applying complex ACES 2.0 transforms and color looks.
 
 ## LMDB Packing (Performance Optimization)
 

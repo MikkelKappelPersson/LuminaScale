@@ -15,14 +15,45 @@ import torch
 from PIL import Image
 import numpy as np
 import OpenImageIO as oiio
-import tempfile
-import os
-from .look_generator import CDLParameters  # <--- ADD THIS IMPORT
 
-try:
-    import PyOpenColorIO as ocio
-except ImportError:
-    ocio = None
+
+def aces_to_display_gpu(
+    aces_tensor: torch.Tensor,
+    input_cs: str = "ACES2065-1",
+    display: str = "sRGB - Display",
+    view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """GPU-accelerated ACES-to-display color transform using OCIO.
+
+    Applies ACES rendering transform (RRT + ODT) to convert from
+    scene-referred linear ACES to display-referred sRGB.
+
+    Args:
+        aces_tensor: [H, W, 3] float32 tensor on CUDA in ACES2065-1 color space.
+        input_cs: Input color space (default: ACES2065-1).
+        display: OCIO display name (default: sRGB - Display).
+        view: OCIO view name (default: ACES 2.0 SDR 100 nits).
+
+    Returns:
+        Tuple of (srgb_32bit, srgb_8bit):
+            - srgb_32bit: [H, W, 3] float32 on GPU, values in [0, 1]
+            - srgb_8bit: [H, W, 3] uint8 on GPU, quantized to [0, 255]
+    """
+    from .gpu_torch_processor import GPUTorchProcessor
+
+    if not aces_tensor.is_cuda:
+        raise ValueError("Input tensor must be on CUDA device")
+
+    processor = GPUTorchProcessor(headless=True)
+    srgb_32bit, srgb_8bit = processor.apply_ocio_torch(
+        aces_tensor,
+        input_cs=input_cs,
+        display=display,
+        view=view,
+    )
+    processor.cleanup()
+
+    return srgb_32bit, srgb_8bit
 
 
 def image_to_tensor(image_path: Path | str) -> torch.Tensor:
@@ -173,199 +204,5 @@ def convert_to_aces(
         "output_dir": str(aces_dir),
     }
 
-
-def oiio_aces_to_display(
-    aces_image_path: Path | str,
-    looks: str | None = None,
-    display: str = "sRGB - Display",
-    view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
-) -> np.ndarray:
-    """Convert ACES image to display-referred using OpenImageIO's ociodisplay.
-
-    Applies the Academy Color Encoding System (ACES) rendering transform
-    (RRT + ODT) to convert from scene-referred ACES to display-referred [0, 1].
-    Optionally applies OCIO looks for creative color grading variations.
-
-    Args:
-        aces_image_path: Path to ACES EXR image file.
-        looks: OCIO look to apply (e.g., "ACES 1.3 Reference Gamut Compression"),
-               or None for baseline (no looks).
-        display: OCIO display name. Default uses sRGB display. Available displays
-                 can be checked with get_available_looks() or by inspecting OCIO config.
-        view: OCIO view name for the display. Default uses ACES 2.0 SDR view.
-
-    Returns:
-        Numpy array of shape ``[H, W, C]`` with ``dtype=float32`` and values
-        in ``[0.0, 1.0]`` range (display-referred).
-    """
-    assert oiio is not None, (
-        "OpenImageIO is required for oiio_aces_to_display. "
-        "Install it via: pixi install openimageio"
-    )
-
-    aces_path = Path(aces_image_path)
-    assert aces_path.exists(), f"ACES image not found: {aces_path}"
-
-    # Load ACES image
-    buf_aces = oiio.ImageBuf(str(aces_path))
-
-    # Apply ociodisplay (RRT + ODT transforms) with optional looks
-    buf_display = oiio.ImageBufAlgo.ociodisplay(
-        buf_aces,
-        display=display,
-        view=view,
-        fromspace="",
-        looks=looks or "",
-        unpremult=True,
-    )
-
-    assert buf_display.initialized, f"ociodisplay conversion failed for {aces_path.name}"
-    return np.asarray(buf_display.get_pixels(), dtype=np.float32)
-
-def ocio_aces_to_display(
-    aces_image_path: Path | str,
-    display: str = "sRGB - Display",
-    view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
-) -> np.ndarray:
-    """Convert ACES image to display-referred using GPU-accelerated ACESGPURenderer.
-
-    Args:
-        aces_image_path: Path to ACES EXR image file.
-        display: OCIO display name.
-        view: OCIO view name for the display.
-
-    Returns:
-        Numpy array [H, W, 3] with dtype=float32 and values in [0, 1].
-    """
-    from .gpu_renderer import ACESGPURenderer
-
-    # Input to this function is expected to be ACES2065-1 (AP0)
-    return ACESGPURenderer().process_image(
-        aces_image_path, display=display, view=view, input_colorspace="ACES2065-1"
-    )
-
-
-def oiio_aces_to_srgb_with_look(
-    aces_image_path: Path | str,
-    cdl_params: CDLParameters,
-    display: str = "sRGB - Display",
-    view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
-) -> np.ndarray:
-    """Apply CDL look to ACES image and convert to display space using OIIO.
-
-    This avoids direct PyOpenColorIO dependency by using OIIO's ImageBufAlgo.
-    """
-    assert oiio is not None, "OpenImageIO is required."
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".cc", delete=False) as f:
-        f.write(cdl_params.to_cdl_xml())
-        cdl_file_path = f.name
-
-    try:
-        # 2. Load the ACES source
-        buf = oiio.ImageBuf(str(aces_image_path))
-
-        # 3. Apply the CDL (FileTransform)
-        # Note: We assume the image is already in the 'process_space' (ACES2065-1)
-        # However, CDLs are often defined in ACEScct or ACEScg. 
-        # If the EXR is ACES2065-1, OIIO's filetransform will apply it directly.
-        buf_graded = oiio.ImageBufAlgo.ociofiletransform(buf, cdl_file_path)
-
-        # 4. Convert to Display Space (RRT+ODT)
-        buf_display = oiio.ImageBufAlgo.ociodisplay(
-            buf_graded, display=display, view=view, unpremult=True
-        )
-
-        if not buf_display.initialized:
-            assert False, "OIIO Display transformation failed."
-
-        return np.asarray(buf_display.get_pixels(), dtype=np.float32)
-
-    finally:
-        if os.path.exists(cdl_file_path):
-            os.remove(cdl_file_path)
-
-def ocio_aces_to_srgb_with_look(
-    aces_image_path: Path | str,
-    cdl_params: CDLParameters,
-    display: str = "sRGB - Display",
-    view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
-) -> np.ndarray:
-    """Apply CDL look to ACES image and convert to display space using GPU-accelerated ACESGPURenderer.
-
-    This implementation uses our custom EGL-based GPU renderer to apply the color transform
-    completely on the GPU.
-
-    Args:
-        aces_image_path: Path to ACES EXR image file (ACES2065-1 color space).
-        cdl_params: CDL parameters for color grading.
-        display: OCIO display name.
-        view: OCIO view name for the display.
-
-    Returns:
-        Numpy array [H, W, 3] with dtype=float32 and values in [0, 1].
-    """
-    assert oiio is not None, "OpenImageIO is required to apply the look."
-    from .gpu_renderer import ACESGPURenderer
-
-    # 1. Create temporary CDL file
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".cc", delete=False) as f:
-        f.write(cdl_params.to_cdl_xml())
-        cdl_file_path = f.name
-
-    try:
-        # 2. Apply CDL look using OIIO (since CDL is usually lightweight)
-        # and then pass to GPU for the heavy ACES transform.
-        # Alternatively, we could inject the CDL into the OCIO processor,
-        # but the current ACESGPURenderer uses standard DisplayViewTransform.
-        buf = oiio.ImageBuf(str(aces_image_path))
-        buf_graded = oiio.ImageBufAlgo.ociofiletransform(buf, cdl_file_path)
-
-        # 3. Save to a temporary EXR for GPU input
-        # NOTE: In a production loop, we'd add an image_data upload method to ACESGPURenderer
-        # to avoid this disk roundtrip.
-        temp_graded = tempfile.NamedTemporaryFile(suffix=".exr", delete=False).name
-        buf_graded.write(temp_graded)
-
-        # 4. Process high-quality ACES transform on GPU
-        result = ACESGPURenderer().process_image(
-            temp_graded, display=display, view=view, input_colorspace="ACES2065-1"
-        )
-
-        if os.path.exists(temp_graded):
-            os.remove(temp_graded)
-
-        return result
-
-    finally:
-        if os.path.exists(cdl_file_path):
-            os.remove(cdl_file_path)
-
-def apply_lut_to_image(
-    aces_image_path: Path | str,
-    lut_path: Path | str,
-) -> np.ndarray:
-    assert oiio is not None, "OpenImageIO is required."
-
-    # 1. Load Linear ACES2065-1
-    buf = oiio.ImageBuf(str(aces_image_path))
-
-    # 2. Convert to sRGB - Texture (This handles the highlight compression)
-    # Note: If the image is ACES2065-1, we convert from that.
-    buf_srgb = oiio.ImageBufAlgo.colorconvert(
-        buf, fromspace="ACES2065-1", tospace="sRGB - Texture"
-    )
-
-    # 3. Apply the LUT
-    buf_graded = oiio.ImageBufAlgo.ociofiletransform(buf_srgb, str(lut_path))
-
-    # 4. FINAL STEP: If images are too bright/washed out,
-    # the LUT has already applied the display transform.
-    # We just return the pixels. If they look too dark, we can add
-    # a simple sRGB gamma convert here.
-
-    assert buf_graded.initialized, f"OIIO failed to apply LUT: {lut_path}"
-
-    return np.asarray(buf_graded.get_pixels(), dtype=np.float32)
 
 

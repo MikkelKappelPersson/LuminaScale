@@ -81,9 +81,9 @@ class DatasetPairGenerator:
         header = np.frombuffer(buf[:12], dtype=np.uint32)
         H, W, C = int(header[0]), int(header[1]), int(header[2])
 
-        # Extract ACES data: float32 array
+        # Extract ACES data: float32 array (make writable copy)
         hdr_size = H * W * C * 4
-        hdr_np = np.frombuffer(buf[12 : 12 + hdr_size], dtype=np.float32).reshape(C, H, W)
+        hdr_np = np.frombuffer(buf[12 : 12 + hdr_size], dtype=np.float32).reshape(C, H, W).copy()
 
         # Convert to GPU tensor [H, W, 3]
         aces_tensor = torch.from_numpy(hdr_np).to(self.device, non_blocking=True)

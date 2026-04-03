@@ -7,6 +7,7 @@ import pickle
 import time
 from pathlib import Path
 
+import pytorch_lightning as L
 import lmdb
 import torch
 import torch.nn as nn
@@ -15,7 +16,7 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter (handled by Lightning)
 
 from ..utils.dataset_pair_generator import DatasetPairGenerator
 from ..utils.look_generator import get_single_random_look
@@ -44,14 +45,14 @@ class OnTheFlyBDEDataset(Dataset):
     def __init__(
         self,
         lmdb_path: str | Path,
-        device: torch.device,
+        device: torch.device | str | None = None,
         crop_size: int = 512,
         patches_per_image: int = 1,
     ) -> None:
         self.lmdb_path = Path(lmdb_path).resolve()
         assert self.lmdb_path.exists(), f"LMDB not found: {self.lmdb_path}"
         
-        self.device = device
+        self.device = torch.device(device) if device else None
         self.crop_size = crop_size
         self.patches_per_image = max(1, patches_per_image)
         
@@ -70,7 +71,9 @@ class OnTheFlyBDEDataset(Dataset):
             self.keys = pickle.loads(keys_buf)
         
         # Initialize GPU pipeline (ACES load → CDL → OCIO)
-        self.pair_generator = DatasetPairGenerator(self.env, self.device, self.keys)
+        self.pair_generator = None
+        if self.device:
+            self.pair_generator = DatasetPairGenerator(self.env, self.device, self.keys)
         
         # Image cache: store (srgb_32f, srgb_8u) after full pipeline (reuse across 64 patches)
         self._last_img_idx = -1
@@ -91,6 +94,14 @@ class OnTheFlyBDEDataset(Dataset):
         Returns:
             (input, target) = (srgb_8u, srgb_32f) with shapes [3, H, W] on GPU, normalized to [0, 1]
         """
+        # Lazy initialization of pair_generator to support DDP (where device is set late)
+        if self.pair_generator is None:
+            # Detect device if not set (fallback for DDP processes)
+            if self.device is None:
+                self.device = torch.device(f"cuda:{torch.cuda.current_device()}")
+                logger.info(f"Dataset detected and using device: {self.device}")
+            self.pair_generator = DatasetPairGenerator(self.env, self.device, self.keys)
+
         # Map flat index to image index
         img_idx = (idx // self.patches_per_image) % len(self.keys)
         
@@ -161,7 +172,94 @@ class OnTheFlyBDEDataset(Dataset):
     
     def cleanup(self) -> None:
         """Release GPU resources."""
-        self.pair_generator.cleanup()
+        if self.pair_generator:
+            self.pair_generator.cleanup()
+
+
+class LuminaScaleModule(L.LightningModule):
+    """LightningModule for training Dequantization-Net."""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        learning_rate: float = 1e-4,
+        vis_freq: int = 5,
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.learning_rate = learning_rate
+        self.vis_freq = vis_freq
+        self.save_hyperparameters(ignore=["model"])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+    def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        x, y = batch
+        y_hat = self.model(x)
+
+        # Compute mask for well-exposed regions (avoid clipped areas)
+        mask = exposure_mask(y)
+        loss = masked_l2_loss(y_hat, y, mask)
+
+        self.log("train_loss", loss, prog_bar=True, sync_dist=True)
+        return loss
+
+    def on_train_epoch_end(self) -> None:
+        """Log synthetic visualizations at the end of each epoch."""
+        if (self.current_epoch + 1) % self.vis_freq != 0:
+            return
+
+        self.model.eval()
+        with torch.no_grad():
+            # 1. Prepare Synthetic Data (RGB Primaries)
+            prim_hdr = create_primary_gradients(width=512, height=512, dtype="float32")
+            prim_8bit = quantize_to_8bit(prim_hdr)
+
+            # 2. Run Inference
+            input_tensor = (
+                torch.from_numpy(prim_8bit).float().unsqueeze(0).to(self.device)
+            )
+            output_tensor = self.model(input_tensor).squeeze(0)
+
+            # 3. Prepare for plotting [H, W, 3]
+            in_np = np.transpose(prim_8bit, (1, 2, 0))
+            out_np = np.transpose(output_tensor.cpu().numpy(), (1, 2, 0))
+            gt_np = np.transpose(prim_hdr, (1, 2, 0))
+
+            # Boost contrast to reveal banding (25x)
+            contrast_factor = 25.0
+            in_c = np.clip((in_np - 0.5) * contrast_factor + 0.5, 0, 1)
+            out_c = np.clip((out_np - 0.5) * contrast_factor + 0.5, 0, 1)
+            gt_c = np.clip((gt_np - 0.5) * contrast_factor + 0.5, 0, 1)
+
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            axes[0, 0].imshow(in_np)
+            axes[0, 0].set_title("Input (8-bit)")
+            axes[0, 1].imshow(out_np)
+            axes[0, 1].set_title("Output (Expanded)")
+            axes[0, 2].imshow(gt_np)
+            axes[0, 2].set_title("GT (32-bit)")
+
+            axes[1, 0].imshow(in_c)
+            axes[1, 0].set_title(f"Input {contrast_factor}x Contrast")
+            axes[1, 1].imshow(out_c)
+            axes[1, 1].set_title(f"Output {contrast_factor}x Contrast")
+            axes[1, 2].imshow(gt_c)
+            axes[1, 2].set_title(f"GT {contrast_factor}x Contrast")
+
+            for ax in axes.ravel():
+                ax.axis("off")
+
+            plt.tight_layout()
+            
+            # Log to TensorBoard
+            if self.logger and hasattr(self.logger, "experiment"):
+                self.logger.experiment.add_figure("Visualizations", fig, global_step=self.global_step)
+            plt.close(fig)
+
+    def configure_optimizers(self) -> optim.Optimizer:
+        return optim.Adam(self.parameters(), lr=self.learning_rate)
 
 
 def exposure_mask(

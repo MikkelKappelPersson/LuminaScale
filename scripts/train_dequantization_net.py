@@ -79,8 +79,10 @@ def main(cfg: DictConfig) -> None:
         patches_per_image=cfg.get("patches_per_image", 1)
     )
     
-    # For CUDA devices, disable multiprocessing to avoid CUDA re-initialization errors
-    num_workers = 0 if "cuda" in str(device) else cfg.get("num_workers", 4)
+    # Recommendation: For on-the-fly GPU augmentation, num_workers=0 is usually best
+    # to avoid CUDA initialization issues in subprocesses.
+    # To use num_workers > 0, we would need to move the GPU pipeline outside the Dataset.
+    num_workers = cfg.get("num_workers", 0)
     
     dataloader = torch.utils.data.DataLoader(
         dataset,

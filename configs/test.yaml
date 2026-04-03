@@ -15,10 +15,10 @@ epochs: 1
 learning_rate: 1e-4
 checkpoint_freq: 1
 device: cuda
-num_workers: 8
-patches_per_image: 1
+num_workers: 0 # num_workers > 0 currently has no effect as the GPU pipeline is in the dataset
+patches_per_image: 32
 crop_size: 512
 model:
-  base_channels: 16
+  base_channels: 32
 # TensorBoard logging is auto-enabled; view with:
 # tensorboard --logdir=outputs/training/tensorboard

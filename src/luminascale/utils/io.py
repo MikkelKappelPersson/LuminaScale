@@ -17,6 +17,54 @@ import numpy as np
 import OpenImageIO as oiio
 
 
+def read_exr(path: Path | str) -> np.ndarray:
+    """Read an EXR file and return as [C, H, W] numpy array."""
+    buf = oiio.ImageBuf(str(path))
+    if not buf.initialized:
+        raise FileNotFoundError(f"Could not load EXR file: {path}")
+    
+    # Get pixels as float32 [H, W, C]
+    array = np.asarray(buf.get_pixels(), dtype=np.float32)
+    
+    # Ensure RGB
+    if array.shape[2] > 3:
+        array = array[:, :, :3]
+        
+    # Transpose to [C, H, W]
+    return array.transpose(2, 0, 1)
+
+
+def write_exr(path: Path | str, array: np.ndarray | torch.Tensor):
+    """Write an image (numpy [C, H, W] or tensor) to an EXR file."""
+    if isinstance(array, torch.Tensor):
+        array = array.detach().cpu().numpy()
+        
+    # Transpose to [H, W, C] for OpenImageIO
+    if array.ndim == 3 and array.shape[0] == 3:
+        array = array.transpose(1, 2, 0)
+        
+    spec = oiio.ImageSpec(array.shape[1], array.shape[0], array.shape[2], oiio.FLOAT)
+    out = oiio.ImageOutput.create(str(path))
+    if out is None:
+        raise RuntimeError(f"Could not create EXR output for: {path}")
+        
+    out.open(str(path), spec)
+    out.write_image(array)
+    out.close()
+
+
+def oiio_aces_to_display(path: Path | str) -> np.ndarray:
+    """Read ACES EXR and convert to sRGB display space using OpenImageIO.
+    
+    This is a CPU alternative to aces_to_display_gpu for simple visualization.
+    """
+    buf = oiio.ImageBuf(str(path))
+    # Apply color space conversion (depends on OCIO config)
+    # This assumes OpenImageIO can find the OCIO config from environment or default
+    result = oiio.ImageBufAlgo.colorconvert(buf, "aces", "sRGB")
+    return np.asarray(result.get_pixels(), dtype=np.float32).transpose(2, 0, 1)
+
+
 def aces_to_display_gpu(
     aces_tensor: torch.Tensor,
     input_cs: str = "ACES2065-1",

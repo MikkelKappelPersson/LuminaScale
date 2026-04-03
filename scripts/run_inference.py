@@ -88,13 +88,14 @@ def run_image_inference(model: torch.nn.Module, device: torch.device, input_path
     print(f"✓ Inference complete. Saved to: {output_path}")
 
 def save_comparison(ldr, model_out, gt, save_path: Path):
-    """Save side-by-side comparison image."""
+    """Save side-by-side comparison images (original and high-contrast)."""
     import matplotlib.pyplot as plt
     
+    # 1. Standard Comparison
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     axes[0].imshow(ldr.transpose(1, 2, 0))
     axes[0].set_title("8-bit Input (Quantized)")
-    axes[1].imshow(model_out.transpose(1, 2, 0))
+    axes[1].imshow(np.clip(model_out.transpose(1, 2, 0), 0, 1))
     axes[1].set_title("Model Output (Dequantized)")
     axes[2].imshow(gt.transpose(1, 2, 0))
     axes[2].set_title("32-bit Reference")
@@ -103,6 +104,26 @@ def save_comparison(ldr, model_out, gt, save_path: Path):
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
+
+    # 2. High Contrast Comparison (to reveal banding)
+    contrast_factor = 25.0
+    def apply_contrast(x):
+        return np.clip((x - 0.5) * contrast_factor + 0.5, 0, 1)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    axes[0].imshow(apply_contrast(ldr.transpose(1, 2, 0)))
+    axes[0].set_title(f"Input (Contrast {contrast_factor}x)")
+    axes[1].imshow(apply_contrast(np.clip(model_out.transpose(1, 2, 0), 0, 1)))
+    axes[1].set_title(f"Model (Contrast {contrast_factor}x)")
+    axes[2].imshow(apply_contrast(gt.transpose(1, 2, 0)))
+    axes[2].set_title(f"Reference (Contrast {contrast_factor}x)")
+    
+    for ax in axes: ax.axis('off')
+    plt.tight_layout()
+    contrast_path = save_path.parent / f"{save_path.stem}_contrast{save_path.suffix}"
+    plt.savefig(contrast_path, dpi=150)
+    plt.close()
+    print(f"✓ Comparison plots saved: {save_path} and {contrast_path}")
 
 def main():
     parser = argparse.ArgumentParser(description="LuminaScale Inference Script")

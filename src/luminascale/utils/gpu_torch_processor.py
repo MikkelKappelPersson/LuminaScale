@@ -146,15 +146,31 @@ class GPUTorchProcessor:
     def _initialize_egl(self) -> None:
         """Initialize EGL context for headless rendering."""
         try:
+             # Important: In some environments, we MUST use EGL_PLATFORM_SURFACELESS_MESA
+             # or EGL_DEFAULT_DISPLAY. We try to be as generic as possible.
             eglBindAPI(EGL_OPENGL_API)
+            
+            # Use EGL_DEFAULT_DISPLAY as a starting point
             self._display = eglGetDisplay(EGL_DEFAULT_DISPLAY)
-
-            if not self._display:
-                raise RuntimeError("Could not get EGL display")
+            
+            if not self._display or self._display == -1: 
+                 raise RuntimeError("eglGetDisplay(EGL_DEFAULT_DISPLAY) returned invalid handle")
 
             major, minor = ctypes.c_int(), ctypes.c_int()
-            if not eglInitialize(self._display, major, minor):
-                raise RuntimeError("Could not initialize EGL")
+            
+            # NVIDIA driver on headless nodes often requires no-display initialization.
+            # We try standard initialization first.
+            try:
+                if not eglInitialize(self._display, major, minor):
+                    raise RuntimeError("Standard eglInitialize returned False")
+            except Exception as e:
+                logger.warning(f"Default eglInitialize failed: {e}. Trying fallback display 0...")
+                self._display = eglGetDisplay(0)
+                if not eglInitialize(self._display, major, minor):
+                    # One last attempt: null display
+                    self._display = eglGetDisplay(None)
+                    if not eglInitialize(self._display, major, minor):
+                         raise RuntimeError("All eglInitialize attempts failed (Default, 0, None)")
 
             logger.info(f"EGL initialized: version {major.value}.{minor.value}")
 

@@ -8,7 +8,7 @@ hydra:
   output_subdir: null # This prevents Hydra from creating a .hydra subdirectory
 
 # Explicitly define values
-lmdb_path: /mnt/MKP01/med8_project/LuminaScale/dataset/training_data.lmdb
+lmdb_path: /home/student.aau.dk/fs62fb/projects/LuminaScale/dataset/training_data.lmdb
 output_dir: ./outputs/training
 batch_size: 8
 epochs: 1

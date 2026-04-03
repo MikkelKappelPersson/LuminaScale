@@ -41,10 +41,15 @@ From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
         numpy \
         nanobind \
         openimageio \
+        opencolorio \
+        pyopengl \
+        pyopengl-accelerate \
         torchvision \
         pandas \
         pillow \
-        lmdb
+        lmdb \
+        pytorch-lightning \
+
 
     # Build and install rawtoaces (CPU-based, no CUDA support needed)
     cd /tmp

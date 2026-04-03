@@ -32,7 +32,7 @@ if src_path not in sys.path:
 
 import hydra
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from luminascale.models import create_dequantization_net
 from luminascale.training import DequantizationTrainer
@@ -71,8 +71,9 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Output directory: {cfg.output_dir}")
 
     # Create dataset and dataloader
+    lmdb_path = Path(cfg.get("lmdb_path")).resolve()
     dataset = OnTheFlyBDEDataset(
-        lmdb_path=cfg.get("lmdb_path"),
+        lmdb_path=lmdb_path,
         device=device,
         crop_size=cfg.get("crop_size", 512),
         patches_per_image=cfg.get("patches_per_image", 1)
@@ -99,11 +100,23 @@ def main(cfg: DictConfig) -> None:
     # Create trainer and train
     # Use a timestamp-based run name to separate runs in TensorBoard and checkpoints
     if hasattr(cfg, "output_dir"):
-        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = Path(cfg.output_dir) / "tensorboard" / run_name
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = Path(cfg.output_dir).resolve() / run_id
+        checkpoint_dir = (run_dir / "checkpoints").resolve()
+        log_dir = (run_dir / "tensorboard").resolve()
+        
+        run_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save absolute copy of current hydra config for reproducibility
+        with open(run_dir / "config.yaml", "w") as f:
+            f.write(OmegaConf.to_yaml(cfg))
+            
+        logger.info(f"Run directory created at: {run_dir}")
     else:
         log_dir = None
-        run_name = None
+        checkpoint_dir = None
+        run_id = None
     
     trainer = DequantizationTrainer(
         model=model, device=device, learning_rate=cfg.learning_rate, log_dir=log_dir
@@ -112,9 +125,9 @@ def main(cfg: DictConfig) -> None:
     trainer.train(
         train_dataloader=dataloader,
         num_epochs=cfg.epochs,
-        checkpoint_dir=cfg.output_dir,
+        checkpoint_dir=checkpoint_dir,
         checkpoint_freq=cfg.checkpoint_freq,
-        run_name=run_name,
+        run_name=run_id,
     )
     
     # Clean up GPU resources

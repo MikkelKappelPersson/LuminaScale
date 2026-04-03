@@ -2,7 +2,7 @@
 # Usage: python scripts/train_dequantization_net.py --config-name=default
 
 lmdb_path: ${oc.env:LMDB_PATH,./dataset/training_data.lmdb}
-output_dir: ./checkpoints
+output_dir: ./outputs/training
 batch_size: 8
 epochs: 100
 learning_rate: 1e-4

@@ -10,7 +10,7 @@ epochs: 1
 learning_rate: 1e-4
 checkpoint_freq: 1
 device: cuda
-num_workers: 0
+num_workers: 4
 patches_per_image: 32
 model:
   base_channels: 32

@@ -12,11 +12,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import matplotlib.pyplot as plt
+import numpy as np
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 
 from ..utils.dataset_pair_generator import DatasetPairGenerator
 from ..utils.look_generator import get_single_random_look
+from ..utils.image_generator import create_primary_gradients, create_sky_gradient, quantize_to_8bit
 
 logger = logging.getLogger(__name__)
 
@@ -279,11 +282,68 @@ class DequantizationTrainer:
         device: torch.device,
         learning_rate: float = 1e-4,
         log_dir: str | Path | None = None,
+        vis_freq: int = 5,
     ) -> None:
         self.model = model.to(device)
         self.device = device
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
+        self.vis_freq = vis_freq
+
+    def _log_visualizations(self, epoch: int) -> None:
+        """Log synthetic visualizations (RGB Primaries) to TensorBoard."""
+        if not self.writer:
+            return
+
+        self.model.eval()
+        with torch.no_grad():
+            # 1. Prepare Synthetic Data (RGB Primaries)
+            prim_hdr = create_primary_gradients(width=512, height=512, dtype="float32")
+            prim_8bit = quantize_to_8bit(prim_hdr)
+
+            # 2. Run Inference
+            input_tensor = torch.from_numpy(prim_8bit).float().unsqueeze(0).to(self.device)
+            output_tensor = self.model(input_tensor).squeeze(0)
+            
+            # 3. Prepare for plotting [H, W, 3]
+            in_np = np.transpose(prim_8bit, (1, 2, 0))
+            out_np = np.transpose(output_tensor.cpu().numpy(), (1, 2, 0))
+            gt_np = np.transpose(prim_hdr, (1, 2, 0))
+
+            # Boost contrast to reveal banding (25x)
+            contrast_factor = 25.0
+            in_c = np.clip((in_np - 0.5) * contrast_factor + 0.5, 0, 1)
+            out_c = np.clip((out_np - 0.5) * contrast_factor + 0.5, 0, 1)
+            gt_c = np.clip((gt_np - 0.5) * contrast_factor + 0.5, 0, 1)
+
+            # 4. Create Comparison Figure
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            fig.suptitle(f"RGB Primary Gradients - Epoch {epoch}", fontsize=16)
+            
+            # Top Row: Normal
+            axes[0, 0].imshow(in_np)
+            axes[0, 0].set_title("8-bit Input")
+            axes[0, 1].imshow(out_np)
+            axes[0, 1].set_title("Model Output")
+            axes[0, 2].imshow(gt_np)
+            axes[0, 2].set_title("Ground Truth")
+            
+            # Bottom Row: High Contrast
+            axes[1, 0].imshow(in_c)
+            axes[1, 0].set_title(f"Input ({contrast_factor}x Contrast)")
+            axes[1, 1].imshow(out_c)
+            axes[1, 1].set_title(f"Model ({contrast_factor}x Contrast)")
+            axes[1, 2].imshow(gt_c)
+            axes[1, 2].set_title(f"Target ({contrast_factor}x Contrast)")
+            
+            for ax in axes.ravel(): 
+                ax.axis("off")
+            plt.tight_layout()
+
+            self.writer.add_figure("Visuals/PrimaryGradients", fig, global_step=epoch)
+            plt.close(fig)
+
+        self.model.train()
 
     def train(
         self,
@@ -364,6 +424,11 @@ class DequantizationTrainer:
             # Log epoch-level metrics to TensorBoard
             if self.writer:
                 self.writer.add_scalar("Loss/epoch_avg", avg_loss, epoch + 1)
+                
+                # Run visual validation
+                if (epoch + 1) % self.vis_freq == 0:
+                    self._log_visualizations(epoch + 1)
+                
                 self.writer.flush()
 
             # Save checkpoint

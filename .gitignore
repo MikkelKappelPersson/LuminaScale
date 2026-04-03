@@ -8,6 +8,12 @@ __pycache__/
 
 # dataset
 dataset/
+/outputs/
+!/outputs/training/
+/outputs/training/*/
+!/outputs/training/*/config.yaml
+!/outputs/training/*/tensorboard/
+
 # Distribution / packaging
 .Python
 build/
@@ -240,3 +246,7 @@ __marimo__/
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+*.pt
+*.exr
+*.log
+checkpoints/

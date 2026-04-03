@@ -13,4 +13,4 @@ num_workers: 8  # More CPU workers for data loading
 
 # Data paths (override in sbatch script or pass --srgb_dir /lustre/...)
 lmdb_path: ${oc.env:LMDB_PATH,/lustre/scratch/fs62fb/dataset/training_data.lmdb}
-output_dir: ${oc.env:OUTPUT_DIR,/lustre/scratch/fs62fb/checkpoints}
+output_dir: ${oc.env:OUTPUT_DIR,/lustre/scratch/fs62fb/outputs/training}

@@ -1,18 +1,28 @@
 # Small test configuration for debugging the training pipeline
 # Usage: python scripts/train_dequantization_net.py --config-name=test
 
+# Hydra configuration to avoid creating redundant timestamped folders in outputs/
+hydra:
+  run:
+    dir: .   # This makes Hydra run in the current working directory
+  output_subdir: null # This prevents Hydra from creating a .hydra subdirectory
+
 # Explicitly define values
 lmdb_path: /mnt/MKP01/med8_project/LuminaScale/dataset/training_data.lmdb
-output_dir: /mnt/MKP01/med8_project/LuminaScale/dataset/temp/test_run
-batch_size: 4
+output_dir: ./outputs/training
+batch_size: 8
 epochs: 1
-# Conservative (√8 ≈ 2.8): 1e-4 × 2.8 = 2.8e-4
 learning_rate: 1e-4
 checkpoint_freq: 1
 device: cuda
-num_workers: 0
+accelerator: gpu
+devices: auto
+strategy: auto
+precision: 16-mixed
+num_workers: 0 # num_workers > 0 currently has no effect as the GPU pipeline is in the dataset
 patches_per_image: 32
+crop_size: 512
 model:
   base_channels: 32
 # TensorBoard logging is auto-enabled; view with:
-# tensorboard --logdir=dataset/temp/test_run/tensorboard
+# tensorboard --logdir=outputs/training/tensorboard

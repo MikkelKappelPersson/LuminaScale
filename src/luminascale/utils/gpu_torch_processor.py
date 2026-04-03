@@ -707,6 +707,10 @@ class GPUTorchProcessor:
         GL.glDrawElements(GL.GL_TRIANGLES, 6, GL.GL_UNSIGNED_INT, ctypes.c_void_p(0))
         GL.glFinish()
 
+        # Clean up input texture immediately to save GPU memory
+        GL.glDeleteTextures([self._image_tex])
+        self._image_tex = None
+
         # Readback results
         GL.glReadBuffer(GL.GL_COLOR_ATTACHMENT0)
         rgba_32f = GL.glReadPixels(0, 0, W, H, GL.GL_RGB, GL.GL_FLOAT)
@@ -717,7 +721,11 @@ class GPUTorchProcessor:
 
         logger.debug(f"GPU transform complete: {W}x{H}x3 -> float32 + uint8")
 
-        return torch.from_numpy(res_32f.copy()).cuda(), torch.from_numpy(res_8u.copy()).cuda()
+        # Create GPU tensors from CPU readbacks
+        res_32f_gpu = torch.from_numpy(res_32f.copy()).to(aces_tensor.device)
+        res_8u_gpu = torch.from_numpy(res_8u.copy()).to(aces_tensor.device)
+
+        return res_32f_gpu, res_8u_gpu
 
     def cleanup(self) -> None:
         """Release GPU resources."""

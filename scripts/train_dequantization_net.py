@@ -22,8 +22,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Add project root to sys.path to allow imports without modifying environment
-# This allows 'from luminascale...' to work regardless of where the script is called from.
+# Add project root to sys.path
 script_dir = Path(__file__).resolve().parent
 project_root = script_dir.parent
 src_path = str(project_root / "src")
@@ -31,12 +30,14 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 import hydra
+import pytorch_lightning as L
 import torch
-from omegaconf import DictConfig
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
+from omegaconf import DictConfig, OmegaConf
 
 from luminascale.models import create_dequantization_net
-from luminascale.training import DequantizationTrainer
-from luminascale.training.dequantization_trainer import OnTheFlyBDEDataset
+from luminascale.training.dequantization_trainer import OnTheFlyBDEDataset, LuminaScaleModule
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,81 +46,91 @@ logger = logging.getLogger(__name__)
 @hydra.main(config_path="../configs", config_name="default", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     """Main training entry point with Hydra config management."""
-    # Prevent 'BrokenPipeError' when piping output (e.g. to 'tee' or 'head')
+    # Prevent 'BrokenPipeError'
     from signal import signal, SIGPIPE, SIG_DFL
     try:
         signal(SIGPIPE, SIG_DFL)
     except Exception:
         pass
 
-    # If the config has a 'training' key, use it (handles cases where we nested)
+    # Hydra nesting handling
     if "training" in cfg:
         cfg = cfg.training
     
-    # Set OCIO environment variable for color management
+    # Set OCIO environment variable
     ocio_config = project_root / "config" / "aces" / "studio-config.ocio"
     if ocio_config.exists():
         os.environ["OCIO"] = str(ocio_config)
-        logger.info(f"OCIO config: {ocio_config}")
-    else:
-        logger.warning(f"OCIO config not found at {ocio_config}")
+    
+    # Run directory setup
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path(cfg.output_dir).resolve() / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    
+    with open(run_dir / "config.yaml", "w") as f:
+        f.write(OmegaConf.to_yaml(cfg))
 
-    device = torch.device(cfg.device)
-
-    logger.info(f"Device: {device}")
-    logger.info(f"LMDB path: {cfg.get('lmdb_path', 'None')}")
-    logger.info(f"Output directory: {cfg.output_dir}")
-
-    # Create dataset and dataloader
+    # Create dataset
+    lmdb_path = Path(cfg.get("lmdb_path")).resolve()
     dataset = OnTheFlyBDEDataset(
-        lmdb_path=cfg.get("lmdb_path"),
-        device=device,
+        lmdb_path=lmdb_path,
+        device=None, # Dataset will detect correct GPU per process in DDP
         crop_size=cfg.get("crop_size", 512),
         patches_per_image=cfg.get("patches_per_image", 1)
     )
     
-    # For CUDA devices, disable multiprocessing to avoid CUDA re-initialization errors
-    num_workers = 0 if "cuda" in str(device) else cfg.get("num_workers", 4)
-    
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=cfg.batch_size,
-        shuffle=False,  # Keep patches from same image together to maximize cache hit rate
-        num_workers=num_workers,
-        pin_memory=False,  # Disable pin_memory since dataset already returns GPU tensors
+        shuffle=False, # Patches from same image kept together for cache hit rate
+        num_workers=cfg.get("num_workers", 0),
+        pin_memory=False,
     )
 
     # Create model
-    model = create_dequantization_net(
-        device=device, base_channels=cfg.model.base_channels
-    )
-    total_params = sum(p.numel() for p in model.parameters())
-    logger.info(f"Total parameters: {total_params:,}")
-
-    # Create trainer and train
-    # Use a timestamp-based run name to separate runs in TensorBoard and checkpoints
-    if hasattr(cfg, "output_dir"):
-        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = Path(cfg.output_dir) / "tensorboard" / run_name
-    else:
-        log_dir = None
-        run_name = None
-    
-    trainer = DequantizationTrainer(
-        model=model, device=device, learning_rate=cfg.learning_rate, log_dir=log_dir
-    )
-
-    trainer.train(
-        train_dataloader=dataloader,
-        num_epochs=cfg.epochs,
-        checkpoint_dir=cfg.output_dir,
-        checkpoint_freq=cfg.checkpoint_freq,
-        run_name=run_name,
+    raw_model = create_dequantization_net(
+        device="cpu", # Lightning handles moving to GPU
+        base_channels=cfg.model.base_channels
     )
     
-    # Clean up GPU resources
+    # Lightning Module
+    model_module = LuminaScaleModule(
+        model=raw_model,
+        learning_rate=cfg.learning_rate,
+        vis_freq=cfg.vis_freq if hasattr(cfg, "vis_freq") else 5
+    )
+
+    # Loggers and Callbacks
+    tb_logger = TensorBoardLogger(
+        save_dir=cfg.output_dir,
+        name="tensorboard",
+        version=run_id
+    )
+    
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=run_dir / "checkpoints",
+        filename="dequant-{epoch:02d}-{train_loss:.4f}",
+        every_n_epochs=cfg.checkpoint_freq,
+        save_top_k=-1, # Save all checkpoints according to frequency
+    )
+
+    # Trainer Initialization
+    trainer = L.Trainer(
+        accelerator=cfg.get("accelerator", "gpu"),
+        devices=cfg.get("devices", "auto"),
+        strategy=cfg.get("strategy", "auto"),
+        precision=cfg.get("precision", 32),
+        max_epochs=cfg.epochs,
+        logger=tb_logger,
+        callbacks=[checkpoint_callback],
+        default_root_dir=run_dir,
+    )
+
+    # Train!
+    trainer.fit(model=model_module, train_dataloaders=dataloader)
+    
     dataset.cleanup()
-    logger.info("Training complete. GPU resources released.")
+    logger.info("Training complete.")
 
 
 if __name__ == "__main__":

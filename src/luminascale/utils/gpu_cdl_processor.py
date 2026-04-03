@@ -59,8 +59,11 @@ class GPUCDLProcessor:
         Returns:
             Graded image tensor [H, W, 3] on GPU.
         """
-        # Move to GPU and ensure float32
-        image_gpu = image.to(self.device, dtype=torch.float32)
+        # Ensure float32 and move to GPU if not already there
+        if image.device.type != "cuda":
+            image_gpu = image.to(self.device, dtype=torch.float32)
+        else:
+            image_gpu = image.to(dtype=torch.float32)
 
         # Reshape params for broadcasting
         slope_t = torch.tensor(cdl_params.slope, dtype=torch.float32, device=self.device).view(
@@ -74,9 +77,12 @@ class GPUCDLProcessor:
         )
 
         # CDL: (Input × Slope + Offset) ^ Power
-        graded = image_gpu * slope_t + offset_t
-        graded = torch.clamp(graded, min=1e-6)  # Avoid log(0)
-        graded = torch.pow(graded, power_t)
+        # Note: Input × Slope uses a lot of memory for big images.
+        graded = image_gpu * slope_t
+        graded.add_(offset_t)
+        
+        graded.clamp_(min=1e-6)  # In-place clamp
+        graded.pow_(power_t)     # In-place power
 
         # Apply saturation (luma-weighted blend)
         if cdl_params.saturation != 1.0:
@@ -85,7 +91,12 @@ class GPUCDLProcessor:
                 [0.2126, 0.7152, 0.0722], dtype=torch.float32, device=self.device
             ).view(1, 1, 3)
             luma = torch.sum(graded * luma_coeff, dim=2, keepdim=True)
-            graded = luma + cdl_params.saturation * (graded - luma)
+            
+            # graded = luma + saturation * (graded - luma)
+            # Use in-place ops for memory efficiency
+            graded.sub_(luma)
+            graded.mul_(cdl_params.saturation)
+            graded.add_(luma)
 
         return graded
 

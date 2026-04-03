@@ -26,7 +26,7 @@ source ~/.venv/bin/activate 2>/dev/null || source ~/miniconda3/bin/activate lumi
 # Set data paths (override with --hdr_dir if needed)
 export HDR_DIR="${HDR_DIR:-/lustre/scratch/fs62fb/data/hdr}"
 export SRGB_DIR="${SRGB_DIR:-/lustre/scratch/fs62fb/data/srgb_looks}"
-export OUTPUT_DIR="${OUTPUT_DIR:-/lustre/scratch/fs62fb/checkpoints}"
+export OUTPUT_DIR="${OUTPUT_DIR:-/lustre/scratch/fs62fb/outputs/training}"
 
 # Ensure output directories exist
 mkdir -p "$OUTPUT_DIR"

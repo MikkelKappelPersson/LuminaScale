@@ -94,8 +94,13 @@ class OnTheFlyBDEDataset(Dataset):
         # Map flat index to image index
         img_idx = (idx // self.patches_per_image) % len(self.keys)
         
-        # Load ACES, apply CDL + OCIO once per image (cache to reuse across 64 patches)
+        # Load ACES, apply CDL + OCIO once per image (cache to reuse across patches)
         if img_idx != self._last_img_idx:
+            # Clear previous cache to free GPU memory before loading next image
+            self._cached_srgb_32f = None
+            self._cached_srgb_8u = None
+            torch.cuda.empty_cache()
+
             key = self.keys[img_idx]
             try:
                 # One random CDL per image

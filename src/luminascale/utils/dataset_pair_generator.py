@@ -73,9 +73,9 @@ class DatasetPairGenerator:
         hdr_size = H * W * C * 4
         hdr_np = np.frombuffer(buf[12 : 12 + hdr_size], dtype=np.float32).reshape(C, H, W).copy()
 
-        # Convert to GPU tensor [H, W, 3]
-        aces_tensor = torch.from_numpy(hdr_np).to(self.device, non_blocking=True)
-        return aces_tensor.permute(1, 2, 0)  # [C, H, W] → [H, W, 3]
+        # Convert to CPU tensor [H, W, 3] first, then move to GPU only when needed
+        aces_tensor = torch.from_numpy(hdr_np).permute(1, 2, 0)  # [C, H, W] → [H, W, 3]
+        return aces_tensor
 
     def load_aces_and_transform(
         self, key: str
@@ -91,7 +91,7 @@ class DatasetPairGenerator:
         Raises:
             KeyError: If key not found in LMDB.
         """
-        aces_tensor = self._load_aces_from_lmdb(key)
+        aces_tensor = self._load_aces_from_lmdb(key).to(self.device, non_blocking=True)
         srgb_32f, srgb_8u = self.ocio_processor.apply_ocio_torch(aces_tensor)
         return srgb_32f, srgb_8u
 
@@ -115,14 +115,23 @@ class DatasetPairGenerator:
         Raises:
             KeyError: If key not found in LMDB.
         """
-        # Load ACES
-        aces_tensor = self._load_aces_from_lmdb(key)
+        # Load ACES to CPU
+        aces_tensor_cpu = self._load_aces_from_lmdb(key)
+        
+        # Move to GPU for CDL
+        aces_tensor = aces_tensor_cpu.to(self.device, non_blocking=True)
         
         # Apply CDL
         graded_aces = self.cdl_processor.apply_cdl_gpu(aces_tensor, cdl_params)
         
+        # Explicitly delete intermediate ACES tensor to free memory early
+        del aces_tensor
+        
         # Transform to sRGB
         srgb_32f, srgb_8u = self.ocio_processor.apply_ocio_torch(graded_aces)
+        
+        # Free graded ACES
+        del graded_aces
         
         return srgb_32f, srgb_8u
 

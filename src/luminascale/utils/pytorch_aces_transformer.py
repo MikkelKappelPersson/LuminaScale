@@ -251,12 +251,12 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
     
     logger.info("Evaluating OCIO processor to create 3D LUT via CPU sampling...")
     
-    lut_size = 64
+    lut_size = 128  # Increased from 64 for better trilinear interpolation accuracy
     lut_3d = np.zeros((lut_size, lut_size, lut_size, 3), dtype=np.float32)
     
     # Sample the OCIO processor at regular intervals using CPU processor
     for i in range(lut_size):
-        if i % 16 == 0:
+        if i % 32 == 0:
             logger.debug(f"  Sampling LUT: {i}/{lut_size}")
         for j in range(lut_size):
             for k in range(lut_size):

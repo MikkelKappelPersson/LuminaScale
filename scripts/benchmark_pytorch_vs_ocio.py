@@ -33,30 +33,44 @@ def load_aces_image(image_path: str | Path) -> np.ndarray:
 
 
 def ocio_aces_to_srgb(aces_image: np.ndarray) -> np.ndarray:
-    """Transform ACES to sRGB using OCIO/OpenImageIO."""
-    # Create ImageBuf from numpy array
-    spec = oiio.ImageSpec(
-        aces_image.shape[1], aces_image.shape[0], aces_image.shape[2], oiio.FLOAT
-    )
-    buf = oiio.ImageBuf(spec)
-    # Create ROI for the entire image
-    roi = oiio.ROI(0, aces_image.shape[1], 0, aces_image.shape[0], 0, 1, 0, aces_image.shape[2])
-    buf.set_pixels(roi, aces_image)
+    """Transform ACES to sRGB using OCIO's CPU processor directly.
     
-    # Apply ACES display transform
-    result = oiio.ImageBufAlgo.ociodisplay(
-        buf,
-        display="sRGB - Display",
-        view="ACES 2.0 - SDR 100 nits (Rec.709)",
-        fromspace="",
-        looks="",
-        unpremult=True,
-    )
+    This matches the PyTorch implementation exactly by using the processor
+    API with proper batch processing.
+    """
+    try:
+        import PyOpenColorIO as ocio
+    except ImportError:
+        raise ImportError("PyOpenColorIO required")
     
-    assert result.initialized, "OCIO transform failed"
-    return np.asarray(result.get_pixels(), dtype=np.float32).reshape(
-        result.spec().height, result.spec().width, -1
+    config = ocio.Config.CreateFromFile(
+        str(Path(__file__).parent.parent / "config" / "aces" / "studio-config.ocio")
     )
+    processor = config.getProcessor(
+        "ACES2065-1",
+        "sRGB - Display",
+        "ACES 2.0 - SDR 100 nits (Rec.709)",
+        ocio.TRANSFORM_DIR_FORWARD
+    )
+    cpu_processor = processor.getDefaultCPUProcessor()
+    
+    h, w, c = aces_image.shape
+    
+    # Reshape to process as batch (H*W, 3)
+    aces_flat = aces_image.reshape(-1, 3)  # [N, 3]
+    
+    # Create RGBA buffer (OCIO requires 4 channels)
+    rgba_buf = np.ones((h, w, 4), dtype=np.float32)
+    rgba_buf[..., :3] = aces_image
+    
+    # Apply transform (OCIO modifies in-place)
+    rgb_flat = rgba_buf.reshape(-1, 4)
+    cpu_processor.applyRGBA(rgb_flat)
+    
+    # Extract RGB result
+    result = rgba_buf[..., :3]
+    
+    return result
 
 
 def pytorch_aces_to_srgb(

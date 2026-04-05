@@ -7,6 +7,7 @@ Note: CDL grading and patching are handled by Dataset classes (e.g., OnTheFlyBDE
 from __future__ import annotations
 
 import logging
+import os
 import pickle
 from typing import Any
 
@@ -18,6 +19,24 @@ from .gpu_cdl_processor import GPUCDLProcessor
 from .gpu_torch_processor import GPUTorchProcessor
 
 logger = logging.getLogger(__name__)
+
+
+def get_local_gpu_id() -> int:
+    """Get GPU ID for current process in multi-GPU DDP setting.
+    
+    Returns the LOCAL_RANK environment variable (set by Slurm/PyTorch DDP),
+    which maps each process to its assigned GPU. Falls back to 0 if not in DDP.
+    
+    Note: EGL rendering always happens on GPU 0. This function is useful for
+    informational logging and for CUDA tensor operations on the assigned GPU.
+    
+    Returns:
+        GPU device ID (0-based) for this process.
+    """
+    # DDP sets LOCAL_RANK to the local process rank (0 for first GPU, 1 for second, etc.)
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    logger.debug(f"Process GPU ID: {local_rank} (LOCAL_RANK={local_rank})")
+    return local_rank
 
 
 class DatasetPairGenerator:
@@ -46,6 +65,11 @@ class DatasetPairGenerator:
         """
         self.env = lmdb_env
         self.device = device
+        
+        # Get GPU ID for informational logging and CUDA operations
+        # Note: EGL rendering always happens on GPU 0, but CUDA operations use assigned GPU
+        gpu_id = get_local_gpu_id()
+        logger.info(f"Dataset initialized for GPU {gpu_id} (EGL on GPU 0)")
         self.ocio_processor = GPUTorchProcessor(headless=True)
         self.cdl_processor = GPUCDLProcessor(device=device)
         self.keys_cache = keys_cache or self._load_keys()

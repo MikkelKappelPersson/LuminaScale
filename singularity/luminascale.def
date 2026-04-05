@@ -19,7 +19,15 @@ From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
         libglib2.0-dev \
         libtiff-dev \
         libpng-dev \
-        python3-venv
+        python3-venv \
+        libglvnd0 \
+        libglvnd-dev \
+        libglvnd-glx \
+        libglx0 \
+        libglu1-mesa \
+        libglu1-mesa-dev \
+        mesa-utils \
+        mesa-common-dev
 
     # Create Python virtual environment with system packages (PyTorch from base image)
     python3 -m venv /opt/venv --system-site-packages
@@ -71,6 +79,7 @@ From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
     export PYTHONUNBUFFERED=1
     export PATH="/opt/venv/bin:${PATH}"
     export VIRTUAL_ENV="/opt/venv"
+    export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
 
 %runscript
     exec bash "$@"

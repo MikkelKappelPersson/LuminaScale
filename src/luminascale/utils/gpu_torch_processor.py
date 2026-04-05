@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 from typing import Optional, Tuple
+from ctypes import c_void_p
 
 import numpy as np
 import torch
@@ -25,6 +27,7 @@ try:
         eglSwapBuffers,
         eglCreatePbufferSurface,
         eglBindAPI,
+        eglGetProcAddress,
     )
     from OpenGL.EGL import (
         EGL_OPENGL_API,
@@ -41,6 +44,12 @@ try:
         EGL_DEFAULT_DISPLAY,
         EGL_CONTEXT_CLIENT_VERSION,
     )
+    # EGL_PLATFORM_DEVICE_EXT may not be defined in older PyOpenGL versions
+    try:
+        from OpenGL.EGL import EGL_PLATFORM_DEVICE_EXT
+    except ImportError:
+        EGL_PLATFORM_DEVICE_EXT = 0x3308  # KHRONOS EGL extension value
+    
     EGL_AVAILABLE = True
 except ImportError:
     EGL_AVAILABLE = False
@@ -94,17 +103,23 @@ class GPUTorchProcessor:
         ... )
     """
 
-    def __init__(self, headless: bool = True) -> None:
+    def __init__(self, headless: bool = True, gpu_id: Optional[int] = None) -> None:
         """Initialize GPU processor.
 
         Args:
             headless: If True, use EGL for headless rendering.
+            gpu_id: GPU device ID (for multi-GPU DDP - DEPRECATED, EGL always uses GPU 0).
+                   This parameter is kept for backward compatibility but ignored.
+                   EGL rendering happens on GPU 0, tensor operations on current device.
 
         Raises:
             RuntimeError: If OpenGL initialization fails.
         """
         self._gl_ready = False
         self._headless = headless
+        # Note: gpu_id parameter kept for compatibility but not used
+        # EGL context always initializes on GPU 0 to avoid multi-GPU extension requirements
+        self._target_gpu_id = gpu_id
         self._display = None
         self._surface = None
         self._context = None
@@ -134,9 +149,38 @@ class GPUTorchProcessor:
         self._initialize_gl()
 
     def _initialize_gl(self) -> None:
-        """Initialize OpenGL context and resources."""
+        """Initialize OpenGL context and resources on GPU 0.
+        
+        EGL context is always initialized on GPU 0 to avoid multi-GPU extension
+        requirements. Tensor operations can still happen on assigned GPU via CUDA.
+        
+        Falls back to CPU-based rendering if EGL is unavailable (no headless support).
+        """
         if self._headless and EGL_AVAILABLE:
-            self._initialize_egl()
+            # Save current GPU context and switch to GPU 0 for EGL init
+            current_device = torch.cuda.current_device() if torch.cuda.is_available() else None
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.set_device(0)
+                self._initialize_egl()
+            except Exception as e:
+                logger.warning(
+                    f"EGL initialization failed: {e}. "
+                    "This HPC node may not have GPU rendering support configured. "
+                    "Options: (1) Contact HPC admin about enabling headless GPU rendering, "
+                    "(2) Use CPU-based preprocessing with pre-baked dataset, "
+                    "(3) Request Xvfb or other headless X server support."
+                )
+                # Set a flag indicating GPU rendering is unavailable
+                self._gl_ready = False
+                # Don't raise - allow fallback to CPU processing
+            finally:
+                # Restore previous GPU context
+                if current_device is not None and torch.cuda.is_available():
+                    try:
+                        torch.cuda.set_device(current_device)
+                    except:
+                        pass
         else:
             logger.warning(
                 "EGL not available; assuming display context exists (interactive mode)"
@@ -144,10 +188,11 @@ class GPUTorchProcessor:
             self._gl_ready = True
 
     def _initialize_egl(self) -> None:
-        """Initialize EGL context for headless rendering."""
+        """Initialize EGL context for headless rendering on GPU 0.
+        
+        EGL is always initialized on GPU 0 to avoid multi-GPU extension requirements.
+        """
         try:
-             # Important: In some environments, we MUST use EGL_PLATFORM_SURFACELESS_MESA
-             # or EGL_DEFAULT_DISPLAY. We try to be as generic as possible.
             eglBindAPI(EGL_OPENGL_API)
             
             # Use EGL_DEFAULT_DISPLAY as a starting point
@@ -654,7 +699,12 @@ class GPUTorchProcessor:
             RuntimeError: If GPU processing fails.
         """
         if not self._gl_ready:
-            raise RuntimeError("OpenGL not initialized")
+            raise RuntimeError(
+                "OpenGL/EGL not initialized on this node. "
+                "This HPC environment does not support GPU-based rendering. "
+                "Verify: (1) libGLU.so.0 is available, (2) NVIDIA drivers support GPU rendering, "
+                "(3) Contact HPC admin about enabling headless GPU rendering support."
+            )
 
         if not aces_tensor.is_cuda:
             raise ValueError("Input tensor must be on CUDA")

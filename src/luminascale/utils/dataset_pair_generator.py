@@ -46,6 +46,12 @@ class DatasetPairGenerator:
         """
         self.env = lmdb_env
         self.device = device
+        
+        # PyTorch ACES transformer (primary, with LUT for accuracy)
+        from .pytorch_aces_transformer import ACESColorTransformer
+        self.pytorch_transformer = ACESColorTransformer(device=device, use_lut=True)
+        
+        # OCIO processor (fallback reference)
         self.ocio_processor = GPUTorchProcessor(headless=True)
         self.cdl_processor = GPUCDLProcessor(device=device)
         self.keys_cache = keys_cache or self._load_keys()
@@ -92,7 +98,8 @@ class DatasetPairGenerator:
             KeyError: If key not found in LMDB.
         """
         aces_tensor = self._load_aces_from_lmdb(key).to(self.device, non_blocking=True)
-        srgb_32f, srgb_8u = self.ocio_processor.apply_ocio_torch(aces_tensor)
+        srgb_32f = self.pytorch_transformer.aces_to_srgb_32f(aces_tensor)
+        srgb_8u = self.pytorch_transformer.aces_to_srgb_8u(aces_tensor)
         return srgb_32f, srgb_8u
 
     def load_aces_apply_cdl_and_transform(
@@ -128,7 +135,8 @@ class DatasetPairGenerator:
         del aces_tensor
         
         # Transform to sRGB
-        srgb_32f, srgb_8u = self.ocio_processor.apply_ocio_torch(graded_aces)
+        srgb_32f = self.pytorch_transformer.aces_to_srgb_32f(graded_aces)
+        srgb_8u = self.pytorch_transformer.aces_to_srgb_8u(graded_aces)
         
         # Free graded ACES
         del graded_aces

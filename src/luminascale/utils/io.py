@@ -70,36 +70,53 @@ def aces_to_display_gpu(
     input_cs: str = "ACES2065-1",
     display: str = "sRGB - Display",
     view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
+    use_pytorch: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """GPU-accelerated ACES-to-display color transform using OCIO.
+    """GPU-accelerated ACES-to-display color transform.
 
     Applies ACES rendering transform (RRT + ODT) to convert from
     scene-referred linear ACES to display-referred sRGB.
+    
+    Now supports both PyTorch-native and OCIO backends for comparison.
+    PyTorch is faster but uses analytical tone mapping; OCIO is reference.
 
     Args:
-        aces_tensor: [H, W, 3] float32 tensor on CUDA in ACES2065-1 color space.
+        aces_tensor: [H, W, 3] float32 tensor on device in ACES2065-1.
         input_cs: Input color space (default: ACES2065-1).
         display: OCIO display name (default: sRGB - Display).
         view: OCIO view name (default: ACES 2.0 SDR 100 nits).
+        use_pytorch: Use PyTorch-native transform (default: True).
 
     Returns:
         Tuple of (srgb_32bit, srgb_8bit):
-            - srgb_32bit: [H, W, 3] float32 on GPU, values in [0, 1]
-            - srgb_8bit: [H, W, 3] uint8 on GPU, quantized to [0, 255]
+            - srgb_32bit: [H, W, 3] float32 on same device, values in [0, 1]
+            - srgb_8bit: [H, W, 3] uint8 on same device, quantized to [0, 255]
     """
-    from .gpu_torch_processor import GPUTorchProcessor
+    if use_pytorch:
+        # PyTorch-native implementation (with LUT for accuracy)
+        from .pytorch_aces_transformer import ACESColorTransformer
 
-    if not aces_tensor.is_cuda:
-        raise ValueError("Input tensor must be on CUDA device")
+        device = aces_tensor.device
+        transformer = ACESColorTransformer(device=device, use_lut=True)
+        
+        srgb_32bit = transformer.aces_to_srgb_32f(aces_tensor)
+        srgb_8bit = transformer.aces_to_srgb_8u(aces_tensor)
+        
+    else:
+        # OCIO implementation (reference, requires CUDA for GPU)
+        from .gpu_torch_processor import GPUTorchProcessor
 
-    processor = GPUTorchProcessor(headless=True)
-    srgb_32bit, srgb_8bit = processor.apply_ocio_torch(
-        aces_tensor,
-        input_cs=input_cs,
-        display=display,
-        view=view,
-    )
-    processor.cleanup()
+        if not aces_tensor.is_cuda:
+            raise ValueError("OCIO backend requires CUDA device")
+
+        processor = GPUTorchProcessor(headless=True)
+        srgb_32bit, srgb_8bit = processor.apply_ocio_torch(
+            aces_tensor,
+            input_cs=input_cs,
+            display=display,
+            view=view,
+        )
+        processor.cleanup()
 
     return srgb_32bit, srgb_8bit
 

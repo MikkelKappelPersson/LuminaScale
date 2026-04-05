@@ -229,7 +229,13 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
         raise FileNotFoundError(f"OCIO config not found: {config_path}")
     
     logger.info(f"Loading OCIO config from {config_path}")
-    ocio.SetConfigSearchPath(str(config_path.parent))
+    
+    # Try to set search path if method exists (for shader/file resolution)
+    try:
+        ocio.SetConfigSearchPath(str(config_path.parent))
+    except AttributeError:
+        logger.debug("SetConfigSearchPath not available in this OCIO version, continuing...")
+    
     config = ocio.Config.CreateFromFile(str(config_path))
     
     # Build a processor for ACES2065-1 → sRGB transform
@@ -240,35 +246,35 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
         ocio.TRANSFORM_DIR_FORWARD
     )
     
-    gpu_processor = processor.getDefaultGPUProcessor()
+    # Create CPU processor for sampling
+    cpu_processor = processor.getDefaultCPUProcessor()
     
-    # Create shader descriptor to get the exact tone curve
-    shader_desc = ocio.GpuShaderDesc.CreateShaderDesc(language=ocio.GPU_LANGUAGE_GLSL_4_0)
-    gpu_processor.extractGpuShaderInfo(shader_desc)
-    
-    # Extract LUT data (this is embedded in the shader)
-    # For now, we'll create a synthetic LUT by sampling the OCIO processor
-    logger.info("Evaluating OCIO processor to create 3D LUT...")
+    logger.info("Evaluating OCIO processor to create 3D LUT via CPU sampling...")
     
     lut_size = 64
     lut_3d = np.zeros((lut_size, lut_size, lut_size, 3), dtype=np.float32)
     
-    # Sample the OCIO processor at regular intervals
+    # Sample the OCIO processor at regular intervals using CPU processor
     for i in range(lut_size):
+        if i % 16 == 0:
+            logger.debug(f"  Sampling LUT: {i}/{lut_size}")
         for j in range(lut_size):
             for k in range(lut_size):
-                # Normalize coordinates to [0, 1]
-                r = i / (lut_size - 1)
-                g = j / (lut_size - 1)
-                b = k / (lut_size - 1)
+                # Normalize coordinates to [0, 1] range
+                # ACES can exceed [0, 1], so we sample up to 8x (typical dynamic range)
+                r = (i / (lut_size - 1)) * 8.0
+                g = (j / (lut_size - 1)) * 8.0
+                b = (k / (lut_size - 1)) * 8.0
                 
-                # Create a test image with single pixel [r, g, b]
-                test_img = np.array([[[r, g, b]]], dtype=np.float32)
+                # Create a single pixel image [r, g, b, a] (RGBA required by OCIO)
+                test_img = np.array([[[[r, g, b, 1.0]]]], dtype=np.float32)
+                test_img = test_img.reshape(1, 1, 4)  # Reshape to (H, W, 4)
                 
-                # Process through OCIO (CPU path as reference)
-                # Note: In production, we'd extract LUT from GPU directly
-                # For now, just store the input (we'll use OCIO as fallback)
-                lut_3d[i, j, k] = [r, g, b]
+                # Apply OCIO transform via CPU processor
+                cpu_processor.applyRGBA(test_img)
+                
+                # Store result (first 3 channels are RGB)
+                lut_3d[i, j, k] = test_img[0, 0, :3]
     
     logger.info(f"Created 3D LUT: {lut_3d.shape}")
     
@@ -370,22 +376,26 @@ class ACESColorTransformer(nn.Module):
         
         return result.reshape(*shape, 3)
     
-    def _tone_map_lut(self, ap1_linear: torch.Tensor) -> torch.Tensor:
+    def _tone_map_lut(self, ap0_linear: torch.Tensor) -> torch.Tensor:
         """Apply tone mapping via 3D LUT interpolation.
         
-        Maps unbounded scene-referred AP1 linear to [0, 1] display-referred.
+        Takes ACES2065-1 (AP0) linear unbounded values and maps to sRGB [0, 1].
+        The LUT was extracted from OCIO's complete ACES2065-1 → sRGB transform.
         
         Args:
-            ap1_linear: [..., 3] linear AP1 color values (unbounded)
+            ap0_linear: [..., 3] linear AP0 (ACES2065-1) color values (unbounded)
             
         Returns:
-            [..., 3] tone-mapped values in [0, 1]
+            [..., 3] sRGB gamma-encoded values in [0, 1]
         """
-        # Clamp to [0, 1] for LUT lookup
-        ap1_clamped = torch.clamp(ap1_linear, 0.0, 1.0)
+        # Clamp to [0, 8] range (typical ACES dynamic range for LUT coverage)
+        ap0_clamped = torch.clamp(ap0_linear, 0.0, 8.0)
+        
+        # Normalize to [0, 1] for LUT size 64 (which covers [0, 8])
+        ap0_normalized = ap0_clamped / 8.0
         
         # Use trilinear LUT interpolation
-        return self.lut_interpolator.lookup_trilinear(ap1_clamped)
+        return self.lut_interpolator.lookup_trilinear(ap0_normalized)
     
     def _tone_map_analytical(self, ap1_linear: torch.Tensor) -> torch.Tensor:
         """Apply tone mapping via analytical Michaelis-Menten curve.
@@ -466,28 +476,45 @@ class ACESColorTransformer(nn.Module):
             ValueError: If input not on same device
             RuntimeError: If transform fails
         """
-        if aces_tensor.device != self.device:
+        # Check device compatibility (handle 'cuda' vs 'cuda:0' equivalence)
+        tensor_device_type = aces_tensor.device.type
+        transformer_device_type = self.device.type
+        
+        if tensor_device_type != transformer_device_type:
             raise ValueError(
                 f"Input tensor on {aces_tensor.device}, but transformer on {self.device}"
             )
         
-        # Step 1: AP0 → AP1
-        ap1_linear = self._apply_matrix(aces_tensor, self.M_AP0_TO_AP1)
+        # For CUDA, also check device index if specified
+        if tensor_device_type == 'cuda':
+            tensor_idx = aces_tensor.device.index or 0
+            transformer_idx = self.device.index or 0
+            if tensor_idx != transformer_idx:
+                raise ValueError(
+                    f"Input on cuda:{tensor_idx}, transformer on cuda:{transformer_idx}"
+                )
         
-        # Step 2: Tone mapping (RRT)
+        # Step 1: AP0 → AP1 (but we only need this for analytical tone mapping)
+        if not self.use_lut:
+            ap1_linear = self._apply_matrix(aces_tensor, self.M_AP0_TO_AP1)
+        
+        # Step 2: Tone mapping & color space transforms
         if self.use_lut:
-            ap1_display = self._tone_map_lut(ap1_linear)
+            # LUT takes ACES2065-1 (AP0) directly and outputs sRGB
+            srgb_gamma = self._tone_map_lut(aces_tensor)  # Pass AP0, not AP1
+            return torch.clamp(srgb_gamma, 0.0, 1.0)
         else:
+            # Analytical: continue with AP1 → XYZ → Rec.709 → sRGB
             ap1_display = self._tone_map_analytical(ap1_linear)
-        
-        # Step 3-4: AP1 → XYZ → Rec.709
-        xyz = self._apply_matrix(ap1_display, self.M_AP1_TO_XYZ)
-        rec709_linear = self._apply_matrix(xyz, self.M_XYZ_TO_REC709)
-        
-        # Step 5: sRGB OETF (gamma)
-        srgb_gamma = self._apply_srgb_oetf(rec709_linear)
-        
-        return srgb_gamma
+            
+            # Step 3-4: AP1 → XYZ → Rec.709
+            xyz = self._apply_matrix(ap1_display, self.M_AP1_TO_XYZ)
+            rec709_linear = self._apply_matrix(xyz, self.M_XYZ_TO_REC709)
+            
+            # Step 5: sRGB OETF (gamma)
+            srgb_gamma = self._apply_srgb_oetf(rec709_linear)
+            
+            return srgb_gamma
     
     def aces_to_srgb_8u(self, aces_tensor: torch.Tensor) -> torch.Tensor:
         """Transform ACES2065-1 to sRGB uint8.

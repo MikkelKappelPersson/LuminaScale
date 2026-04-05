@@ -77,6 +77,11 @@ class OnTheFlyACESDataset:
 
         self.batch_size = batch_size
         self.device = device
+        
+        # PyTorch ACES transformer (primary, with LUT for accuracy)
+        from luminascale.utils.pytorch_aces_transformer import ACESColorTransformer
+        self.pytorch_transformer = ACESColorTransformer(device=device, use_lut=True)
+        
         self.cdl_processor = GPUCDLProcessor(device=device)
         self.ocio_processor = GPUTorchProcessor(headless=True)
 
@@ -177,8 +182,8 @@ class OnTheFlyACESDataset:
                 graded_aces = self.cdl_processor.apply_cdl_gpu(
                     aces_batch[i], cdl_params
                 )
-                # Apply OCIO display transform: [H, W, 3] -> ([H, W, 3], [H, W, 3])
-                srgb_32f, srgb_8u = self.ocio_processor.apply_ocio_torch(graded_aces)
+                # Apply PyTorch ACES transform: [H, W, 3] -> [H, W, 3]
+                srgb_32f = self.pytorch_transformer.aces_to_srgb_32f(graded_aces)
                 srgb_batch_list.append(srgb_32f)
 
             srgb_batch = torch.stack(srgb_batch_list, dim=0)

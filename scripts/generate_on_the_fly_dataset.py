@@ -36,7 +36,6 @@ if ocio_config_path.exists():
     os.environ["OCIO"] = str(ocio_config_path)
 
 from luminascale.utils.gpu_cdl_processor import GPUCDLProcessor
-from luminascale.utils.gpu_torch_processor import GPUTorchProcessor
 from luminascale.utils.look_generator import get_single_random_look
 from luminascale.utils.io import aces_to_display_gpu
 
@@ -83,7 +82,6 @@ class OnTheFlyACESDataset:
         self.pytorch_transformer = ACESColorTransformer(device=device, use_lut=True)
         
         self.cdl_processor = GPUCDLProcessor(device=device)
-        self.ocio_processor = GPUTorchProcessor(headless=True)
 
         # Open LMDB in read-only mode (no locking)
         self.env = lmdb.open(
@@ -194,7 +192,6 @@ class OnTheFlyACESDataset:
         """Close LMDB and cleanup GPU resources."""
         self.env.close()
         self.cdl_processor.cleanup()
-        self.ocio_processor.cleanup()
         logger.info("Dataset cleanup complete")
 
 

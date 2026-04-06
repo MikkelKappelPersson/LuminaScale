@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 from datetime import datetime
+import os
 from pathlib import Path
 
 # Add project root to sys.path
@@ -72,19 +73,35 @@ def main(cfg: DictConfig) -> None:
 
     # Create dataset
     lmdb_path = Path(cfg.get("lmdb_path")).resolve()
+    
+    # Get distributed training info from environment (set by SLURM/DDP)
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    
     dataset = OnTheFlyBDEDataset(
         lmdb_path=lmdb_path,
         device=None, # Dataset will detect correct GPU per process in DDP
         crop_size=cfg.get("crop_size", 512),
-        patches_per_image=cfg.get("patches_per_image", 1)
+        patches_per_image=cfg.get("patches_per_image", 1),
+        rank=rank,
+        world_size=world_size,
+    )
+    
+    # Use DistributedSampler to ensure each GPU gets different samples (reduces LMDB contention)
+    sampler = torch.utils.data.distributed.DistributedSampler(
+        dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,  # Each rank gets deterministic subset
+        drop_last=False,
     )
     
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=cfg.batch_size,
-        shuffle=False, # Patches from same image kept together for cache hit rate
+        sampler=sampler,  # Use sampler instead of shuffle
         num_workers=cfg.get("num_workers", 0),
-        pin_memory=False,
+        pin_memory=False,  # Already on GPU, cannot pin CUDA tensors
     )
 
     # Create model
@@ -118,12 +135,15 @@ def main(cfg: DictConfig) -> None:
     trainer = L.Trainer(
         accelerator=cfg.get("accelerator", "gpu"),
         devices=cfg.get("devices", "auto"),
-        strategy=cfg.get("strategy", "auto"),
+        strategy=cfg.get("strategy", "auto"),  # Will auto-select DDP for multiple GPUs
         precision=cfg.get("precision", 32),
         max_epochs=cfg.epochs,
         logger=tb_logger,
         callbacks=[checkpoint_callback],
         default_root_dir=run_dir,
+        log_every_n_steps=10,  # Reduce progress bar spam (log every 10 steps instead of 1)
+        enable_progress_bar=True,
+        num_sanity_val_steps=0,  # Skip sanity check for faster startup
     )
 
     # Train!

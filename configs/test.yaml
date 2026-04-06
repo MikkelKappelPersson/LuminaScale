@@ -10,16 +10,16 @@ hydra:
 # Explicitly define values
 lmdb_path: /home/student.aau.dk/fs62fb/projects/LuminaScale/dataset/training_data.lmdb
 output_dir: ./outputs/training
-batch_size: 8
+batch_size: 4  # 4 GPUs × 4 batch size = 16 samples per iteration
 epochs: 1
 learning_rate: 1e-4
 checkpoint_freq: 1
 device: cuda
 accelerator: gpu
-devices: auto
-strategy: auto
+devices: 4  # Use 4 GPUs
+strategy: auto  # Auto-select DDP for multiple GPUs
 precision: 16-mixed
-num_workers: 0 # num_workers > 0 currently has no effect as the GPU pipeline is in the dataset
+num_workers: 0  # Keep 0: CUDA + num_workers>0 incompatible (worker processes inherit main's CUDA state). LMDB I/O is ~43% of batch time, acceptable trade-off.
 patches_per_image: 32
 crop_size: 512
 model:

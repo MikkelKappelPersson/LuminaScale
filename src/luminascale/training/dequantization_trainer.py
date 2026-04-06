@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gc
 import logging
+import os
 import pickle
 import time
 from pathlib import Path
@@ -48,6 +50,8 @@ class OnTheFlyBDEDataset(Dataset):
         device: torch.device | str | None = None,
         crop_size: int = 512,
         patches_per_image: int = 1,
+        rank: int = 0,
+        world_size: int = 1,
     ) -> None:
         self.lmdb_path = Path(lmdb_path).resolve()
         assert self.lmdb_path.exists(), f"LMDB not found: {self.lmdb_path}"
@@ -55,10 +59,12 @@ class OnTheFlyBDEDataset(Dataset):
         self.device = torch.device(device) if device else None
         self.crop_size = crop_size
         self.patches_per_image = max(1, patches_per_image)
+        self.rank = rank
+        self.world_size = world_size
         
         # Open LMDB in read-only mode
         self.env = lmdb.open(
-            str(self.lmdb_path),
+            str(lmdb_path),
             readonly=True,
             lock=False,
             readahead=False,
@@ -72,13 +78,19 @@ class OnTheFlyBDEDataset(Dataset):
         
         # Initialize GPU pipeline (ACES load → CDL → OCIO)
         self.pair_generator = None
-        if self.device:
-            self.pair_generator = DatasetPairGenerator(self.env, self.device, self.keys)
         
         # Image cache: store (srgb_32f, srgb_8u) after full pipeline (reuse across 64 patches)
         self._last_img_idx = -1
         self._cached_srgb_32f = None
         self._cached_srgb_8u = None
+        
+        # Timing statistics
+        self._timings = {"lmdb_load": [], "gpu_transfer": [], "cdl": [], "aces_transform": [], "crop": []}
+        self._batch_count = 0
+        self._report_interval = 500  # Report timings less frequently (every 500 batches to reduce log spam)
+        
+        # GPU memory tracking
+        self._peak_gpu_memory_mb = 0
         
         logger.info(
             f"Initialized OnTheFlyBDEDataset with {len(self.keys)} images. "
@@ -86,7 +98,10 @@ class OnTheFlyBDEDataset(Dataset):
         )
     
     def __len__(self) -> int:
-        return len(self.keys) * self.patches_per_image
+        """Return number of samples for this GPU rank (distributed across world_size GPUs)."""
+        total_samples = len(self.keys) * self.patches_per_image
+        # Each rank gets approximately equal share (last rank may have remainder)
+        return (total_samples + self.world_size - 1) // self.world_size
     
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Generate a random crop from a per-image graded sRGB pair.
@@ -94,16 +109,35 @@ class OnTheFlyBDEDataset(Dataset):
         Returns:
             (input, target) = (srgb_8u, srgb_32f) with shapes [3, H, W] on GPU, normalized to [0, 1]
         """
+        t_start = time.perf_counter()
+        is_first_batch = (self._batch_count == 0)
+        
+        if is_first_batch:
+            logger.info(f"[BATCH 0] Starting first batch load (idx={idx})...")
+        
         # Lazy initialization of pair_generator to support DDP (where device is set late)
         if self.pair_generator is None:
             # Detect device if not set (fallback for DDP processes)
             if self.device is None:
-                self.device = torch.device(f"cuda:{torch.cuda.current_device()}")
+                try:
+                    self.device = torch.device(f"cuda:{torch.cuda.current_device()}")
+                except RuntimeError:
+                    # Fallback for worker processes without direct CUDA access
+                    self.device = torch.device("cuda:0")
                 logger.info(f"Dataset detected and using device: {self.device}")
-            self.pair_generator = DatasetPairGenerator(self.env, self.device, self.keys)
+            
+            logger.info("Initializing GPU color pipeline (ACESColorTransformer + CDL)...")
+            logger.info("  ℹ️  This includes OCIO LUT evaluation (~9 sec one-time cost for 128³ color mapping)")
+            init_start = time.perf_counter()
+            self.pair_generator = DatasetPairGenerator(self.env, self.device, self.keys, timing_tracker=self._timings)
+            init_time_sec = time.perf_counter() - init_start
+            logger.info(f"✓ GPU pipeline ready ({init_time_sec:.1f}s). Training will now start normally.")
 
-        # Map flat index to image index
-        img_idx = (idx // self.patches_per_image) % len(self.keys)
+        # Map local index to global image index (distributed across ranks)
+        # When using DistributedSampler, each rank gets different samples
+        # We need to map the local idx back to the correct image in LMDB
+        global_sample_idx = idx + (self.rank * len(self))
+        img_idx = (global_sample_idx // self.patches_per_image) % len(self.keys)
         
         # Load ACES, apply CDL + OCIO once per image (cache to reuse across patches)
         if img_idx != self._last_img_idx:
@@ -136,7 +170,7 @@ class OnTheFlyBDEDataset(Dataset):
         
         H, W = srgb_32f.shape[0], srgb_32f.shape[1]
         
-        # Random crop
+        # Random crop - IMPORTANT: create copies, not views, to avoid holding full image in memory
         if H < self.crop_size or W < self.crop_size:
             # Upscale if image is smaller than crop
             srgb_32f_reshaped = srgb_32f.permute(2, 0, 1).unsqueeze(0)
@@ -156,24 +190,94 @@ class OnTheFlyBDEDataset(Dataset):
                 align_corners=False,
             ).squeeze(0).permute(1, 2, 0)
         else:
-            # Random crop
+            # Random crop - CRITICAL FIX: .clone() ensures we don't hold reference to full image
             top = torch.randint(0, H - self.crop_size + 1, (1,), device=self.device).item()
             left = torch.randint(0, W - self.crop_size + 1, (1,), device=self.device).item()
-            srgb_32f = srgb_32f[top : top + self.crop_size, left : left + self.crop_size, :]
-            srgb_8u = srgb_8u[top : top + self.crop_size, left : left + self.crop_size, :]
+            srgb_32f = srgb_32f[top : top + self.crop_size, left : left + self.crop_size, :].clone()
+            srgb_8u = srgb_8u[top : top + self.crop_size, left : left + self.crop_size, :].clone()
         
         # Both are [crop_size, crop_size, 3]
         # Convert to float32, normalize 8-bit to [0, 1], and permute to [3, H, W]
         srgb_8u = (srgb_8u.float() / 255.0).permute(2, 0, 1)  # [0, 255] → [0, 1], then [H, W, 3] → [3, H, W]
         srgb_32f = srgb_32f.float().permute(2, 0, 1)  # [H, W, 3] → [3, H, W]
         
+        # Track timing and GPU memory
+        t_end = time.perf_counter()
+        self._batch_count += 1
+        batch_time_ms = (t_end - t_start) * 1000
+        self._timings["crop"].append(batch_time_ms)
+        
+        if is_first_batch:
+            logger.info(f"[BATCH 0] ✓ First batch ready in {batch_time_ms:.1f}ms. Training begins now.")
+        
+        # Monitor GPU memory and log every N batches
+        if self._batch_count % self._report_interval == 0:
+            self._log_timing_stats()
+            self._log_gpu_memory()
+            # Periodic cleanup to prevent memory fragmentation buildup
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        
         # Return (input, target) = (8-bit input to expand, 32-bit ground truth)
         return srgb_8u, srgb_32f
     
+    def _log_timing_stats(self) -> None:
+        """Log aggregated timing statistics for bottleneck analysis."""
+        import statistics
+        
+        if not any(self._timings.values()):
+            return
+        
+        stats_lines = [
+            "\n" + "="*80,
+            f"BATCH TIMING STATS (last {min(self._report_interval, self._batch_count)} batches, Batch #{self._batch_count}):",
+            "-"*80,
+        ]
+        
+        total_ms = 0
+        for key, times in self._timings.items():
+            if times:
+                # Keep only recent timings to avoid memory bloat
+                times = times[-self._report_interval:]
+                avg_ms = statistics.mean(times)
+                max_ms = max(times)
+                min_ms = min(times)
+                stats_lines.append(f"  {key:20s}: {avg_ms:7.2f}ms avg | {min_ms:7.2f}ms min | {max_ms:7.2f}ms max")
+                total_ms += avg_ms
+        
+        stats_lines.append("-"*80)
+        stats_lines.append(f"  {'TOTAL':20s}: {total_ms:7.2f}ms per batch")
+        stats_lines.append("="*80 + "\n")
+        
+        logger.info("\n".join(stats_lines))
+    
+    def _log_gpu_memory(self) -> None:
+        """Log GPU memory usage for memory leak detection."""
+        if not torch.cuda.is_available():
+            return
+        
+        allocated_mb = torch.cuda.memory_allocated(self.device) / 1024 / 1024
+        reserved_mb = torch.cuda.memory_reserved(self.device) / 1024 / 1024
+        
+        if allocated_mb > self._peak_gpu_memory_mb:
+            self._peak_gpu_memory_mb = allocated_mb
+        
+        msg = (
+            f"\nGPU MEMORY (Batch {self._batch_count}):\n"
+            f"  Allocated: {allocated_mb:.1f} MB\n"
+            f"  Reserved:  {reserved_mb:.1f} MB\n"
+            f"  Peak:      {self._peak_gpu_memory_mb:.1f} MB\n"
+        )
+        logger.info(msg)
+    
     def cleanup(self) -> None:
-        """Release GPU resources."""
+        """Release GPU resources and close LMDB."""
         if self.pair_generator:
             self.pair_generator.cleanup()
+        if self.env:
+            self.env.close()
 
 
 class LuminaScaleModule(L.LightningModule):

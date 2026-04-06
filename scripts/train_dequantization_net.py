@@ -39,6 +39,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from luminascale.models import create_dequantization_net
 from luminascale.training.dequantization_trainer import OnTheFlyBDEDataset, LuminaScaleModule
+from luminascale.training.async_prefetch import AsyncDataLoader
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -96,13 +97,40 @@ def main(cfg: DictConfig) -> None:
         drop_last=False,
     )
     
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=cfg.batch_size,
-        sampler=sampler,  # Use sampler instead of shuffle
-        num_workers=cfg.get("num_workers", 0),
-        pin_memory=False,  # Already on GPU, cannot pin CUDA tensors
-    )
+    # Choose between standard DataLoader and AsyncDataLoader based on config
+    use_async_prefetch = cfg.get("use_async_prefetch", False)
+    
+    if use_async_prefetch:
+        # Async prefetch mode: use CPU threads to prefetch LMDB while GPU computes
+        # NOTE: Dataset already handles rank-aware partitioning, so we don't use sampler
+        logger.info("=" * 80)
+        logger.info("ASYNC PREFETCH MODE ENABLED")
+        logger.info(f"  num_workers (CPU threads): {cfg.get('prefetch_workers', 4)}")
+        logger.info(f"  prefetch_queue_size: {cfg.get('prefetch_queue_size', 3)}")
+        logger.info("=" * 80)
+        
+        # CRITICAL: Lazy-initialize pair_generator by calling __getitem__ once
+        # This ensures cdl_processor and pytorch_transformer are created before workers start
+        logger.info("Initializing dataset GPU pipeline (one-time setup)...")
+        _ = dataset[0]  # Trigger lazy initialization
+        logger.info("✓ Dataset GPU pipeline ready")
+        
+        dataloader = AsyncDataLoader(
+            dataset=dataset,
+            batch_size=cfg.batch_size,
+            num_workers=cfg.get("prefetch_workers", 4),
+            prefetch_device=f"cuda:{rank}" if torch.cuda.is_available() else "cpu",
+            queue_size=cfg.get("prefetch_queue_size", 3),
+        )
+    else:
+        # Standard PyTorch DataLoader with DistributedSampler
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=cfg.batch_size,
+            sampler=sampler,  # Use sampler instead of shuffle
+            num_workers=cfg.get("num_workers", 0),
+            pin_memory=False,  # Already on GPU, cannot pin CUDA tensors
+        )
 
     # Create model
     raw_model = create_dequantization_net(

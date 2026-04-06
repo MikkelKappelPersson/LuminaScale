@@ -272,6 +272,67 @@ class OnTheFlyBDEDataset(Dataset):
         )
         logger.info(msg)
     
+    def _get_key_for_idx(self, idx: int) -> str:
+        """Get LMDB key for a given dataset index.
+        
+        This accounts for rank-aware indexing in distributed training.
+        Maps a local index to the corresponding LMDB key.
+        
+        Args:
+            idx: Local dataset index for this rank
+            
+        Returns:
+            LMDB key string
+        """
+        global_sample_idx = idx + (self.rank * len(self))
+        img_idx = (global_sample_idx // self.patches_per_image) % len(self.keys)
+        return self.keys[img_idx]
+    
+    def _get_cdl_params_for_idx(self, idx: int) -> dict:
+        """Generate random CDL parameters for async prefetch.
+        
+        Each call generates a new random CDL, matching the behavior of __getitem__.
+        
+        Args:
+            idx: Index (not used, just for API consistency)
+            
+        Returns:
+            CDL parameters dict with 'slope', 'offset', 'power' keys
+        """
+        return get_single_random_look()
+    
+    def _load_aces_from_lmdb(self, key: str) -> np.ndarray:
+        """Load ACES image from LMDB as CPU numpy array.
+        
+        This is used by async prefetch to load raw ACES data without GPU transforms.
+        The GPU transforms (CDL, ACES-to-sRGB) happen later in the main thread.
+        
+        Args:
+            key: LMDB key for the image
+            
+        Returns:
+            ACES data as [H, W, 3] float32 numpy array (CPU)
+            
+        Raises:
+            KeyError: If key not found in LMDB
+        """
+        with self.env.begin(write=False) as txn:
+            buf = txn.get(key.encode("ascii"))
+            if buf is None:
+                raise KeyError(f"Key not found: {key}")
+        
+        # Parse header: 3 × uint32 = 12 bytes
+        header = np.frombuffer(buf[:12], dtype=np.uint32)
+        H, W, C = int(header[0]), int(header[1]), int(header[2])
+        
+        # Extract ACES data: float32 array as [C, H, W]
+        hdr_size = H * W * C * 4
+        hdr_np = np.frombuffer(buf[12 : 12 + hdr_size], dtype=np.float32).reshape(C, H, W).copy()
+        
+        # Convert to [H, W, 3] and return as numpy (not tensor)
+        aces_np = np.transpose(hdr_np, (1, 2, 0))  # [C, H, W] → [H, W, C]
+        return aces_np.astype(np.float32)
+    
     def cleanup(self) -> None:
         """Release GPU resources and close LMDB."""
         if self.pair_generator:

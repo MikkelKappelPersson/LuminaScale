@@ -10,7 +10,7 @@ hydra:
 # Explicitly define values
 lmdb_path: /home/student.aau.dk/fs62fb/projects/LuminaScale/dataset/training_data.lmdb
 output_dir: ./outputs/training
-batch_size: 4  # 4 GPUs × 4 batch size = 16 samples per iteration
+batch_size: 32  # Match patches_per_image to avoid loading new image mid-epoch
 epochs: 1
 learning_rate: 1e-4
 checkpoint_freq: 1
@@ -22,6 +22,15 @@ precision: 16-mixed
 num_workers: 0  # Keep 0: CUDA + num_workers>0 incompatible (worker processes inherit main's CUDA state). LMDB I/O is ~43% of batch time, acceptable trade-off.
 patches_per_image: 32
 crop_size: 512
+
+# Async prefetch configuration (new feature for I/O parallelization)
+# Set use_async_prefetch=true to enable threading-based LMDB prefetch
+# This uses spare CPU cores to prefetch next batch while GPU computes current batch
+# Expected speedup: 1.85x (from 18.8 to ~44-48 samples/s)
+use_async_prefetch: false  # Set to true to enable
+prefetch_workers: 4        # Number of CPU threads for LMDB I/O
+prefetch_queue_size: 3     # Max batches to buffer (trades memory for latency hiding)
+
 model:
   base_channels: 32
 # TensorBoard logging is auto-enabled; view with:

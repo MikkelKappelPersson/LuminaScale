@@ -12,6 +12,6 @@ devices: auto
 strategy: auto
 precision: 16-mixed
 checkpoint_freq: 10
-num_workers: 4
+num_workers: 0  # Keep 0 for multi-GPU DDP support (avoids LMDB contention)
 model:
   base_channels: 16

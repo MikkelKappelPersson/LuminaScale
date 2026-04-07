@@ -62,13 +62,16 @@ class OnTheFlyBDEDataset(Dataset):
         self.rank = rank
         self.world_size = world_size
         
-        # Open LMDB in read-only mode
+        # Open LMDB in read-only mode with optimized settings for large images
+        # readahead=False prevents OS page thrashing on 500MB+ images
+        # map_size=512GB accommodates sequential large-value reads
         self.env = lmdb.open(
             str(lmdb_path),
             readonly=True,
             lock=False,
-            readahead=False,
+            readahead=False,  # Disable to prevent page thrashing with 269MB+ images
             meminit=False,
+            map_size=512 * 1024 * 1024 * 1024,  # 512GB: delay degradation further
         )
         
         with self.env.begin(write=False) as txn:
@@ -84,10 +87,19 @@ class OnTheFlyBDEDataset(Dataset):
         self._cached_srgb_32f = None
         self._cached_srgb_8u = None
         
-        # Timing statistics
+        # Timing statistics (kept minimal to avoid memory bloat)
         self._timings = {"lmdb_load": [], "gpu_transfer": [], "cdl": [], "aces_transform": [], "crop": []}
         self._batch_count = 0
-        self._report_interval = 500  # Report timings less frequently (every 500 batches to reduce log spam)
+        self._report_interval = 50  # Report timings every 50 batches (without expensive empty_cache calls)
+        
+        # LMDB connection: Note - refresh doesn't help with large images (>4GB each)
+        # LMDB memory mapping thrashes on images this large. Consider pre-loading into RAM
+        # or reducing image sizes for acceptable training speed.
+        self._lmdb_slow_threshold_batches = 1500  # Track when slowdown begins
+        
+        # Track LMDB read performance to detect degradation
+        self._lmdb_read_times = []  # Recent LMDB read times for diagnostics
+        self._lmdb_slow_read_threshold_ms = 1000  # Flag reads slower than 1 second
         
         # GPU memory tracking
         self._peak_gpu_memory_mb = 0
@@ -144,7 +156,7 @@ class OnTheFlyBDEDataset(Dataset):
             # Clear previous cache to free GPU memory before loading next image
             self._cached_srgb_32f = None
             self._cached_srgb_8u = None
-            torch.cuda.empty_cache()
+            # Don't call torch.cuda.empty_cache() here—it's a synchronous blocking op that causes stalls
 
             key = self.keys[img_idx]
             try:
@@ -152,7 +164,8 @@ class OnTheFlyBDEDataset(Dataset):
                 cdl_params = get_single_random_look()
                 
                 # Full pipeline: load ACES → apply CDL → transform to sRGB
-                srgb_32f, srgb_8u = self.pair_generator.load_aces_apply_cdl_and_transform(key, cdl_params)
+                # Pass self as reference for LMDB performance tracking
+                srgb_32f, srgb_8u = self.pair_generator.load_aces_apply_cdl_and_transform(key, cdl_params, dataset_ref=self)
                 
                 # Cache the full graded sRGB for this image
                 self._cached_srgb_32f = srgb_32f  # [H, W, 3]
@@ -210,15 +223,23 @@ class OnTheFlyBDEDataset(Dataset):
         if is_first_batch:
             logger.info(f"[BATCH 0] ✓ First batch ready in {batch_time_ms:.1f}ms. Training begins now.")
         
-        # Monitor GPU memory and log every N batches
-        if self._batch_count % self._report_interval == 0:
+        # Log timing stats (don't call expensive cleanup—GPU memory is managed by OS)
+        if self._batch_count % self._report_interval == 0 and self._batch_count > 0:
             self._log_timing_stats()
-            self._log_gpu_memory()
-            # Periodic cleanup to prevent memory fragmentation buildup
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+            
+            # Also log LMDB read performance trend
+            if self._lmdb_read_times:
+                recent_reads = self._lmdb_read_times[-20:]  # Last 20 reads
+                avg_read_ms = np.mean(recent_reads)
+                max_read_ms = np.max(recent_reads)
+                slow_count = sum(1 for t in recent_reads if t > self._lmdb_slow_read_threshold_ms)
+                
+                if slow_count > 0 or max_read_ms > 500:
+                    logger.warning(
+                        f"[LMDB PERFORMANCE ALERT] Batch {self._batch_count}: "
+                        f"Avg read {avg_read_ms:.1f}ms | Max {max_read_ms:.1f}ms | "
+                        f"Slow reads (>1s): {slow_count}/20"
+                    )
         
         # Return (input, target) = (8-bit input to expand, 32-bit ground truth)
         return srgb_8u, srgb_32f
@@ -230,6 +251,11 @@ class OnTheFlyBDEDataset(Dataset):
         if not any(self._timings.values()):
             return
         
+        # Aggressively trim timing lists to prevent unbounded memory growth
+        for key in self._timings.keys():
+            if len(self._timings[key]) > self._report_interval:
+                self._timings[key] = self._timings[key][-self._report_interval:]
+        
         stats_lines = [
             "\n" + "="*80,
             f"BATCH TIMING STATS (last {min(self._report_interval, self._batch_count)} batches, Batch #{self._batch_count}):",
@@ -239,8 +265,6 @@ class OnTheFlyBDEDataset(Dataset):
         total_ms = 0
         for key, times in self._timings.items():
             if times:
-                # Keep only recent timings to avoid memory bloat
-                times = times[-self._report_interval:]
                 avg_ms = statistics.mean(times)
                 max_ms = max(times)
                 min_ms = min(times)

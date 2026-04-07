@@ -40,7 +40,8 @@ from omegaconf import DictConfig, OmegaConf
 from luminascale.models import create_dequantization_net
 from luminascale.training.dequantization_trainer import OnTheFlyBDEDataset, LuminaScaleModule
 
-logging.basicConfig(level=logging.INFO)
+# Enable DEBUG to see per-image timing breakdowns from dataset loading
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
@@ -96,10 +97,11 @@ def main(cfg: DictConfig) -> None:
         drop_last=False,
     )
     
+    # DataLoader with num_workers=0 for DDP stability
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=cfg.batch_size,
-        sampler=sampler,  # Use sampler instead of shuffle
+        sampler=sampler,
         num_workers=cfg.get("num_workers", 0),
         pin_memory=False,  # Already on GPU, cannot pin CUDA tensors
     )

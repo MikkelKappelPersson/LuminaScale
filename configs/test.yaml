@@ -3,6 +3,8 @@
 
 # Hydra configuration to avoid creating redundant timestamped folders in outputs/
 hydra:
+  job:
+    chdir: false  # Explicitly disable directory changing (future Hydra default)
   run:
     dir: .   # This makes Hydra run in the current working directory
   output_subdir: null # This prevents Hydra from creating a .hydra subdirectory
@@ -10,16 +12,16 @@ hydra:
 # Explicitly define values
 lmdb_path: /home/student.aau.dk/fs62fb/projects/LuminaScale/dataset/training_data.lmdb
 output_dir: ./outputs/training
-batch_size: 4  # 4 GPUs × 4 batch size = 16 samples per iteration
-epochs: 1
+batch_size: 4  
 learning_rate: 1e-4
+epochs: 1
 checkpoint_freq: 1
 device: cuda
 accelerator: gpu
-devices: 4  # Use 4 GPUs
+devices: auto  # Auto-detect GPUs allocated by Slurm (via --gres=gpu:N)
 strategy: auto  # Auto-select DDP for multiple GPUs
 precision: 16-mixed
-num_workers: 0  # Keep 0: CUDA + num_workers>0 incompatible (worker processes inherit main's CUDA state). LMDB I/O is ~43% of batch time, acceptable trade-off.
+num_workers: 0  # Keep 0 for DDP multi-GPU compatibility (avoid LMDB contention)
 patches_per_image: 32
 crop_size: 512
 model:

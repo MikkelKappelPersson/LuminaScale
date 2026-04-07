@@ -23,51 +23,120 @@ class DatasetPairGenerator:
     """Utilities for loading ACES and applying GPU transforms.
     
     This class handles the full ACES→sRGB pipeline:
-    - Loading ACES from LMDB
+    - Loading ACES from LMDB or raw bytes (WebDataset)
     - Applying CDL grading (optional)
     - GPU-accelerated color transforms (OCIO)
-    
-    CDL grading and dataset iteration are handled by Dataset classes that use these utilities.
     """
 
     def __init__(
         self,
-        lmdb_env: lmdb.Environment,
+        lmdb_env: lmdb.Environment | None,
         device: torch.device,
         keys_cache: list[str] | None = None,
         timing_tracker: dict | None = None,
         lmdb_path: str | None = None,
     ) -> None:
-        """Initialize ACES loader and GPU transform utilities.
-        
-        Args:
-            lmdb_env: Open LMDB environment in read-only mode.
-            device: GPU device (e.g., torch.device("cuda")).
-            keys_cache: Pre-loaded keys list (optional, auto-loads if None).
-            timing_tracker: Optional dict to track operation timings for profiling.
-            lmdb_path: Path to LMDB database (unused, kept for compatibility).
-        """
+        """Initialize ACES loader and GPU transform utilities."""
         self.env = lmdb_env
-        self.lmdb_path = lmdb_path  # Unused but kept for API compatibility
+        self.lmdb_path = lmdb_path
         self.device = device
         self.timing_tracker = timing_tracker or {}
-        self._image_load_count = 0  # Track for occasional detailed logging
         
-        # Persistent transaction and cursor (lazy-initialized on first read)
-        # Avoiding early initialization prevents expensive seek overhead on first access
-        self.persistent_txn = None
-        self.persistent_cursor = None
-        
-        # Track cursor age to reset periodically (prevents OS page cache bloat)
-        self._cursor_read_count = 0
-        self._cursor_reset_interval = 1000  # Reset cursor every 1000 image reads
-        
-        # PyTorch ACES transformer (primary, with LUT for accuracy)
+        # PyTorch ACES transformer
         from .pytorch_aces_transformer import ACESColorTransformer
         self.pytorch_transformer = ACESColorTransformer(device=device, use_lut=True)
         
         self.cdl_processor = GPUCDLProcessor(device=device)
-        self.keys_cache = keys_cache or self._load_keys()
+        self.keys_cache = keys_cache or (self._load_keys() if self.env else [])
+
+    def generate_batch_from_bytes(
+        self, 
+        exr_bytes_list: list[bytes], 
+        crop_size: int = 512
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process a list of raw EXR bytes into graded sRGB 8u/32f pairs on GPU."""
+        import OpenImageIO as oiio
+        import time
+        
+        t0 = time.perf_counter()
+        srgb_8u_batch = []
+        srgb_32f_batch = []
+        
+        # logger.info(f"Generating batch for {len(exr_bytes_list)} samples")
+        
+        for idx, exr_bytes in enumerate(exr_bytes_list):
+            t_sample = time.perf_counter()
+            # 1. Decode EXR from memory using OIIO
+            # This is the most expensive CPU operation
+            try:
+                buf_input = oiio.ImageInput.open_mem(exr_bytes)
+                if not buf_input:
+                    logger.error(f"OIIO failed to open EXR bytes for sample {idx}: {oiio.geterror()}")
+                    continue
+                
+                pixels = buf_input.read_image("float")
+                buf_input.close()
+            except Exception as e:
+                logger.error(f"OIIO Critical Failure on sample {idx}: {e}")
+                continue
+                
+            t_decode = time.perf_counter()
+            
+            # 2. Convert to GPU Tensor [C, H, W]
+            aces_tensor = torch.from_numpy(pixels.copy()).to(self.device).permute(2, 0, 1)
+            t_gpu = time.perf_counter()
+            
+            # 3. Apply Random CDL Look
+            from .look_generator import get_single_random_look
+            look = get_single_random_look()
+            
+            # Apply CDL on GPU
+            aces_graded = self.cdl_processor.apply_cdl_gpu(aces_tensor, look)
+            t_cdl = time.perf_counter()
+            
+            # 4. ACES -> sRGB Transform
+            srgb_32f = self.pytorch_transformer.aces_to_srgb(aces_graded.unsqueeze(0)).squeeze(0)
+            t_aces = time.perf_counter()
+            
+            # 5. Quantize to 8-bit
+            from .image_generator import quantize_to_8bit_torch
+            srgb_8u = quantize_to_8bit_torch(srgb_32f)
+            
+            # 6. Random Crop
+            if crop_size > 0:
+                c, h, w = srgb_32f.shape
+                th, tw = crop_size, crop_size
+                if h < th or w < tw:
+                    logger.warning(f"Image too small for crop ({h}x{w} < {th}x{tw}). Scaling up.")
+                    srgb_32f = torch.nn.functional.interpolate(srgb_32f.unsqueeze(0), size=(th, tw), mode='bilinear').squeeze(0)
+                    srgb_8u = torch.nn.functional.interpolate(srgb_8u.unsqueeze(0), size=(th, tw), mode='nearest').squeeze(0)
+                else:
+                    i = torch.randint(0, h - th + 1, (1,)).item()
+                    j = torch.randint(0, w - tw + 1, (1,)).item()
+                    srgb_32f = srgb_32f[:, i : i + th, j : j + tw]
+                    srgb_8u = srgb_8u[:, i : i + th, j : j + tw]
+            t_crop = time.perf_counter()
+                
+            srgb_32f_batch.append(srgb_32f)
+            srgb_8u_batch.append(srgb_8u)
+            
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    f"Sample {idx}: Decode={(t_decode-t_sample)*1000:.1f}ms | "
+                    f"GPU={(t_gpu-t_decode)*1000:.1f}ms | "
+                    f"CDL={(t_cdl-t_gpu)*1000:.1f}ms | "
+                    f"ACES={(t_aces-t_cdl)*1000:.1f}ms | "
+                    f"Crop={(t_crop-t_aces)*1000:.1f}ms"
+                )
+            elif idx == 0 and logger.isEnabledFor(logging.INFO):
+                 logger.info(f"First Sample Profile: Decode={(t_decode-t_sample)*1000:.1f}ms | GPU={(t_gpu-t_decode)*1000:.1f}ms")
+            
+        res_8u = torch.stack(srgb_8u_batch)
+        res_32f = torch.stack(srgb_32f_batch)
+        
+        # logger.info(f"Batch processed in {(time.perf_counter()-t0)*1000:.1f}ms (Size: {len(exr_bytes_list)})")
+            
+        return res_8u, res_32f
     
     def __del__(self) -> None:
         """Cleanup persistent transaction and cursor on destruction."""

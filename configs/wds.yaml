@@ -1,0 +1,20 @@
+# WebDataset training configuration
+# Usage: python scripts/train_dequantization_net.py --config-name=wds
+
+shard_path: "dataset/temp/shards/train/train-{000000..000099}.tar" # Example pattern
+val_shard_path: "dataset/temp/shards/val/val-{000000..000009}.tar"
+metadata_parquet: "dataset/temp/training_metadata.parquet"
+output_dir: ./outputs/training
+batch_size: 16
+epochs: 100
+learning_rate: 1e-4
+device: cuda
+accelerator: gpu
+devices: auto
+strategy: auto
+precision: 16-mixed
+checkpoint_freq: 10
+num_workers: 4
+shuffle_buffer: 1000
+model:
+  base_channels: 16

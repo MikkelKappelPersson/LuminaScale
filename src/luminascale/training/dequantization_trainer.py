@@ -20,6 +20,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 # from torch.utils.tensorboard import SummaryWriter (handled by Lightning)
 
+from ..data.wds_dataset import LuminaScaleWebDataset
 from ..utils.dataset_pair_generator import DatasetPairGenerator
 from ..utils.look_generator import get_single_random_look
 from ..utils.image_generator import create_primary_gradients, create_sky_gradient, quantize_to_8bit
@@ -314,24 +315,75 @@ class LuminaScaleModule(L.LightningModule):
         vis_freq: int = 5,
     ) -> None:
         super().__init__()
+        print(f"[LuminaScaleModule] Initializing LightningModule...")
         self.model = model
         self.learning_rate = learning_rate
         self.vis_freq = vis_freq
         self.save_hyperparameters(ignore=["model"])
+        print(f"[LuminaScaleModule] ✓ Initialization complete")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
 
     def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        x, y = batch
-        y_hat = self.model(x)
+        print(f"\n{'='*80}")
+        print(f"[TRAINING_STEP] ========== BATCH {batch_idx} RECEIVED ==========")
+        print(f"[TRAINING_STEP] Batch type: {type(batch)}")
+        
+        try:
+            if isinstance(batch, (list, tuple)):
+                print(f"[TRAINING_STEP] Batch is tuple/list with length: {len(batch)}")
+                if len(batch) >= 2:
+                    print(f"[TRAINING_STEP] batch[0] type: {type(batch[0])}, batch[1] type: {type(batch[1])}")
+                    
+                    # Try direct assignment first (standard LMDB case)
+                    if isinstance(batch[0], torch.Tensor) and isinstance(batch[1], torch.Tensor):
+                        print(f"[TRAINING_STEP] ✓ Detected tensor batch (LMDB flow)")
+                        x, y = batch
+                    # WebDataset case: batch is (exr_bytes_list, metadata_list)
+                    elif isinstance(batch[0], list) and len(batch[0]) > 0:
+                        print(f"[TRAINING_STEP] batch[0][0] type: {type(batch[0][0])}")
+                        if isinstance(batch[0][0], bytes):
+                            print(f"[TRAINING_STEP] ✓ Detected WebDataset raw bytes batch")
+                            print(f"[TRAINING_STEP] Calling _process_batch...")
+                            t_start = time.perf_counter()
+                            x, y = self._process_batch(batch)
+                            print(f"[TRAINING_STEP] GPU Processing took {(time.perf_counter()-t_start)*1000:.1f}ms")
+                        else:
+                            print(f"[TRAINING_STEP] Unknown batch format, treating as tensor")
+                            x, y = batch
+                    else:
+                        print(f"[TRAINING_STEP] Unknown batch format, treating as tensor")
+                        x, y = batch
+                else:
+                    raise ValueError(f"Batch tuple has {len(batch)} elements, expected 2")
+            else:
+                raise ValueError(f"Batch type {type(batch)} is not tuple/list")
 
-        # Compute mask for well-exposed regions (avoid clipped areas)
-        mask = exposure_mask(y)
-        loss = masked_l2_loss(y_hat, y, mask)
+            print(f"[TRAINING_STEP] x shape: {x.shape if hasattr(x, 'shape') else 'N/A'}")
+            print(f"[TRAINING_STEP] y shape: {y.shape if hasattr(y, 'shape') else 'N/A'}")
+            
+            y_hat = self.model(x)
+            print(f"[TRAINING_STEP] Model output shape: {y_hat.shape}")
 
-        self.log("train_loss", loss, prog_bar=True, sync_dist=True)
-        return loss
+            # Compute mask for well-exposed regions (avoid clipped areas)
+            mask = exposure_mask(y)
+            loss = masked_l2_loss(y_hat, y, mask)
+
+            self.log("train_loss", loss, prog_bar=True, sync_dist=True)
+            print(f"[TRAINING_STEP] ✓ Loss computed: {loss.item():.6f}")
+            print(f"{'='*80}\n")
+            return loss
+            
+        except Exception as e:
+            print(f"{'='*80}")
+            print(f"[TRAINING_STEP] ❌ EXCEPTION in training_step!")
+            print(f"[TRAINING_STEP] Exception type: {type(e).__name__}")
+            print(f"[TRAINING_STEP] Exception message: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"{'='*80}\n")
+            raise
 
     def on_train_epoch_end(self) -> None:
         """Log synthetic visualizations at the end of each epoch."""
@@ -514,17 +566,48 @@ class DequantizationTrainer:
         learning_rate: float = 1e-4,
         log_dir: str | Path | None = None,
         vis_freq: int = 5,
+        crop_size: int = 512,
     ) -> None:
         self.model = model.to(device)
         self.device = device
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-        self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None
+        # self.writer = SummaryWriter(log_dir=log_dir) if log_dir else None # Using Lightning for most logging
+        self.log_dir = log_dir
         self.vis_freq = vis_freq
+        self.crop_size = crop_size
+        
+        # Initialize the GPU-accelerated Grading/ACES pipeline
+        # This will be used to process raw EXR bytes streamed from WDS
+        self.pair_generator = DatasetPairGenerator(None, device, keys=[])
 
-    def _log_visualizations(self, epoch: int) -> None:
+    def _process_batch(self, batch: tuple[list[bytes], list[dict]]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert raw WDS batch (bytes) into graded training pairs (LDR, HDR) on GPU."""
+        exr_bytes_list, metadata_list = batch
+        
+        # Ensure the device matches the model's current device
+        # In Lightning, self.device is automatically updated to the assigned GPU.
+        if self.pair_generator.device != self.device:
+            logger.info(f"Updating DatasetPairGenerator device to match model: {self.device}")
+            self.pair_generator.device = self.device
+            self.pair_generator.pytorch_transformer.device = self.device
+            self.pair_generator.cdl_processor.device = self.device
+
+        # 1. Decode and Grade on GPU
+        t_start = time.perf_counter()
+        srgb_8u_batch, srgb_32f_batch = self.pair_generator.generate_batch_from_bytes(
+            exr_bytes_list, 
+            crop_size=self.crop_size
+        )
+        logger.debug(f"[PROCESS BATCH] Generated {len(exr_bytes_list)} image pairs in {(time.perf_counter()-t_start)*1000:7.1f}ms")
+        
+        return srgb_8u_batch, srgb_32f_batch
+
+    def train(self):
+        """Main training loop placeholder (Lightning handles this via fit)."""
+        pass
+
+    def _log_synthetic_visualizations(self) -> None:
         """Log synthetic visualizations (RGB Primaries) to TensorBoard."""
-        if not self.writer:
-            return
 
         self.model.eval()
         with torch.no_grad():
@@ -578,17 +661,13 @@ class DequantizationTrainer:
 
     def train(
         self,
-        train_dataloader: DataLoader,
+        train_dataloader: DataLoader | wds.WebLoader,
         num_epochs: int = 100,
         checkpoint_dir: str | Path = "checkpoints",
         checkpoint_freq: int = 10,
         run_name: str | None = None,
     ) -> None:
-        """Main training loop.
-        
-        TensorBoard logs are written to self.writer if initialized.
-        View with: tensorboard --logdir=<log_dir>
-        """
+        """Main training loop."""
         checkpoint_path = Path(checkpoint_dir)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
@@ -602,10 +681,18 @@ class DequantizationTrainer:
             backward_time = 0.0
             batch_start = time.time()
             
-            for i, (input, target) in enumerate(train_dataloader):
+            for i, batch in enumerate(train_dataloader):
                 data_time += time.time() - batch_start
                 
-                input, target = input.to(self.device), target.to(self.device)
+                # If using WebDataset, the batch is (exr_bytes, metadata)
+                # We need to process it into (input, target) on GPU
+                if isinstance(batch, list) and isinstance(batch[0], list) and isinstance(batch[0][0], bytes):
+                    proc_start = time.time()
+                    input, target = self._process_batch(batch)
+                    data_time += time.time() - proc_start # Counting GPU processing as part of data prep
+                else:
+                    input, target = batch
+                    input, target = input.to(self.device), target.to(self.device)
 
                 # Forward pass
                 forward_start = time.time()
@@ -625,6 +712,16 @@ class DequantizationTrainer:
 
                 running_loss += loss.item()
                 
+                # Immediate logging for first batches or long intervals
+                if i % 10 == 0 or i < 5:
+                    logger.info(
+                        f"Epoch [{epoch}] Batch [{i}] "
+                        f"Loss: {loss.item():.6f} | "
+                        f"BatchTime: {time.time()-batch_start:.3f}s | "
+                        f"Data: {data_time/(i+1):.3f}s | "
+                        f"Fwd: {forward_time/(i+1):.3f}s | Bwd: {backward_time/(i+1):.3f}s"
+                    )
+
                 # Log to TensorBoard
                 if self.writer:
                     global_step = epoch * len(train_dataloader) + i
@@ -632,7 +729,9 @@ class DequantizationTrainer:
                     
                     # Log learning rate
                     for param_group in self.optimizer.param_groups:
-                        self.writer.add_scalar("LearningRate", param_group["lr"], global_step)
+                        self.writer.add_scalar("LR", param_group["lr"], global_step)
+                
+                batch_start = time.time()
                 
                 if (i + 1) % 5 == 0:
                     avg_data_time = data_time / (i + 1)

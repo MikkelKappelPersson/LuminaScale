@@ -27,7 +27,7 @@ sys.path.insert(0, str(project_root / "src"))
 
 from luminascale.models import create_dequantization_net
 from luminascale.utils.io import read_exr, write_exr, oiio_aces_to_display
-from luminascale.utils.image_generator import create_sky_gradient, quantize_to_8bit
+from luminascale.utils.image_generator import create_primary_gradients, quantize_to_8bit
 
 def align_to_model(tensor: torch.Tensor) -> torch.Tensor:
     """Align input tensor to be divisible by 64 (for 6-level U-Net)."""
@@ -41,13 +41,13 @@ def align_to_model(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width: int, height: int, output_path: Path):
-    """Generate and run inference on a synthetic sky gradient."""
-    print(f"Generating synthetic sky gradient ({width}x{height})...")
+    """Generate and run inference on a synthetic primary gradients image."""
+    print(f"Generating synthetic primary gradients ({width}x{height})...")
     # Align size to 64
     target_w = (width // 64) * 64
     target_h = (height // 64) * 64
     
-    hdr = create_sky_gradient(width=target_w, height=target_h, dtype="float32")
+    hdr = create_primary_gradients(width=target_w, height=target_h, dtype="float32")
     hdr_clipped = np.clip(hdr, 0, 1)
     ldr = quantize_to_8bit(hdr_clipped)
     

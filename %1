@@ -1,0 +1,15 @@
+/mnt/MKP01/med8_project/LuminaScale/.pixi/envs/default/lib/python3.12/site-packages/webdataset/compat.py:381: UserWarning: set WebDataset(shardshuffle=...) to a positive integer or 0 or False
+  warnings.warn("set WebDataset(shardshuffle=...) to a positive integer or 0 or False")
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+
+  | Name  | Type              | Params | Mode  | FLOPs
+------------------------------------------------------------
+0 | model | DequantizationNet | 78.6 M | train | 0    
+------------------------------------------------------------
+78.6 M    Trainable params
+0         Non-trainable params
+78.6 M    Total params
+314.534   Total estimated model params size (MB)
+72        Modules in train mode
+0         Modules in eval mode
+0         Total Flops

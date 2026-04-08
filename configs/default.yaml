@@ -29,7 +29,7 @@ output_dir: ./outputs/training
 
 # Model
 model:
-  base_channels: 16
+  base_channels: 32
 
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:

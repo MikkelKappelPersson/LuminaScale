@@ -19,6 +19,8 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import cast
+import torch.nn as nn
 
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent
@@ -117,18 +119,23 @@ class SyntheticInferenceVisualizerCallback(Callback):
             step: Global step for TensorBoard logging
             epoch_label: Label for the logged images
         """
-        if trainer.logger is None or not hasattr(trainer.logger, "experiment"):
+        if trainer.logger is None or trainer.log_dir is None:
             return
         
+        temp_checkpoint: Path | None = None
         try:
             # Save temporary checkpoint for run_inference.py
             temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_{epoch_label}.pt"
-            torch.save(pl_module.model.state_dict(), temp_checkpoint)
+            model = cast(nn.Module, pl_module.model)
+            torch.save(model.state_dict(), temp_checkpoint)
             logger.info(f"Saved temporary checkpoint to {temp_checkpoint}")
             
             # Prepare output paths
-            output_exr = Path(trainer.log_dir) / f"synthetic_{epoch_label}.exr"
-            output_png = Path(trainer.log_dir) / f"synthetic_{epoch_label}.png"
+            log_dir_str = trainer.log_dir
+            if log_dir_str is None:
+                return
+            output_exr = Path(log_dir_str) / f"synthetic_{epoch_label}.exr"
+            output_png = Path(log_dir_str) / f"synthetic_{epoch_label}.png"
             
             # Run run_inference.py
             cmd = [
@@ -161,7 +168,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 output_tensor = torch.from_numpy(output_np).float()
             else:
                 logger.error(f"Output EXR not found: {output_exr}")
-                logger.error(f"Contents of log_dir: {list(Path(trainer.log_dir).iterdir())}")
+                logger.error(f"Contents of log_dir: {list(Path(log_dir_str).iterdir())}")
                 return
             
             # For TensorBoard, we also need LDR input and HDR reference
@@ -191,11 +198,15 @@ class SyntheticInferenceVisualizerCallback(Callback):
             hdr_tensor_contrast = apply_contrast(hdr_tensor)
             
             # Extract run_id from log_dir path (last component)
-            run_id = Path(trainer.log_dir).name
+            run_id = Path(log_dir_str).name
             
             # Log high-contrast model output to TensorBoard
             # Use fixed tag path so images are consolidated into a scrubbable timeline in TensorBoard
-            tb = trainer.logger.experiment
+            from pytorch_lightning.loggers.tensorboard import TensorBoardLogger as TBLogger
+            if isinstance(trainer.logger, TBLogger):
+                tb = trainer.logger.experiment
+            else:
+                return
             tb.add_image(f"primaries_gradient", output_tensor_contrast, global_step=step)
 
             tb.flush()
@@ -203,35 +214,39 @@ class SyntheticInferenceVisualizerCallback(Callback):
             logger.info(f"  Output saved to: {output_exr} and {output_png}")
             
             # Cleanup only temporary checkpoint (keep EXR and PNG outputs)
-            temp_checkpoint.unlink(missing_ok=True)
+            if temp_checkpoint is not None:
+                temp_checkpoint.unlink(missing_ok=True)
         
         except Exception as e:
             logger.error(f"Error during synthetic inference visualization: {e}", exc_info=True)
             # Best effort cleanup
-            try:
-                temp_checkpoint.unlink(missing_ok=True)
-            except:
-                pass
+            if temp_checkpoint is not None:
+                try:
+                    temp_checkpoint.unlink(missing_ok=True)
+                except:
+                    pass
 
 
 class TensorBoardFlushCallback(Callback):
     """Callback to explicitly flush TensorBoard logger after each batch and epoch."""
     
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+    def on_train_batch_end(self, trainer: L.Trainer, pl_module: L.LightningModule, outputs, batch, batch_idx: int) -> None:
         """Flush logger after each batch to ensure events are written."""
-        if trainer.logger and hasattr(trainer.logger, "experiment"):
+        from pytorch_lightning.loggers.tensorboard import TensorBoardLogger as TBLogger
+        if trainer.logger and isinstance(trainer.logger, TBLogger):
             trainer.logger.experiment.flush()
     
-    def on_train_epoch_end(self, trainer, pl_module):
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Flush logger after each epoch."""
-        if trainer.logger and hasattr(trainer.logger, "experiment"):
+        from pytorch_lightning.loggers.tensorboard import TensorBoardLogger as TBLogger
+        if trainer.logger and isinstance(trainer.logger, TBLogger):
             trainer.logger.experiment.flush()
 
 
 class CompactProgressBar(TQDMProgressBar):
     """Compact progress bar with minimal redundant information."""
     
-    def get_metrics(self, trainer, pl_module):
+    def get_metrics(self, trainer: L.Trainer, pl_module: L.LightningModule) -> dict:
         """Override to inject batch-specific metrics into progress bar."""
         items = super().get_metrics(trainer, pl_module)
         # Remove redundant info
@@ -246,15 +261,26 @@ class CompactProgressBar(TQDMProgressBar):
         
         return items
     
-    def on_train_epoch_start(self, trainer, pl_module):
-        """Override epoch start to use compact format and set estimated total."""
-        super().on_train_epoch_start(trainer, pl_module)
-        # Customize the progress bar description to be more compact
+    def on_train_start(self, *_) -> None:  
+        """Set total batches at training start."""
+        super().on_train_start(*_)
+        if hasattr(self, 'train_progress_bar') and self.train_progress_bar is not None:
+            # trainer is passed as first variadic arg
+            trainer = _[0] if _ else None
+            if trainer and hasattr(trainer, 'lightning_module'):
+                pl_module = trainer.lightning_module
+                if hasattr(pl_module, 'estimated_total_batches') and pl_module.estimated_total_batches is not None:
+                    self.train_progress_bar.total = pl_module.estimated_total_batches
+    
+    def on_train_epoch_start(self, trainer: L.Trainer, *_) -> None: 
+        """Set description and total for each epoch."""
+        super().on_train_epoch_start(trainer, *_)
         if hasattr(self, 'train_progress_bar') and self.train_progress_bar is not None:
             self.train_progress_bar.set_description(f"Epoch {trainer.current_epoch}")
-            # Set estimated total batches from metadata if available
-            if hasattr(pl_module, 'estimated_total_batches') and pl_module.estimated_total_batches is not None:
-                self.train_progress_bar.total = pl_module.estimated_total_batches
+            if hasattr(trainer, 'lightning_module'):
+                pl_module = trainer.lightning_module
+                if hasattr(pl_module, 'estimated_total_batches') and pl_module.estimated_total_batches is not None:
+                    self.train_progress_bar.total = pl_module.estimated_total_batches
 
 
 
@@ -310,7 +336,7 @@ def main(cfg: DictConfig) -> None:
     
     # 2. Setup Lightning Module
     print(f"[MAIN] Creating model...")
-    model = create_dequantization_net(in_channels=3, base_channels=cfg.model.base_channels)
+    model = create_dequantization_net(base_channels=cfg.model.base_channels)
     print(f"[MAIN] ✓ Model created")
     
     print(f"[MAIN] Creating LuminaScaleModule...")
@@ -319,7 +345,9 @@ def main(cfg: DictConfig) -> None:
         learning_rate=cfg.learning_rate
     )
     # Store estimated batches for progress bar
-    ls_module.estimated_total_batches = train_dataset.get_estimated_batches()
+    estimated_batches = train_dataset.get_estimated_batches()
+    if estimated_batches is not None:
+        ls_module.estimated_total_batches = estimated_batches
     print(f"[MAIN] ✓ LuminaScaleModule created")
     
     # 3. Setup Trainer

@@ -32,17 +32,17 @@ class LuminaScaleModule(L.LightningModule):
     ) -> None:
         super().__init__()
         print(f"[LuminaScaleModule] Initializing LightningModule...")
-        self.model = model
-        self.learning_rate = learning_rate
-        self.vis_freq = vis_freq
+        self.model: nn.Module = model
+        self.learning_rate: float = learning_rate
+        self.vis_freq: int = vis_freq
         self.save_hyperparameters(ignore=["model"])
-        self.pair_generator = None  # Lazy initialization for WebDataset batches
-        self.crop_size = 512  # Default crop size for WebDataset batches
+        self.pair_generator: None = None  # Lazy initialization for WebDataset batches
+        self.crop_size: int = 512  # Default crop size for WebDataset batches
         
         # Track last batch metrics for progress bar
-        self.last_batch_gpu_ms = None
-        self.last_batch_loss = None
-        self.estimated_total_batches = None  # Set by training script if metadata available
+        self.last_batch_gpu_ms: float | None = None
+        self.last_batch_loss: float | None = None
+        self.estimated_total_batches: int | None = None  # Set by training script if metadata available
         
         # Cache for on-the-fly patch generation
         # When using .repeat() in WebDataset, consecutive items are the same image

@@ -15,3 +15,11 @@ checkpoint_freq: 10
 num_workers: 0  # Keep 0 for multi-GPU DDP support (avoids LMDB contention)
 model:
   base_channels: 16
+
+# Hydra configuration to suppress working directory change warning and .hydra/ folder
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .  # Prevent Hydra from creating timestamped output directories
+  output_subdir: null  # Disable .hydra/ subdirectory creation

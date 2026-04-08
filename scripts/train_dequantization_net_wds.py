@@ -61,7 +61,21 @@ _pt_lightning_logger = logging.getLogger("pytorch_lightning.utilities.rank_zero"
 _pt_lightning_logger.setLevel(logging.ERROR)
 
 
-from pytorch_lightning.callbacks import TQDMProgressBar
+from pytorch_lightning.callbacks import TQDMProgressBar, Callback
+
+
+class TensorBoardFlushCallback(Callback):
+    """Callback to explicitly flush TensorBoard logger after each batch and epoch."""
+    
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """Flush logger after each batch to ensure events are written."""
+        if trainer.logger and hasattr(trainer.logger, "experiment"):
+            trainer.logger.experiment.flush()
+    
+    def on_train_epoch_end(self, trainer, pl_module):
+        """Flush logger after each epoch."""
+        if trainer.logger and hasattr(trainer.logger, "experiment"):
+            trainer.logger.experiment.flush()
 
 
 class CompactProgressBar(TQDMProgressBar):
@@ -111,7 +125,7 @@ def main(cfg: DictConfig) -> None:
         os.environ["OCIO"] = str(ocio_config)
     
     # Run directory setup
-    run_id = datetime.now().strftime("wds_%Y%m%d_%H%M%S")
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(cfg.output_dir).resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     
@@ -160,14 +174,18 @@ def main(cfg: DictConfig) -> None:
     
     # 3. Setup Trainer
     print(f"[MAIN] Creating Lightning Trainer...")
-    logger_tb = TensorBoardLogger(save_dir=str(cfg.output_dir), name=run_id)
+    logger_tb = TensorBoardLogger(
+        save_dir=str(run_dir),
+        name="",
+        version="",
+        default_hp_metric=False  # Disable placeholder hp_metric for cleaner TensorBoard display
+    )
     
     checkpoint_callback = ModelCheckpoint(
         dirpath=str(run_dir / "checkpoints"),
-        filename="dequant-{epoch:02d}-{loss:.4f}",
-        save_top_k=3,
-        monitor="loss", # Adjust based on actual validation metric
-        mode="min",
+        filename="dequant-{epoch:02d}",
+        every_n_epochs=cfg.get("checkpoint_freq", 1),
+        save_top_k=-1,  # Save all checkpoints according to frequency
     )
 
     trainer = L.Trainer(
@@ -175,9 +193,10 @@ def main(cfg: DictConfig) -> None:
         devices=cfg.devices,
         max_epochs=cfg.epochs,
         logger=logger_tb,
-        callbacks=[checkpoint_callback, CompactProgressBar()],
+        callbacks=[checkpoint_callback, CompactProgressBar(), TensorBoardFlushCallback()],
         precision=cfg.precision,
         strategy=cfg.strategy,
+        log_every_n_steps=1,  # Log every batch for detailed TensorBoard curves
     )
     print(f"[MAIN] ✓ Lightning Trainer created")
 

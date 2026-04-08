@@ -518,7 +518,10 @@ class LuminaScaleModule(L.LightningModule):
                         self.manual_backward(loss)
                         optimizer.step()
                         
-                        self.log("train_loss", loss, prog_bar=False, sync_dist=True)
+                        # Log directly to TensorBoard via SummaryWriter (more reliable with manual_optimization)
+                        if self.logger and hasattr(self.logger, 'experiment'):
+                            self.logger.experiment.add_scalar('loss/train', loss.item(), self.global_step)
+                            self.logger.experiment.flush()
                         self.last_batch_loss = loss.item()
                         return loss
                     
@@ -612,8 +615,10 @@ class LuminaScaleModule(L.LightningModule):
                             f"(Zero losses: {zero_loss_count}/32)"
                         )
                         
-                        # Return average loss for logging
-                        self.log("train_loss", torch.tensor(avg_loss), prog_bar=False, sync_dist=False)
+                        # Log directly to TensorBoard via SummaryWriter (more reliable with manual_optimization)
+                        if self.logger and hasattr(self.logger, 'experiment'):
+                            self.logger.experiment.add_scalar('loss/train', avg_loss, self.global_step)
+                            self.logger.experiment.flush()
                         return torch.tensor(avg_loss, device=self.device)
                     else:
                         x, y = batch
@@ -625,7 +630,10 @@ class LuminaScaleModule(L.LightningModule):
                         self.manual_backward(loss)
                         optimizer.step()
                         
-                        self.log("train_loss", loss, prog_bar=False, sync_dist=True)
+                        # Log directly to TensorBoard via SummaryWriter (more reliable with manual_optimization)
+                        if self.logger and hasattr(self.logger, 'experiment'):
+                            self.logger.experiment.add_scalar('loss/train', loss.item(), self.global_step)
+                            self.logger.experiment.flush()
                         self.last_batch_loss = loss.item()
                         return loss
                 else:

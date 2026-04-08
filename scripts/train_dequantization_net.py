@@ -34,7 +34,7 @@ import hydra
 import pytorch_lightning as L
 import torch
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback
 from omegaconf import DictConfig, OmegaConf
 
 from luminascale.models import create_dequantization_net
@@ -55,6 +55,20 @@ for logger_name in logging.Logger.manager.loggerDict:
         for handler in logger_obj.handlers:
             handler.setFormatter(logging.Formatter("%(message)s"))
 logger = logging.getLogger(__name__)
+
+
+class TensorBoardFlushCallback(Callback):
+    """Callback to explicitly flush TensorBoard logger after each batch and epoch."""
+    
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """Flush logger after each batch to ensure events are written."""
+        if trainer.logger and hasattr(trainer.logger, "experiment"):
+            trainer.logger.experiment.flush()
+    
+    def on_train_epoch_end(self, trainer, pl_module):
+        """Flush logger after each epoch."""
+        if trainer.logger and hasattr(trainer.logger, "experiment"):
+            trainer.logger.experiment.flush()
 
 
 class CompactProgressBar(TQDMProgressBar):
@@ -162,9 +176,10 @@ def main(cfg: DictConfig) -> None:
 
     # Loggers and Callbacks
     tb_logger = TensorBoardLogger(
-        save_dir=cfg.output_dir,
-        name="tensorboard",
-        version=run_id
+        save_dir=str(run_dir),
+        name="",
+        version="",
+        default_hp_metric=False  # Disable placeholder hp_metric for cleaner TensorBoard display
     )
     
     checkpoint_callback = ModelCheckpoint(
@@ -182,9 +197,9 @@ def main(cfg: DictConfig) -> None:
         precision=cfg.get("precision", 32),
         max_epochs=cfg.epochs,
         logger=tb_logger,
-        callbacks=[checkpoint_callback, CompactProgressBar()],
+        callbacks=[checkpoint_callback, CompactProgressBar(), TensorBoardFlushCallback()],
         default_root_dir=run_dir,
-        log_every_n_steps=10,  # Reduce progress bar spam (log every 10 steps instead of 1)
+        log_every_n_steps=1,  # Log every batch for detailed TensorBoard curves
         enable_progress_bar=True,
         num_sanity_val_steps=0,  # Skip sanity check for faster startup
     )

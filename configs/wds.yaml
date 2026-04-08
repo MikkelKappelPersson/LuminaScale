@@ -6,21 +6,24 @@ val_shard_path: "dataset/temp/shards/val"
 metadata_parquet: "dataset/temp/training_metadata.parquet"
 output_dir: ./outputs/training
 batch_size: 1
-epochs: 1
+epochs: 2
 learning_rate: 1e-4
 device: cuda
 accelerator: gpu
 devices: auto
 strategy: auto
 precision: 16-mixed
-checkpoint_freq: 10
+checkpoint_freq: 1
 num_workers: 0
 shuffle_buffer: 10
 patches_per_image: 1
 model:
   base_channels: 16
 
-# Hydra configuration to suppress working directory change warning
+# Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:
   job:
     chdir: false
+  run:
+    dir: .  # Prevent Hydra from creating timestamped output directories
+  output_subdir: null  # Disable .hydra/ subdirectory creation

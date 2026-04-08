@@ -144,7 +144,15 @@ def main():
     # 1. Load Model
     print(f"Loading model on {device}...")
     model = create_dequantization_net(device=device, base_channels=args.channels)
-    state_dict = torch.load(args.checkpoint, map_location=device)
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    # Handle both Lightning checkpoints and raw state dicts
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        state_dict = checkpoint
+    # Remove "model." prefix if present (from Lightning wrapping)
+    if all(k.startswith("model.") for k in state_dict.keys()):
+        state_dict = {k.replace("model.", "", 1): v for k, v in state_dict.items()}
     model.load_state_dict(state_dict)
     model.eval()
 

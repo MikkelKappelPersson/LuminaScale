@@ -1,5 +1,7 @@
 {
     "chat.tools.terminal.autoApprove": {
-        "timeout": true
+        "timeout": true,
+        "pixi": true,
+        "tee": true
     }
 }

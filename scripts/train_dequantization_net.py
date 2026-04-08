@@ -42,25 +42,28 @@ from luminascale.models import create_dequantization_net
 from luminascale.training.dequantization_trainer import LuminaScaleModule
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 
-# Enable DEBUG to see per-image timing breakdowns from dataset loading
 # Use minimal format and stderr to prevent mixing with stdout progress bar
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.WARNING,
     format="%(message)s",
     stream=sys.stderr,
     force=True
 )
-# Configure all luminascale loggers to use minimal format
-for logger_name in logging.Logger.manager.loggerDict:
-    if isinstance(logging.Logger.manager.loggerDict[logger_name], logging.Logger):
-        logger_obj = logging.getLogger(logger_name)
-        for handler in logger_obj.handlers:
-            handler.setFormatter(logging.Formatter("%(message)s"))
-logger = logging.getLogger(__name__)
 
-# Suppress PyTorch Lightning's litlogger tip
-_pt_lightning_logger = logging.getLogger("pytorch_lightning.utilities.rank_zero")
-_pt_lightning_logger.setLevel(logging.ERROR)
+# Suppress INFO/DEBUG logs from luminascale modules
+for module in ["luminascale.training.dequantization_trainer", 
+               "luminascale.utils.dataset_pair_generator",
+               "luminascale.utils.pytorch_aces_transformer",
+               "luminascale.data.wds_dataset"]:
+    logging.getLogger(module).setLevel(logging.WARNING)
+
+# Also suppress other verbose libraries
+for module in ["pytorch_lightning.utilities.rank_zero", 
+               "pytorch_lightning.callbacks.progress",
+               "webdataset"]:
+    logging.getLogger(module).setLevel(logging.ERROR)
+
+logger = logging.getLogger(__name__)
 
 
 from pytorch_lightning.callbacks import TQDMProgressBar, Callback

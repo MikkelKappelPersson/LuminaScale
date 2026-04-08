@@ -1,17 +1,15 @@
-"""Hydra-based training script for Dequantization-Net.
+"""Hydra-based training script for Dequantization-Net (WebDataset).
 
 Usage (local development):
     python scripts/train_dequantization_net.py --config-name=default
 
 Usage (HPC via Slurm):
-    sbatch scripts/train_dequantization_net.sh
+    sbatch scripts/train_wds.sh
 
 Override config on CLI:
     python scripts/train_dequantization_net.py \
-        --config-name=default \
-        batch_size=16 \
-        epochs=50 \
-        lmdb_path=/path/to/training_data.lmdb
+        batch_size=32 \
+        epochs=50
 """
 
 from __future__ import annotations
@@ -20,7 +18,6 @@ import logging
 import os
 import sys
 from datetime import datetime
-import os
 from pathlib import Path
 
 # Add project root to sys.path
@@ -31,14 +28,19 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 import hydra
-import pytorch_lightning as L
 import torch
+import warnings
+import pytorch_lightning as L
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback
+from pytorch_lightning.callbacks import ModelCheckpoint
 from omegaconf import DictConfig, OmegaConf
 
+# Suppress non-critical warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning")
+
 from luminascale.models import create_dequantization_net
-from luminascale.training.dequantization_trainer import OnTheFlyBDEDataset, LuminaScaleModule
+from luminascale.training.dequantization_trainer import LuminaScaleModule
+from luminascale.data.wds_dataset import LuminaScaleWebDataset
 
 # Enable DEBUG to see per-image timing breakdowns from dataset loading
 # Use minimal format and stderr to prevent mixing with stdout progress bar
@@ -55,6 +57,13 @@ for logger_name in logging.Logger.manager.loggerDict:
         for handler in logger_obj.handlers:
             handler.setFormatter(logging.Formatter("%(message)s"))
 logger = logging.getLogger(__name__)
+
+# Suppress PyTorch Lightning's litlogger tip
+_pt_lightning_logger = logging.getLogger("pytorch_lightning.utilities.rank_zero")
+_pt_lightning_logger.setLevel(logging.ERROR)
+
+
+from pytorch_lightning.callbacks import TQDMProgressBar, Callback
 
 
 class TensorBoardFlushCallback(Callback):
@@ -100,19 +109,17 @@ class CompactProgressBar(TQDMProgressBar):
                 self.train_progress_bar.total = pl_module.estimated_total_batches
 
 
+
 @hydra.main(config_path="../configs", config_name="default", version_base="1.1")
 def main(cfg: DictConfig) -> None:
-    """Main training entry point with Hydra config management."""
-    # Prevent 'BrokenPipeError'
-    from signal import signal, SIGPIPE, SIG_DFL
-    try:
-        signal(SIGPIPE, SIG_DFL)
-    except Exception:
-        pass
-
-    # Hydra nesting handling
-    if "training" in cfg:
-        cfg = cfg.training
+    """Main training entry point for WebDataset pipeline."""
+    
+    # Configure torch for optimal performance with Tensor Cores
+    torch.set_float32_matmul_precision('high')
+    
+    print(f"\n{'='*80}")
+    print(f"[MAIN] Starting training initialization...")
+    print(f"{'='*80}\n")
     
     # Set OCIO environment variable
     ocio_config = project_root / "config" / "aces" / "studio-config.ocio"
@@ -124,58 +131,52 @@ def main(cfg: DictConfig) -> None:
     run_dir = Path(cfg.output_dir).resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     
+    print(f"[MAIN] Run directory: {run_dir}")
+    
+    # Log config
     with open(run_dir / "config.yaml", "w") as f:
         f.write(OmegaConf.to_yaml(cfg))
 
-    # Create dataset
-    lmdb_path = Path(cfg.get("lmdb_path")).resolve()
+    # 1. Create WebDataset Loaders
+    # On-the-fly patch generation: WebDataset stores 880 unique images once, then .repeat(patches_per_image)
+    # loops through the stream to create 880 * 32 = 28,160 total samples. Each time an image appears,
+    # a fresh random crop is generated. This matches the OnTheFlyBDEDataset pattern.
+    # Total batches = unique_images * patches_per_image / batch_size
+    print(f"[MAIN] Creating WebDataset with shard_path: {cfg.get('shard_path')}")
+    print(f"[MAIN] batch_size={cfg.get('batch_size', 32)}, num_workers={cfg.get('num_workers', 4)}")
+    print(f"[MAIN] patches_per_image={cfg.get('patches_per_image', 1)} (on-the-fly generation via .repeat())")
     
-    # Get distributed training info from environment (set by SLURM/DDP)
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    
-    dataset = OnTheFlyBDEDataset(
-        lmdb_path=lmdb_path,
-        device=None, # Dataset will detect correct GPU per process in DDP
-        crop_size=cfg.get("crop_size", 512),
+    train_dataset = LuminaScaleWebDataset(
+        shard_path=cfg.get("shard_path"),
+        batch_size=cfg.get("batch_size", 32),
+        shuffle_buffer=cfg.get("shuffle_buffer", 1000),
+        is_training=True,
+        metadata_parquet=cfg.get("metadata_parquet"),
         patches_per_image=cfg.get("patches_per_image", 1),
-        rank=rank,
-        world_size=world_size,
     )
+    print(f"[MAIN] ✓ WebDataset created")
     
-    # Use DistributedSampler to ensure each GPU gets different samples (reduces LMDB contention)
-    sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=False,  # Each rank gets deterministic subset
-        drop_last=False,
-    )
+    print(f"[MAIN] Getting WebLoader...")
+    train_loader = train_dataset.get_loader(num_workers=cfg.get("num_workers", 4))
+    print(f"[MAIN] ✓ WebLoader created")
     
-    # DataLoader with num_workers=0 for DDP stability
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=cfg.batch_size,
-        sampler=sampler,
-        num_workers=cfg.get("num_workers", 0),
-        pin_memory=False,  # Already on GPU, cannot pin CUDA tensors
-    )
-
-    # Create model
-    raw_model = create_dequantization_net(
-        device="cpu", # Lightning handles moving to GPU
-        base_channels=cfg.model.base_channels
-    )
+    # 2. Setup Lightning Module
+    print(f"[MAIN] Creating model...")
+    model = create_dequantization_net(in_channels=3, base_channels=cfg.model.base_channels)
+    print(f"[MAIN] ✓ Model created")
     
-    # Lightning Module
-    model_module = LuminaScaleModule(
-        model=raw_model,
-        learning_rate=cfg.learning_rate,
-        vis_freq=cfg.vis_freq if hasattr(cfg, "vis_freq") else 5
+    print(f"[MAIN] Creating LuminaScaleModule...")
+    ls_module = LuminaScaleModule(
+        model=model,
+        learning_rate=cfg.learning_rate
     )
-
-    # Loggers and Callbacks
-    tb_logger = TensorBoardLogger(
+    # Store estimated batches for progress bar
+    ls_module.estimated_total_batches = train_dataset.get_estimated_batches()
+    print(f"[MAIN] ✓ LuminaScaleModule created")
+    
+    # 3. Setup Trainer
+    print(f"[MAIN] Creating Lightning Trainer...")
+    logger_tb = TensorBoardLogger(
         save_dir=str(run_dir),
         name="",
         version="",
@@ -183,33 +184,36 @@ def main(cfg: DictConfig) -> None:
     )
     
     checkpoint_callback = ModelCheckpoint(
-        dirpath=run_dir / "checkpoints",
-        filename="dequant-{epoch:02d}-{train_loss:.4f}",
-        every_n_epochs=cfg.checkpoint_freq,
-        save_top_k=-1, # Save all checkpoints according to frequency
+        dirpath=str(run_dir / "checkpoints"),
+        filename="dequant-{epoch:02d}",
+        every_n_epochs=cfg.get("checkpoint_freq", 1),
+        save_top_k=-1,  # Save all checkpoints according to frequency
     )
 
-    # Trainer Initialization
     trainer = L.Trainer(
-        accelerator=cfg.get("accelerator", "gpu"),
-        devices=cfg.get("devices", "auto"),
-        strategy=cfg.get("strategy", "auto"),  # Will auto-select DDP for multiple GPUs
-        precision=cfg.get("precision", 32),
+        accelerator=cfg.accelerator,
+        devices=cfg.devices,
         max_epochs=cfg.epochs,
-        logger=tb_logger,
+        logger=logger_tb,
         callbacks=[checkpoint_callback, CompactProgressBar(), TensorBoardFlushCallback()],
-        default_root_dir=run_dir,
+        precision=cfg.precision,
+        strategy=cfg.strategy,
         log_every_n_steps=1,  # Log every batch for detailed TensorBoard curves
-        enable_progress_bar=True,
-        num_sanity_val_steps=0,  # Skip sanity check for faster startup
     )
+    print(f"[MAIN] ✓ Lightning Trainer created")
 
-    # Train!
-    trainer.fit(model=model_module, train_dataloaders=dataloader)
+    # 4. Start Training
+    print(f"\n{'='*80}")
+    print(f"[MAIN] 🚀 Starting WDS Training. Run ID: {run_id}")
+    print(f"[MAIN] About to call trainer.fit() with train_loader...")
+    print(f"{'='*80}\n")
     
-    dataset.cleanup()
-    logger.info("Training complete.")
-
+    logger.info(f"🚀 Starting WDS Training. Run ID: {run_id}")
+    trainer.fit(ls_module, train_dataloaders=train_loader)
+    
+    print(f"\n{'='*80}")
+    print(f"[MAIN] ✓ Training completed!")
+    print(f"{'='*80}\n")
 
 if __name__ == "__main__":
     main()

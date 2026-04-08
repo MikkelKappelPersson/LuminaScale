@@ -40,10 +40,7 @@ def visualize(cfg: DictConfig):
     print(f"Batch type: {type(batch)}, length: {len(batch) if isinstance(batch, (list, tuple)) else 'N/A'}")
     
     # Decode using DatasetPairGenerator
-    decoder = DatasetPairGenerator(
-        lmdb_env=None,  # WebDataset doesn't use LMDB
-        device=device
-    )
+    decoder = DatasetPairGenerator(device=device)
     
     if isinstance(batch[0], list) and len(batch[0]) > 0 and isinstance(batch[0][0], bytes):
         print("WebDataset batch detected (bytes)")

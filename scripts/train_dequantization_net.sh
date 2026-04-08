@@ -1,33 +1,30 @@
-#!/bin/bash
-
-# Slurm batch script for dequantization network training
-# 
-# Usage:
-#   sbatch scripts/train_dequantization_net.sh
-#   sbatch --time=48:00:00 scripts/train_dequantization_net.sh  # Override time
-#
-
-#SBATCH --job-name=train_dequant
+#!/usr/bin/env bash
+#SBATCH --job-name=train_wds
+#SBATCH --output=outputs/logs/train_%j.out
+#SBATCH --error=outputs/logs/train_%j.err
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:1
+#SBATCH --time=48:00:00
 #SBATCH --partition=prioritized
-#SBATCH --gres=gpu:a10:1
-#SBATCH --cpus-per-task=8
-#SBATCH --time=24:00:00
-#SBATCH --mem=32GB
-#SBATCH --output=outputs/logs/train_dequantization_%j.log
-#SBATCH --error=outputs/logs/train_dequantization_%j.err
+#SBATCH --account=aau
+#SBATCH --qos=normal
 
+# Path to the LuminaScale Singularity container
+# Ensure you rebuilt the container with webdataset, etc.
+CONTAINER=luminascale.sif
 
-# The container image we want to launch:
-CONTAINER_IMAGE="luminascale.sif"
+# Run directory cleanup
+mkdir -p outputs/training
 
-# Ensure output directories exist
-mkdir -p outputs/logs
+echo "🚀 Starting Dequantization Training (WebDataset Pipeline)"
+echo "Using Shards in: dataset/temp/shards/train/"
 
-# Run training with Singularity using the test config and 1 GPU
-# The --nv flag is required to use the GPU inside the container
-singularity exec --nv "$CONTAINER_IMAGE" \
-  python scripts/train_dequantization_net.py \
-    --config-path=../configs \
-    --config-name=test
-
-echo "Training completed with exit code: $?"
+# Run the training script via Singularity
+# Overriding shuffle_buffer slightly if needed
+singularity exec --nv $CONTAINER \
+    python scripts/train_dequantization_net.py \
+        --config-name=wds \
+        batch_size=32 \
+        epochs=100 \
+        shard_path="dataset/temp/shards/train/train-{000000..000001}.tar"

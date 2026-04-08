@@ -1,54 +1,55 @@
-# Guide to create the full dataset
+# Dataset Generation Guide (WebDataset)
 
-To create full dataset run
-```
-python scripts/quality_filtered_aces_conversion.py && python scripts/bake_dataset.py
-```
-## HDR exr
+To create a training dataset, generate ACES EXR files and convert to WebDataset format:
 
-in order to run quality check and create aces EXR files, run:
-````
-python scripts/quality_filtered_aces_conversion.py
-````
-
-for pixi:
+```bash
+pixi run python scripts/quality_filtered_aces_conversion.py
+pixi run python scripts/generate_wds_shards.py
 ```
+
+## Step 1: Generate ACES EXR Files
+
+Create high-quality ACES HDR imagery from RAW camera files:
+
+```bash
 pixi run python scripts/quality_filtered_aces_conversion.py
 ```
 
-Only some images:
-```
+**Optional:** Limit to a small dataset for testing:
+```bash
 pixi run python scripts/quality_filtered_aces_conversion.py --max-images=10
 ```
 
-## LDR
+This generates ACES EXR files to `dataset/temp/aces/`
 
-To generate LDR sRGB dataset (using the **GPU-accelerated** pipeline) with a 50% neutral/graded split:
+## Step 2: Generate WebDataset Shards
 
-```bash
-# Generate 8-bit PNGs (standard)
-pixi run python scripts/bake_dataset.py
-
-# Generate 32-bit Float EXRs (for high-fidelity LDR)
-pixi run python scripts/bake_dataset.py --float32 --output-dir dataset/temp/srgb_32bit
-```
-
-### Why use GPU Baking?
-The new bake script uses `ocio_aces_to_srgb_with_look` which leverages a headless EGL GPU renderer. This is significantly faster than the OIIO CPU implementation, especially when applying complex ACES 2.0 transforms and color looks.
-
-## LMDB Packing (Performance Optimization)
-
-To speed up training by 40-100x and maximize GPU utilization, pack the processed ACES and sRGB images into an uncompressed LMDB database. This eliminates the CPU bottleneck caused by decoding large EXR/PNG files.
-
-**Note:** Ensure you have enough disk space (approx. 125MB per image pair).
+Convert ACES EXR files into WebDataset shards for efficient training:
 
 ```bash
-pixi run python scripts/pack_lmdb.py --aces-dir dataset/temp/aces --srgb-dir dataset/temp/srgb_looks --output-path dataset/training_data.lmdb
+pixi run python scripts/generate_wds_shards.py
 ```
 
-After packing, update your configuration (e.g., `configs/test.yaml`) to point to the LMDB path:
+This creates `.tar` shards in `dataset/wds_shards/` that are:
+- **Scalable**: On-the-fly patch generation with random crops per image
+- **Fast**: GPU-accelerated EXR decoding and CDL grading during training
 
+## Training with WebDataset
+
+The training pipeline automatically loads WebDataset shards and applies:
+1. On-the-fly EXR decoding (OIIO)
+2. Random CDL color grading
+3. ACES→sRGB transformation
+4. Patch-based training (32 crops per image)
+
+Run training with:
+```bash
+pixi run python scripts/train_dequantization_net.py
+```
+
+Configure shard path in `configs/default.yaml`:
 ```yaml
 dataset:
-  lmdb_path: dataset/training_data.lmdb
+  shard_path: dataset/wds_shards/  # WebDataset .tar shards
+  patches_per_image: 32             # Patches per image
 ```

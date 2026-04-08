@@ -1,0 +1,30 @@
+# HPC Slurm-optimized configuration for dequantization training on WebDataset
+# Usage: sbatch scripts/train_dequantization_net.sh
+
+defaults:
+  - default
+
+# Data paths (override in sbatch script or environment)
+shard_path: ${oc.env:SHARD_PATH,/lustre/scratch/fs62fb/shards/train}
+val_shard_path: ${oc.env:VAL_SHARD_PATH,/lustre/scratch/fs62fb/shards/val}
+metadata_parquet: ${oc.env:METADATA_PARQUET,/lustre/scratch/fs62fb/training_metadata.parquet}
+
+# Training parameters (HPC-specific overrides for larger-scale training)
+batch_size: 32  # Larger batches with more GPU memory (DDP across multiple GPUs)
+epochs: 150
+learning_rate: 5e-5  # Slightly smaller LR for stability with larger batches
+checkpoint_freq: 5  # More frequent checkpoints in long-running jobs
+
+# Data loading
+num_workers: 16  # More CPU workers for efficient data loading
+shuffle_buffer: 100  # Larger shuffle buffer for better randomization
+patches_per_image: 64  # Extract more patches per image during training
+
+# Hardware
+accelerator: gpu
+devices: auto
+strategy: ddp
+precision: 16-mixed
+
+# Output
+output_dir: ${oc.env:OUTPUT_DIR,/lustre/scratch/fs62fb/outputs/training}

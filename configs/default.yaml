@@ -1,18 +1,33 @@
-# Local development configuration for dequantization training
+# WebDataset training configuration (baseline)
 # Usage: python scripts/train_dequantization_net.py --config-name=default
 
-lmdb_path: ${oc.env:LMDB_PATH,./dataset/training_data.lmdb}
-output_dir: ./outputs/training
-batch_size: 8
-epochs: 100
+# Data paths
+shard_path: "dataset/temp/shards/train"
+val_shard_path: "dataset/temp/shards/val"
+metadata_parquet: "dataset/temp/training_metadata.parquet"
+
+# Training parameters
+batch_size: 1
+epochs: 2
 learning_rate: 1e-4
+checkpoint_freq: 1
+
+# Data loading
+num_workers: 0
+shuffle_buffer: 10
+patches_per_image: 1
+
+# Hardware
 device: cuda
 accelerator: gpu
 devices: auto
 strategy: auto
 precision: 16-mixed
-checkpoint_freq: 10
-num_workers: 0  # Keep 0 for multi-GPU DDP support (avoids LMDB contention)
+
+# Output
+output_dir: ./outputs/training
+
+# Model
 model:
   base_channels: 16
 

@@ -34,15 +34,56 @@ import hydra
 import pytorch_lightning as L
 import torch
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar
 from omegaconf import DictConfig, OmegaConf
 
 from luminascale.models import create_dequantization_net
 from luminascale.training.dequantization_trainer import OnTheFlyBDEDataset, LuminaScaleModule
 
 # Enable DEBUG to see per-image timing breakdowns from dataset loading
-logging.basicConfig(level=logging.DEBUG)
+# Use minimal format and stderr to prevent mixing with stdout progress bar
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(message)s",
+    stream=sys.stderr,
+    force=True
+)
+# Configure all luminascale loggers to use minimal format
+for logger_name in logging.Logger.manager.loggerDict:
+    if isinstance(logging.Logger.manager.loggerDict[logger_name], logging.Logger):
+        logger_obj = logging.getLogger(logger_name)
+        for handler in logger_obj.handlers:
+            handler.setFormatter(logging.Formatter("%(message)s"))
 logger = logging.getLogger(__name__)
+
+
+class CompactProgressBar(TQDMProgressBar):
+    """Compact progress bar with minimal redundant information."""
+    
+    def get_metrics(self, trainer, pl_module):
+        """Override to inject batch-specific metrics into progress bar."""
+        items = super().get_metrics(trainer, pl_module)
+        # Remove redundant info
+        items.pop("v_num", None)
+        items.pop("train_loss", None)
+        
+        # Inject batch GPU time and loss from module if available
+        if hasattr(pl_module, 'last_batch_gpu_ms') and pl_module.last_batch_gpu_ms is not None:
+            items[f"GPU"] = f"{pl_module.last_batch_gpu_ms:.1f}ms"
+        if hasattr(pl_module, 'last_batch_loss') and pl_module.last_batch_loss is not None:
+            items[f"Loss"] = f"{pl_module.last_batch_loss:.4f}"
+        
+        return items
+    
+    def on_train_epoch_start(self, trainer, pl_module):
+        """Override epoch start to use compact format and set estimated total."""
+        super().on_train_epoch_start(trainer, pl_module)
+        # Customize the progress bar description to be more compact
+        if hasattr(self, 'train_progress_bar') and self.train_progress_bar is not None:
+            self.train_progress_bar.set_description(f"Epoch {trainer.current_epoch}")
+            # Set estimated total batches from metadata if available
+            if hasattr(pl_module, 'estimated_total_batches') and pl_module.estimated_total_batches is not None:
+                self.train_progress_bar.total = pl_module.estimated_total_batches
 
 
 @hydra.main(config_path="../configs", config_name="default", version_base="1.1")
@@ -141,7 +182,7 @@ def main(cfg: DictConfig) -> None:
         precision=cfg.get("precision", 32),
         max_epochs=cfg.epochs,
         logger=tb_logger,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, CompactProgressBar()],
         default_root_dir=run_dir,
         log_every_n_steps=10,  # Reduce progress bar spam (log every 10 steps instead of 1)
         enable_progress_bar=True,

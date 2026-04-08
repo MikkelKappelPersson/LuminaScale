@@ -28,6 +28,8 @@ singularity exec --nv $CONTAINER \
 
 # 2. Bake the Shards (Serial process to avoid filesystem lock contention)
 # Max shard size set to 3GB (~10-15 large EXRs per shard)
+# Each image is stored ONCE. During training, WebDataset.repeat(patches_per_image) loops through
+# the data to enable on-the-fly patch generation.
 singularity exec --nv $CONTAINER \
     python scripts/generate_wds_shards.py --mode bake \
         --manifest dataset/temp/training_metadata.parquet \

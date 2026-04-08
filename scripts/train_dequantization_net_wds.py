@@ -27,62 +27,79 @@ if src_path not in sys.path:
 
 import hydra
 import torch
+import warnings
 import pytorch_lightning as L
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from omegaconf import DictConfig, OmegaConf
 
+# Suppress non-critical warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning")
+
 from luminascale.models import create_dequantization_net
 from luminascale.training.dequantization_trainer import LuminaScaleModule
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 
-# Enable standard logging
-import logging.config
-
-LOGGING_CONFIG = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {
-        "standard": {"format": "[%(asctime)s][%(name)s][%(levelname)s] - %(message)s"},
-    },
-    "handlers": {
-        "default": {
-            "level": "INFO",
-            "formatter": "standard",
-            "class": "logging.StreamHandler",
-            "stream": "ext://sys.stdout",
-        },
-    },
-    "loggers": {
-        "": {"handlers": ["default"], "level": "INFO", "propagate": True},
-        "luminascale": {"handlers": ["default"], "level": "DEBUG", "propagate": False},
-    },
-}
-logging.config.dictConfig(LOGGING_CONFIG)
+# Enable DEBUG to see per-image timing breakdowns from dataset loading
+# Use minimal format and stderr to prevent mixing with stdout progress bar
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(message)s",
+    stream=sys.stderr,
+    force=True
+)
+# Configure all luminascale loggers to use minimal format
+for logger_name in logging.Logger.manager.loggerDict:
+    if isinstance(logging.Logger.manager.loggerDict[logger_name], logging.Logger):
+        logger_obj = logging.getLogger(logger_name)
+        for handler in logger_obj.handlers:
+            handler.setFormatter(logging.Formatter("%(message)s"))
 logger = logging.getLogger(__name__)
 
+# Suppress PyTorch Lightning's litlogger tip
+_pt_lightning_logger = logging.getLogger("pytorch_lightning.utilities.rank_zero")
+_pt_lightning_logger.setLevel(logging.ERROR)
 
-class DebugCallback(L.Callback):
-    """Debug callback to trace training loop."""
+
+from pytorch_lightning.callbacks import TQDMProgressBar
+
+
+class CompactProgressBar(TQDMProgressBar):
+    """Compact progress bar with minimal redundant information."""
     
-    def on_train_start(self, trainer, pl_module):
-        print(f"\n{'='*80}")
-        print(f"[DEBUG_CALLBACK] on_train_start called")
-        print(f"[DEBUG_CALLBACK] About to iterate through batches...")
-        print(f"{'='*80}\n")
+    def get_metrics(self, trainer, pl_module):
+        """Override to inject batch-specific metrics into progress bar."""
+        items = super().get_metrics(trainer, pl_module)
+        # Remove redundant info
+        items.pop("v_num", None)
+        items.pop("train_loss", None)
+        
+        # Inject batch GPU time and loss from module if available
+        if hasattr(pl_module, 'last_batch_gpu_ms') and pl_module.last_batch_gpu_ms is not None:
+            items[f"GPU"] = f"{pl_module.last_batch_gpu_ms:.1f}ms"
+        if hasattr(pl_module, 'last_batch_loss') and pl_module.last_batch_loss is not None:
+            items[f"Loss"] = f"{pl_module.last_batch_loss:.4f}"
+        
+        return items
     
     def on_train_epoch_start(self, trainer, pl_module):
-        print(f"\n{'='*80}")
-        print(f"[DEBUG_CALLBACK] on_train_epoch_start called (epoch={trainer.current_epoch})")
-        print(f"{'='*80}\n")
-    
-    def on_batch_start(self, trainer, pl_module):
-        print(f"[DEBUG_CALLBACK] on_batch_start (step={trainer.global_step})")
+        """Override epoch start to use compact format and set estimated total."""
+        super().on_train_epoch_start(trainer, pl_module)
+        # Customize the progress bar description to be more compact
+        if hasattr(self, 'train_progress_bar') and self.train_progress_bar is not None:
+            self.train_progress_bar.set_description(f"Epoch {trainer.current_epoch}")
+            # Set estimated total batches from metadata if available
+            if hasattr(pl_module, 'estimated_total_batches') and pl_module.estimated_total_batches is not None:
+                self.train_progress_bar.total = pl_module.estimated_total_batches
+
 
 
 @hydra.main(config_path="../configs", config_name="wds", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     """Main training entry point for WebDataset pipeline."""
+    
+    # Configure torch for optimal performance with Tensor Cores
+    torch.set_float32_matmul_precision('high')
     
     print(f"\n{'='*80}")
     print(f"[MAIN] Starting training initialization...")
@@ -105,14 +122,21 @@ def main(cfg: DictConfig) -> None:
         f.write(OmegaConf.to_yaml(cfg))
 
     # 1. Create WebDataset Loaders
+    # On-the-fly patch generation: WebDataset stores 880 unique images once, then .repeat(patches_per_image)
+    # loops through the stream to create 880 * 32 = 28,160 total samples. Each time an image appears,
+    # a fresh random crop is generated. This matches the OnTheFlyBDEDataset pattern.
+    # Total batches = unique_images * patches_per_image / batch_size
     print(f"[MAIN] Creating WebDataset with shard_path: {cfg.get('shard_path')}")
     print(f"[MAIN] batch_size={cfg.get('batch_size', 32)}, num_workers={cfg.get('num_workers', 4)}")
+    print(f"[MAIN] patches_per_image={cfg.get('patches_per_image', 1)} (on-the-fly generation via .repeat())")
     
     train_dataset = LuminaScaleWebDataset(
         shard_path=cfg.get("shard_path"),
         batch_size=cfg.get("batch_size", 32),
         shuffle_buffer=cfg.get("shuffle_buffer", 1000),
-        is_training=True
+        is_training=True,
+        metadata_parquet=cfg.get("metadata_parquet"),
+        patches_per_image=cfg.get("patches_per_image", 1),
     )
     print(f"[MAIN] ✓ WebDataset created")
     
@@ -130,6 +154,8 @@ def main(cfg: DictConfig) -> None:
         model=model,
         learning_rate=cfg.learning_rate
     )
+    # Store estimated batches for progress bar
+    ls_module.estimated_total_batches = train_dataset.get_estimated_batches()
     print(f"[MAIN] ✓ LuminaScaleModule created")
     
     # 3. Setup Trainer
@@ -149,7 +175,7 @@ def main(cfg: DictConfig) -> None:
         devices=cfg.devices,
         max_epochs=cfg.epochs,
         logger=logger_tb,
-        callbacks=[checkpoint_callback, DebugCallback()],
+        callbacks=[checkpoint_callback, CompactProgressBar()],
         precision=cfg.precision,
         strategy=cfg.strategy,
     )

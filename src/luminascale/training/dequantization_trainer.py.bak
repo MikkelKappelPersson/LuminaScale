@@ -563,9 +563,7 @@ class LuminaScaleModule(L.LightningModule):
                             x_crop = x_crop.unsqueeze(0)
                             y_crop = y_crop.unsqueeze(0)
                             
-                            # Convert to float32 if needed (raw WebDataset data is uint8)
-                            if x_crop.dtype == torch.uint8:
-                                x_crop = x_crop.float() / 255.0
+                            # Convert y_crop to float32 if it's uint8 (from raw data)
                             if y_crop.dtype == torch.uint8:
                                 y_crop = y_crop.float() / 255.0
                             

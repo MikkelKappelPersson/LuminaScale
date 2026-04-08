@@ -193,25 +193,32 @@ class LuminaScaleWebDataset:
         # Split by worker (instead of .shardselection method)
         dataset = dataset.select(wds.shardlists.split_by_worker)
         
-        # Repeat the dataset patches_per_image times for on-the-fly patch generation.
-        # With WebDataset.repeat(), each sample appears patches_per_image consecutive times
-        # within the stream from each worker. This enables cache hits in _process_batch()
-        # on patches 2-N from the same image (since consecutive batches will have same image_id).
-        if self.patches_per_image > 1:
-            dataset = dataset.repeat(self.patches_per_image)
-            logger.info(
-                f"Configured dataset.repeat({self.patches_per_image}) for on-the-fly patch generation. "
-                f"Each image yields {self.patches_per_image} consecutive samples for proper caching."
-            )
-            
-        # Map our custom decoder
+        # Build pipeline to decode and prepare samples
         dataset = dataset.map(decode_exr_and_json)
         
-        # Batching
-        dataset = dataset.batched(batch_size)
+        # CRITICAL: Repeat each sample patches_per_image times BEFORE batching.
+        # This keeps all patches from the same image consecutive, allowing cache hits.
+        # With `.repeat(patches_per_image)` on the full dataset, cache hits only start
+        # after cycling through all unique images once (~1/32 through training).
+        # 
+        # By repeating here, we get: [img1, img1, ..., img1 (32x), img2, img2, ..., img2 (32x), ...]
+        # so cache hits occur on patches 2-32 of each image immediately.
+        if self.patches_per_image > 1:
+            # Create intermediate list of items and repeat each  
+            def repeat_each(iterator, count):
+                for item in iterator:
+                    for _ in range(count):
+                        yield item
+            
+            dataset = repeat_each(dataset, self.patches_per_image)
+            logger.info(
+                f"Repeat each image {self.patches_per_image}x locally within each worker stream "
+                f"(enables cache hits on patches 2-{self.patches_per_image})"
+            )
         
-        # Apply collate function to convert batch format
-        dataset = dataset.map(collate_wds_batch)
+        # Now batch and collate
+        dataset = wds.batched(batch_size)(dataset)
+        dataset = map(collate_wds_batch, dataset)
         
         self.dataset = dataset
         logger.info(f"Initialized WebDataset with {len(self.shard_path) if isinstance(self.shard_path, list) else 'multiple'} shards")

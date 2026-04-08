@@ -106,6 +106,9 @@ def bake_webdataset(metadata_parquet: str, shard_root: str, max_shard_size_gb: f
     """
     Transform existing EXR files + Parquet manifest into WebDataset .tar shards.
     Shards are grouped by split (train/val/test).
+    
+    Each image is stored ONCE. During training, WebDataset.repeat(patches_per_image) loops through
+    the data to enable on-the-fly patch generation (like OnTheFlyBDEDataset).
     """
     df = pd.read_parquet(metadata_parquet)
     max_size_bytes = int(max_shard_size_gb * 1e9)
@@ -122,10 +125,10 @@ def bake_webdataset(metadata_parquet: str, shard_root: str, max_shard_size_gb: f
         # Pattern for ShardWriter: train-000000.tar, etc.
         pattern = str(split_dir / f"{split}-%06d.tar")
         
-        print(f"🚀 Baking {len(split_df)} samples into {split} shards...")
+        print(f"🚀 Baking {len(split_df)} images into {split} shards (on-the-fly patch generation)...")
         
         with wds.ShardWriter(pattern, maxsize=max_size_bytes) as sink:
-            for _, row in tqdm.tqdm(split_df.iterrows(), total=len(split_df), desc=f"Baking {split}"):
+            for img_idx, (_, row) in tqdm.tqdm(enumerate(split_df.iterrows()), total=len(split_df), desc=f"Baking {split}"):
                 img_path = Path(row.source_path)
                 if not img_path.exists():
                     print(f"⚠️ Warning: File not found {img_path}")
@@ -134,10 +137,10 @@ def bake_webdataset(metadata_parquet: str, shard_root: str, max_shard_size_gb: f
                 with open(img_path, "rb") as f:
                     exr_data = f.read()
                 
-                # Each sample in WDS is a dictionary of file extensions
-                # We store the raw exr and a companion json with metadata
+                # Store each image ONCE with metadata
+                # During training, WebDataset.repeat(patches_per_image) will loop through the stream
                 sample = {
-                    "__key__": row.id,
+                    "__key__": f"{img_idx:06d}",
                     "exr": exr_data,
                     "json": json.dumps({
                         "id": row.id,

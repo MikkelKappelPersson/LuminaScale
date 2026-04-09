@@ -30,9 +30,11 @@ if src_path not in sys.path:
 import hydra
 import torch
 import warnings
+import subprocess
+import numpy as np
 import pytorch_lightning as L
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback
 from omegaconf import DictConfig, OmegaConf
 
 # Suppress non-critical warnings
@@ -41,6 +43,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightnin
 from luminascale.models import create_dequantization_net
 from luminascale.training.dequantization_trainer import LuminaScaleModule
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
+from luminascale.utils.io import read_exr
 
 # Enable DEBUG to see per-image timing breakdowns from dataset loading
 # Use minimal format and stderr to prevent mixing with stdout progress bar
@@ -64,6 +67,147 @@ _pt_lightning_logger.setLevel(logging.ERROR)
 
 
 from pytorch_lightning.callbacks import TQDMProgressBar, Callback
+
+
+class SyntheticInferenceVisualizerCallback(Callback):
+    """Runs synthetic inference visualization after each epoch using run_inference.py."""
+    
+    def __init__(self, width: int = 1024, height: int = 512, base_channels: int = 32):
+        """Initialize the visualization callback.
+        
+        Args:
+            width: Width of synthetic gradient
+            height: Height of synthetic gradient
+            base_channels: Model base channels (must match training model)
+        """
+        super().__init__()
+        self.width = width
+        self.height = height
+        self.base_channels = base_channels
+        self.run_inference_script = project_root / "scripts" / "run_inference.py"
+    
+    def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Run inference at the start of training."""
+        logger.info("Running synthetic inference visualization at training start...")
+        self._log_synthetic_inference(trainer, pl_module, step=0, epoch_label="start")
+    
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Run inference after each epoch."""
+        self._log_synthetic_inference(
+            trainer, pl_module, 
+            step=trainer.current_epoch + 1, 
+            epoch_label=f"epoch_{trainer.current_epoch}"
+        )
+    
+    def _log_synthetic_inference(
+        self, 
+        trainer: L.Trainer, 
+        pl_module: L.LightningModule, 
+        step: int, 
+        epoch_label: str
+    ) -> None:
+        """Run synthetic inference via run_inference.py and log results to TensorBoard.
+        
+        Args:
+            trainer: PyTorch Lightning trainer
+            pl_module: Lightning module with the model
+            step: Global step for TensorBoard logging
+            epoch_label: Label for the logged images
+        """
+        if trainer.logger is None or not hasattr(trainer.logger, "experiment"):
+            return
+        
+        try:
+            # Save temporary checkpoint for run_inference.py
+            temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_{epoch_label}.pt"
+            torch.save(pl_module.model.state_dict(), temp_checkpoint)
+            logger.info(f"Saved temporary checkpoint to {temp_checkpoint}")
+            
+            # Prepare output paths
+            output_exr = Path(trainer.log_dir) / f"synthetic_{epoch_label}.exr"
+            output_png = Path(trainer.log_dir) / f"synthetic_{epoch_label}.png"
+            
+            # Run run_inference.py
+            cmd = [
+                "python",
+                str(self.run_inference_script),
+                "--checkpoint", str(temp_checkpoint),
+                "--synthetic",
+                "--width", str(self.width),
+                "--height", str(self.height),
+                "--channels", str(self.base_channels),
+                "--output", str(output_exr),
+                "--device", str(pl_module.device).split(":")[0],
+            ]
+            
+            logger.info(f"Running inference: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
+            
+            if result.returncode != 0:
+                logger.error(f"Inference failed with return code {result.returncode}")
+                logger.error(f"STDOUT: {result.stdout}")
+                logger.error(f"STDERR: {result.stderr}")
+                return
+            
+            logger.info(f"Inference stdout: {result.stdout}")
+            
+            # Read generated outputs
+            if output_exr.exists():
+                logger.info(f"Output EXR found at {output_exr}")
+                output_np = read_exr(output_exr)
+                output_tensor = torch.from_numpy(output_np).float()
+            else:
+                logger.error(f"Output EXR not found: {output_exr}")
+                logger.error(f"Contents of log_dir: {list(Path(trainer.log_dir).iterdir())}")
+                return
+            
+            # For TensorBoard, we also need LDR input and HDR reference
+            # We'll regenerate them to get the images for logging (must match what run_inference.py uses)
+            from luminascale.utils.image_generator import create_primary_gradients, quantize_to_8bit
+            
+            target_w = (self.width // 64) * 64
+            target_h = (self.height // 64) * 64
+            
+            hdr = create_primary_gradients(width=target_w, height=target_h, dtype="float32")
+            hdr_clipped = np.clip(hdr, 0, 1)
+            ldr = quantize_to_8bit(hdr_clipped)
+            # quantize_to_8bit returns float32 in [0, 1], so convert directly without dividing by 255
+            ldr_tensor = torch.from_numpy(ldr).float()
+            hdr_tensor = torch.from_numpy(hdr_clipped).float()
+            
+            # Clip output to [0, 1] range
+            output_clipped = torch.clamp(output_tensor, 0, 1)
+            
+            # Apply 25x contrast stretch to reveal quantization artifacts
+            contrast_factor = 25.0
+            def apply_contrast(x):
+                return torch.clamp((x - 0.5) * contrast_factor + 0.5, 0, 1)
+            
+            ldr_tensor_contrast = apply_contrast(ldr_tensor)
+            output_tensor_contrast = apply_contrast(output_clipped)
+            hdr_tensor_contrast = apply_contrast(hdr_tensor)
+            
+            # Extract run_id from log_dir path (last component)
+            run_id = Path(trainer.log_dir).name
+            
+            # Log high-contrast model output to TensorBoard
+            # Use fixed tag path so images are consolidated into a scrubbable timeline in TensorBoard
+            tb = trainer.logger.experiment
+            tb.add_image(f"primaries_gradient", output_tensor_contrast, global_step=step)
+            tb.flush()
+            logger.info(f"✓ Synthetic inference visualization logged: {epoch_label}")
+            logger.info(f"  Output saved to: {output_exr} and {output_png}")
+            
+            # Cleanup only temporary checkpoint (keep EXR and PNG outputs)
+            temp_checkpoint.unlink(missing_ok=True)
+        
+        except Exception as e:
+            logger.error(f"Error during synthetic inference visualization: {e}", exc_info=True)
+            # Best effort cleanup
+            try:
+                temp_checkpoint.unlink(missing_ok=True)
+            except:
+                pass
 
 
 class TensorBoardFlushCallback(Callback):
@@ -195,7 +339,16 @@ def main(cfg: DictConfig) -> None:
         devices=cfg.devices,
         max_epochs=cfg.epochs,
         logger=logger_tb,
-        callbacks=[checkpoint_callback, CompactProgressBar(), TensorBoardFlushCallback()],
+        callbacks=[
+            checkpoint_callback,
+            CompactProgressBar(),
+            TensorBoardFlushCallback(),
+            SyntheticInferenceVisualizerCallback(
+                width=cfg.get("inference_width", 1024),
+                height=cfg.get("inference_height", 512),
+                base_channels=cfg.model.base_channels
+            )
+        ],
         precision=cfg.precision,
         strategy=cfg.strategy,
         log_every_n_steps=1,  # Log every batch for detailed TensorBoard curves

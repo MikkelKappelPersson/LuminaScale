@@ -2,18 +2,18 @@
 # Usage: python scripts/train_dequantization_net.py --config-name=default
 
 # Data paths
-shard_path: "dataset/temp/shards/train"
+shard_path: "dataset/temp/shards/val"
 val_shard_path: "dataset/temp/shards/val"
 metadata_parquet: "dataset/temp/training_metadata.parquet"
 
 # Training parameters
-batch_size: 1
-epochs: 2
-learning_rate: 1e-4
+batch_size: 4
+epochs: 10  # Increased from 2 to allow fine-tuning with LR scheduling
+learning_rate: 1e-4  # Initial learning rate (decayed by CosineAnnealingLR: 1e-4 → 1e-6)
 checkpoint_freq: 1
 
 # Data loading
-num_workers: 0
+num_workers: 4
 shuffle_buffer: 10
 patches_per_image: 1
 

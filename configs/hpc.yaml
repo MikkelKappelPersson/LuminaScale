@@ -12,7 +12,7 @@ metadata_parquet: ${oc.env:METADATA_PARQUET,/lustre/scratch/fs62fb/training_meta
 # Training parameters (HPC-specific overrides for larger-scale training)
 batch_size: 32  # Larger batches with more GPU memory (DDP across multiple GPUs)
 epochs: 150
-learning_rate: 5e-5  # Slightly smaller LR for stability with larger batches
+learning_rate: 5e-5  # Initial learning rate (decayed by CosineAnnealingLR to 1e-6)
 checkpoint_freq: 5  # More frequent checkpoints in long-running jobs
 
 # Data loading

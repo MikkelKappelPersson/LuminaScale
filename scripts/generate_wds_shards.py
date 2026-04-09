@@ -1,21 +1,66 @@
 """
-Generate WebDataset shards from ACES EXR files for efficient training.
+Skeleton for dataset migration from LMDB to WebDataset (shards) + Parquet (metadata).
 
-This script:
-1. Creates a Parquet manifest from existing ACES EXR files
-2. Bakes EXR files into WebDataset .tar shards
-3. Enables on-the-fly patch generation during training via WebDataset.repeat()
+This script will:
+1. Extract ACES float32 data from LMDB.
+2. Calculate luma/saturation stats for metadata.
+3. Save raw .exr files and a Parquet metadata table.
+4. (Optional) Bake into .tar shards.
 """
 
 from __future__ import annotations
 from pathlib import Path
-import argparse
-import json
-import webdataset as wds
+import os
+import lmdb
+import pickle
+import numpy as np
 import pandas as pd
 import tqdm
+import json
+import webdataset as wds
+import pyarrow as pa
+import pyarrow.parquet as pq
 
+def create_parquet_manifest(exr_dir: str, output_parquet: str, split_ratios: tuple[float, float, float] = (0.8, 0.1, 0.1)):
+    """
+    Generate a Parquet manifest for existing ACES2065-1 EXR files.
+    Applies an 80/10/10 split (train/val/test).
+    """
+    exr_path = Path(exr_dir)
+    files = sorted(list(exr_path.glob("*.exr")))
+    
+    data = []
+    num_files = len(files)
+    
+    # Simple deterministic split
+    train_end = int(num_files * split_ratios[0])
+    val_end = train_end + int(num_files * split_ratios[1])
+    
+    for i, f in enumerate(files):
+        if i < train_end:
+            split = "train"
+        elif i < val_end:
+            split = "val"
+        else:
+            split = "test"
+            
+        data.append({
+            "id": f.stem,
+            "source_path": str(f.absolute()),
+            "split": split,
+            "resolution": None, # Could be added with OIIO call if needed
+        })
+    
+    df = pd.DataFrame(data)
+    df.to_parquet(output_parquet)
+    print(f"Created manifest with {len(df)} entries. Split: 80/10/10")
 
+import argparse
+import webdataset as wds
+import json
+from pathlib import Path
+import pandas as pd
+import tqdm
 
 def create_parquet_manifest(exr_dir: str, output_parquet: str, split_ratios: tuple[float, float, float] = (0.8, 0.1, 0.1)):
     """

@@ -187,22 +187,23 @@ class LuminaScaleWebDataset:
         
         
         # Build the WebDataset pipeline
-        # Use shardshuffle for randomizing shard order (more efficient than sample-level buffer)
-        dataset = wds.WebDataset(self.shard_path, resampled=False, shardshuffle=is_training)
+        dataset = wds.WebDataset(self.shard_path, resampled=False)
         
         # Split by worker (instead of .shardselection method)
         dataset = dataset.select(wds.shardlists.split_by_worker)
         
-        # Repeat the dataset patches_per_image times for on-the-fly patch generation.
-        # With WebDataset.repeat(), each sample appears patches_per_image consecutive times
-        # within the stream from each worker. This enables cache hits in _process_batch()
-        # on patches 2-N from the same image (since consecutive batches will have same image_id).
+        if is_training:
+            # Shuffle the ORIGINAL 880 images first (before repeat)
+            # This ensures randomization while keeping consecutive repeats together for caching
+            dataset = dataset.shuffle(shuffle_buffer)
+        
+        # Repeat the dataset patches_per_image times for on-the-fly patch generation
+        # After shuffle, we get: [shuffled img1, shuffled img2, ...] repeated 32 times
+        # This creates 880 * 32 total samples without duplicating storage
+        # Caching in _process_batch() will reuse decoded images across repeats
         if self.patches_per_image > 1:
             dataset = dataset.repeat(self.patches_per_image)
-            logger.info(
-                f"Configured dataset.repeat({self.patches_per_image}) for on-the-fly patch generation. "
-                f"Each image yields {self.patches_per_image} consecutive samples for proper caching."
-            )
+            logger.info(f"Configured dataset to repeat {self.patches_per_image} times for on-the-fly patch generation")
             
         # Map our custom decoder
         dataset = dataset.map(decode_exr_and_json)

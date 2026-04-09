@@ -2,7 +2,7 @@
 # Usage: python scripts/train_dequantization_net.py --config-name=default
 
 # Data paths
-shard_path: "dataset/temp/shards/val"
+shard_path: "dataset/temp/shards/train"
 val_shard_path: "dataset/temp/shards/val"
 metadata_parquet: "dataset/temp/training_metadata.parquet"
 

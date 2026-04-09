@@ -19,6 +19,9 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
+
+import torch.nn as nn
 
 # Add project root to sys.path
 script_dir = Path(__file__).resolve().parent
@@ -117,10 +120,18 @@ class SyntheticInferenceVisualizerCallback(Callback):
         if trainer.logger is None or not hasattr(trainer.logger, "experiment"):
             return
         
+        # Guard against None log_dir
+        if trainer.log_dir is None:
+            logger.error("Trainer log_dir is None, cannot save checkpoint")
+            return
+        
+        temp_checkpoint: Path | None = None
         try:
             # Save temporary checkpoint for run_inference.py
             temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_{epoch_label}.pt"
-            torch.save(pl_module.model.state_dict(), temp_checkpoint)
+            # Cast model as nn.Module to access state_dict
+            model = cast(nn.Module, pl_module.model)
+            torch.save(model.state_dict(), temp_checkpoint)
             logger.info(f"Saved temporary checkpoint to {temp_checkpoint}")
             
             # Prepare output paths
@@ -192,7 +203,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
             
             # Log high-contrast model output to TensorBoard
             # Use fixed tag path so images are consolidated into a scrubbable timeline in TensorBoard
-            tb = trainer.logger.experiment
+            tb = trainer.logger.experiment  # type: ignore
             tb.add_image(f"primaries_gradient", output_tensor_contrast, global_step=step)
             tb.flush()
             logger.info(f"✓ Synthetic inference visualization logged: {epoch_label}")
@@ -204,24 +215,28 @@ class SyntheticInferenceVisualizerCallback(Callback):
         except Exception as e:
             logger.error(f"Error during synthetic inference visualization: {e}", exc_info=True)
             # Best effort cleanup
-            try:
-                temp_checkpoint.unlink(missing_ok=True)
-            except:
-                pass
+            if temp_checkpoint is not None:
+                try:
+                    temp_checkpoint.unlink(missing_ok=True)
+                except Exception:  # pragma: no cover
+                    pass
 
 
 class TensorBoardFlushCallback(Callback):
     """Callback to explicitly flush TensorBoard logger after each batch and epoch."""
     
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+    def on_train_batch_end(
+        self, trainer: L.Trainer, pl_module: L.LightningModule,
+        outputs: Any, batch: Any, batch_idx: int
+    ) -> None:
         """Flush logger after each batch to ensure events are written."""
         if trainer.logger and hasattr(trainer.logger, "experiment"):
-            trainer.logger.experiment.flush()
+            trainer.logger.experiment.flush()  # type: ignore
     
-    def on_train_epoch_end(self, trainer, pl_module):
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Flush logger after each epoch."""
         if trainer.logger and hasattr(trainer.logger, "experiment"):
-            trainer.logger.experiment.flush()
+            trainer.logger.experiment.flush()  # type: ignore
 
 
 class HparamsMetricsCallback(Callback):
@@ -234,14 +249,14 @@ class HparamsMetricsCallback(Callback):
         
         try:
             # Extract callbacks to get checkpoint info
-            checkpoint_callback = None
-            for cb in trainer.callbacks:
+            checkpoint_callback: ModelCheckpoint | None = None
+            for cb in trainer.callbacks:  # type: ignore
                 if isinstance(cb, ModelCheckpoint):
                     checkpoint_callback = cb
                     break
             
             # Prepare final metrics dict
-            final_metrics = {
+            final_metrics: dict[str, Any] = {
                 "final_epoch": trainer.current_epoch,
                 "total_steps": trainer.global_step,
             }
@@ -261,7 +276,7 @@ class HparamsMetricsCallback(Callback):
 class CompactProgressBar(TQDMProgressBar):
     """Compact progress bar with minimal redundant information."""
     
-    def get_metrics(self, trainer, pl_module):
+    def get_metrics(self, trainer: L.Trainer, pl_module: L.LightningModule) -> dict[str, Any]:
         """Override to inject batch-specific metrics into progress bar."""
         items = super().get_metrics(trainer, pl_module)
         # Remove redundant info
@@ -270,21 +285,26 @@ class CompactProgressBar(TQDMProgressBar):
         
         # Inject batch GPU time and loss from module if available
         if hasattr(pl_module, 'last_batch_gpu_ms') and pl_module.last_batch_gpu_ms is not None:
-            items[f"GPU"] = f"{pl_module.last_batch_gpu_ms:.1f}ms"
+            items["GPU"] = f"{pl_module.last_batch_gpu_ms:.1f}ms"
         if hasattr(pl_module, 'last_batch_loss') and pl_module.last_batch_loss is not None:
-            items[f"Loss"] = f"{pl_module.last_batch_loss:.4f}"
+            items["Loss"] = f"{pl_module.last_batch_loss:.4f}"
         
         return items
     
-    def on_train_epoch_start(self, trainer, pl_module):
+    def on_train_epoch_start(
+        self, trainer: L.Trainer, *args: Any
+    ) -> None:
         """Override epoch start to use compact format and set estimated total."""
-        super().on_train_epoch_start(trainer, pl_module)
+        super().on_train_epoch_start(trainer)
         # Customize the progress bar description to be more compact
         if hasattr(self, 'train_progress_bar') and self.train_progress_bar is not None:
             self.train_progress_bar.set_description(f"Epoch {trainer.current_epoch}")
             # Set estimated total batches from metadata if available
-            if hasattr(pl_module, 'estimated_total_batches') and pl_module.estimated_total_batches is not None:
-                self.train_progress_bar.total = pl_module.estimated_total_batches
+            # Extract pl_module from args if available (PyTorch Lightning may pass it)
+            if len(args) > 0:
+                pl_module = args[0]
+                if hasattr(pl_module, 'estimated_total_batches') and pl_module.estimated_total_batches is not None:
+                    self.train_progress_bar.total = pl_module.estimated_total_batches
 
 
 
@@ -340,8 +360,13 @@ def main(cfg: DictConfig) -> None:
     
     # 2. Setup Lightning Module
     print(f"[MAIN] Creating model...")
-    model = create_dequantization_net(in_channels=3, base_channels=cfg.model.base_channels)
+    model = create_dequantization_net(in_channels=3, base_channels=cfg.model.base_channels)  # type: ignore
     print(f"[MAIN] ✓ Model created")
+    
+    # Move model to CUDA (we always train on GPUs)
+    device = torch.device("cuda")
+    model = model.to(device)
+    print(f"[MAIN] Model moved to {device}")
     
     print(f"[MAIN] Creating LuminaScaleModule...")
     ls_module = LuminaScaleModule(
@@ -349,7 +374,7 @@ def main(cfg: DictConfig) -> None:
         learning_rate=cfg.learning_rate
     )
     # Store estimated batches for progress bar
-    ls_module.estimated_total_batches = train_dataset.get_estimated_batches()
+    ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
     print(f"[MAIN] ✓ LuminaScaleModule created")
     
     # 3. Setup Trainer

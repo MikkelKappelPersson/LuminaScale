@@ -1,8 +1,4 @@
 """
-Skeleton for dataset migration from LMDB to WebDataset (shards) + Parquet (metadata).
-
-This script will:
-1. Extract ACES float32 data from LMDB.
 2. Calculate luma/saturation stats for metadata.
 3. Save raw .exr files and a Parquet metadata table.
 4. (Optional) Bake into .tar shards.
@@ -11,8 +7,6 @@ This script will:
 from __future__ import annotations
 from pathlib import Path
 import os
-import lmdb
-import pickle
 import numpy as np
 import pandas as pd
 import tqdm

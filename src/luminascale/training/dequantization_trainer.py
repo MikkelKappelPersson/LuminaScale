@@ -495,7 +495,7 @@ class LuminaScaleModule(L.LightningModule):
             mask = exposure_mask(y)
             loss = masked_l2_loss(y_hat, y, mask)
 
-            self.log("train_loss", loss, prog_bar=False, sync_dist=True)  # Log to Lightning logger
+            self.log("loss_L2/train", loss, prog_bar=False, sync_dist=True)  # Log to Lightning logger
             # Store metrics for progress bar display
             self.last_batch_loss = loss.item()
             return loss

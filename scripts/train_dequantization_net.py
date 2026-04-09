@@ -224,6 +224,40 @@ class TensorBoardFlushCallback(Callback):
             trainer.logger.experiment.flush()
 
 
+class HparamsMetricsCallback(Callback):
+    """Log final training metrics associated with hyperparameters."""
+    
+    def on_train_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Log final metrics after training completes."""
+        if trainer.logger is None:
+            return
+        
+        try:
+            # Extract callbacks to get checkpoint info
+            checkpoint_callback = None
+            for cb in trainer.callbacks:
+                if isinstance(cb, ModelCheckpoint):
+                    checkpoint_callback = cb
+                    break
+            
+            # Prepare final metrics dict
+            final_metrics = {
+                "final_epoch": trainer.current_epoch,
+                "total_steps": trainer.global_step,
+            }
+            
+            # If we have checkpoint info, log the best model path
+            if checkpoint_callback and checkpoint_callback.best_model_path:
+                final_metrics["best_checkpoint"] = str(checkpoint_callback.best_model_path)
+            
+            # Log final metrics with the hparams already logged
+            if hasattr(trainer.logger, "log_hyperparams"):
+                trainer.logger.log_hyperparams({}, final_metrics)
+                logger.info(f"✓ Final metrics logged: {final_metrics}")
+        except Exception as e:
+            logger.error(f"Error logging final metrics: {e}")
+
+
 class CompactProgressBar(TQDMProgressBar):
     """Compact progress bar with minimal redundant information."""
     
@@ -324,7 +358,7 @@ def main(cfg: DictConfig) -> None:
         save_dir=str(run_dir),
         name="",
         version="",
-        default_hp_metric=False  # Disable placeholder hp_metric for cleaner TensorBoard display
+        default_hp_metric=True  # Enable hp_metric to display hyperparameters in TensorBoard
     )
     
     checkpoint_callback = ModelCheckpoint(
@@ -343,6 +377,7 @@ def main(cfg: DictConfig) -> None:
             checkpoint_callback,
             CompactProgressBar(),
             TensorBoardFlushCallback(),
+            HparamsMetricsCallback(),
             SyntheticInferenceVisualizerCallback(
                 width=cfg.get("inference_width", 1024),
                 height=cfg.get("inference_height", 512),
@@ -354,6 +389,23 @@ def main(cfg: DictConfig) -> None:
         log_every_n_steps=1,  # Log every batch for detailed TensorBoard curves
     )
     print(f"[MAIN] ✓ Lightning Trainer created")
+
+    # Log hyperparameters to TensorBoard
+    hparams_dict = {
+        "learning_rate": cfg.learning_rate,
+        "batch_size": cfg.get("batch_size", 32),
+        "epochs": cfg.epochs,
+        "optimizer": "Adam",
+        "loss_fn": "Masked L2 (exposure-aware)",
+        "model_base_channels": cfg.model.base_channels,
+        "patches_per_image": cfg.get("patches_per_image", 1),
+        "crop_size": 512,
+    }
+    
+    # TensorBoard requires log_hyperparams to be called after trainer initialization
+    # We'll log initial hparams now; final metrics will be appended after training
+    logger_tb.log_hyperparams(hparams_dict)
+    print(f"[MAIN] ✓ Hyperparameters logged to TensorBoard")
 
     # 4. Start Training
     print(f"\n{'='*80}")

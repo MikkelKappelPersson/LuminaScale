@@ -491,9 +491,8 @@ class LuminaScaleModule(L.LightningModule):
             
             y_hat = self.model(x)
 
-            # Compute mask for well-exposed regions (avoid clipped areas)
-            mask = exposure_mask(y)
-            loss = masked_l2_loss(y_hat, y, mask)
+            # Use unmasked L2 loss
+            loss = l2_loss(y_hat, y)
 
             self.log("loss_L2/train", loss, prog_bar=False, sync_dist=True)  # Log to Lightning logger
             # Store metrics for progress bar display
@@ -582,10 +581,20 @@ def exposure_mask(
     return mask
 
 
+def l2_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Unmasked L2 (MSE) loss - default loss function.
+    
+    Provides training signal across the full tonal range without masking.
+    This is superior to masked L2 as it trains the model on all pixel values,
+    including the extremes where dequantization is most visible.
+    """
+    return F.mse_loss(pred.float(), target.float())
+
+
 def masked_l2_loss(
     pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
 ) -> torch.Tensor:
-    """Masked L2 loss to ignore clipped regions."""
+    """Masked L2 loss to ignore clipped regions (deprecated in favor of l2_loss)."""
     diff = (pred - target) ** 2
     masked_diff = diff * mask
     loss = masked_diff.sum() / (mask.sum() + 1e-8)

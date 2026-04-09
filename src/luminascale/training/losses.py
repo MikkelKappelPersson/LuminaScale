@@ -1,7 +1,7 @@
 """Advanced loss functions for dequantization training.
 
 Combines multiple objectives to improve quantization artifact removal:
-- L2 reconstruction loss (masked)
+- L2 reconstruction loss (unmasked, default)
 - Total Variation loss (gradient smoothness)
 - Perceptual loss (VGG feature matching)
 - Edge-aware regularization
@@ -12,6 +12,34 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class SimpleL2Loss(nn.Module):
+    """Simple unmasked L2 (MSE) loss for dequantization.
+    
+    This is the recommended default loss function that:
+    - Does not mask out any pixel values
+    - Provides training signal across the full tonal range
+    - Especially important for capturing dequantization at extremes
+    """
+    
+    def __init__(self) -> None:
+        """Initialize simple L2 loss."""
+        super().__init__()
+    
+    def forward(
+        self, pred: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute unmasked L2 loss.
+        
+        Args:
+            pred: Predicted image [B, C, H, W] in [0, 1]
+            target: Target image [B, C, H, W] in [0, 1]
+            
+        Returns:
+            Scalar L2 loss (MSE)
+        """
+        return F.mse_loss(pred, target)
 
 
 class TotalVariationLoss(nn.Module):

@@ -396,7 +396,7 @@ def main(cfg: DictConfig) -> None:
         "batch_size": cfg.get("batch_size", 32),
         "epochs": cfg.epochs,
         "optimizer": "Adam",
-        "loss_fn": "Masked L2 (exposure-aware)",
+        "loss_fn": "L2 (unmasked)",
         "model_base_channels": cfg.model.base_channels,
         "patches_per_image": cfg.get("patches_per_image", 1),
         "crop_size": 512,

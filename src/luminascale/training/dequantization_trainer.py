@@ -35,7 +35,7 @@ class LuminaScaleModule(L.LightningModule):
         self.model = model
         self.learning_rate = learning_rate
         self.vis_freq = vis_freq
-        self.save_hyperparameters(ignore=["model"])
+        # Note: Do NOT call save_hyperparameters() here - full config is logged at training end via HparamsMetricsCallback
         self.pair_generator = None  # Lazy initialization for WebDataset batches
         self.crop_size = 512  # Default crop size for WebDataset batches
         # Track last batch metrics for progress bar
@@ -240,6 +240,11 @@ class LuminaScaleModule(L.LightningModule):
             loss = l2_loss(y_hat, y)
 
             self.log("loss_L2/train", loss, prog_bar=False, sync_dist=True)  # Log to Lightning logger
+            
+            # Log current learning rate (supports dynamic LR scheduling)
+            current_lr = self.optimizers().param_groups[0]["lr"]
+            self.log("learning_rate", current_lr, prog_bar=False, sync_dist=True)
+            
             # Store metrics for progress bar display
             self.last_batch_loss = loss.item()
             return loss

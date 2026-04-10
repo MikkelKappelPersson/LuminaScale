@@ -4,6 +4,8 @@
 defaults:
   - default
 
+config_name: hpc
+
 # Data paths (override in sbatch script or environment)
 shard_path: ${oc.env:SHARD_PATH,/lustre/scratch/fs62fb/shards/train}
 val_shard_path: ${oc.env:VAL_SHARD_PATH,/lustre/scratch/fs62fb/shards/val}

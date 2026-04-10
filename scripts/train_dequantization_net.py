@@ -35,10 +35,12 @@ import torch
 import warnings
 import subprocess
 import numpy as np
+import matplotlib.pyplot as plt
 import pytorch_lightning as L
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback
 from omegaconf import DictConfig, OmegaConf
+from hydra.core.hydra_config import HydraConfig
 
 # Suppress non-critical warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning")
@@ -204,7 +206,43 @@ class SyntheticInferenceVisualizerCallback(Callback):
             # Log high-contrast model output to TensorBoard
             # Use fixed tag path so images are consolidated into a scrubbable timeline in TensorBoard
             tb = trainer.logger.experiment  # type: ignore
-            tb.add_image(f"primaries_gradient", output_tensor_contrast, global_step=step)
+            tb.add_image(f"primaries_gradient/eval", output_tensor_contrast, global_step=step)
+            
+            # Create a combined visualization with both normal and contrast views
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            
+            # Convert tensors to numpy for plotting [H, W, C]
+            ldr_np = ldr_tensor.permute(1, 2, 0).numpy()
+            output_np = output_clipped.permute(1, 2, 0).numpy()
+            hdr_np = hdr_tensor.permute(1, 2, 0).numpy()
+            
+            ldr_contrast_np = ldr_tensor_contrast.permute(1, 2, 0).numpy()
+            output_contrast_np = output_tensor_contrast.permute(1, 2, 0).numpy()
+            hdr_contrast_np = hdr_tensor_contrast.permute(1, 2, 0).numpy()
+            
+            # Row 0: Normal view
+            axes[0, 0].imshow(ldr_np)
+            axes[0, 0].set_title("Input (8-bit LDR)")
+            axes[0, 1].imshow(output_np)
+            axes[0, 1].set_title("Output (Expanded)")
+            axes[0, 2].imshow(hdr_np)
+            axes[0, 2].set_title("Target (32-bit HDR)")
+            
+            # Row 1: Contrast-boosted view (25x)
+            axes[1, 0].imshow(ldr_contrast_np)
+            axes[1, 0].set_title(f"Input {contrast_factor}x Contrast")
+            axes[1, 1].imshow(output_contrast_np)
+            axes[1, 1].set_title(f"Output {contrast_factor}x Contrast")
+            axes[1, 2].imshow(hdr_contrast_np)
+            axes[1, 2].set_title(f"Target {contrast_factor}x Contrast")
+            
+            for ax in axes.ravel():
+                ax.axis("off")
+            
+            plt.tight_layout()
+            tb.add_figure(f"primaries_visualisation/eval", fig, global_step=step)
+            plt.close(fig)
+            
             tb.flush()
             logger.info(f"✓ Synthetic inference visualization logged: {epoch_label}")
             logger.info(f"  Output saved to: {output_exr} and {output_png}")
@@ -240,35 +278,45 @@ class TensorBoardFlushCallback(Callback):
 
 
 class HparamsMetricsCallback(Callback):
-    """Log final training metrics associated with hyperparameters."""
+    """Log final_loss metric after training completes.
+    
+    Adds final_loss to the hparams metrics so TensorBoard can correlate
+    hyperparameters with final training performance.
+    """
+    
+    def __init__(self, hparams_dict: dict[str, Any]) -> None:
+        super().__init__()
+        self.hparams_dict = hparams_dict
     
     def on_train_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Log final metrics after training completes."""
+        """Log hparams + final_loss metric after training completes."""
         if trainer.logger is None:
             return
         
         try:
-            # Extract callbacks to get checkpoint info
+            # Extract final loss from logged metrics
+            final_loss = trainer.callback_metrics.get("loss_L2/train", None)
+            
+            # Add final_loss to hparams metrics
+            metrics_dict: dict[str, Any] = {}
+            if final_loss is not None:
+                loss_value = final_loss.item() if hasattr(final_loss, "item") else float(final_loss)
+                metrics_dict["final_loss"] = loss_value
+            
+            # Log hparams + metrics together for TensorBoard hparams dashboard
+            if hasattr(trainer.logger, "log_hyperparams"):
+                trainer.logger.log_hyperparams(self.hparams_dict, metrics_dict)
+                logger.info(f"✓ Hparams + final_loss logged: {metrics_dict.get('final_loss', 'N/A'):.6f}")
+            
+            # Log best checkpoint info
             checkpoint_callback: ModelCheckpoint | None = None
             for cb in trainer.callbacks:  # type: ignore
                 if isinstance(cb, ModelCheckpoint):
                     checkpoint_callback = cb
                     break
             
-            # Prepare final metrics dict
-            final_metrics: dict[str, Any] = {
-                "final_epoch": trainer.current_epoch,
-                "total_steps": trainer.global_step,
-            }
-            
-            # If we have checkpoint info, log the best model path
             if checkpoint_callback and checkpoint_callback.best_model_path:
-                final_metrics["best_checkpoint"] = str(checkpoint_callback.best_model_path)
-            
-            # Log final metrics with the hparams already logged
-            if hasattr(trainer.logger, "log_hyperparams"):
-                trainer.logger.log_hyperparams({}, final_metrics)
-                logger.info(f"✓ Final metrics logged: {final_metrics}")
+                logger.info(f"✓ Best checkpoint: {checkpoint_callback.best_model_path}")
         except Exception as e:
             logger.error(f"Error logging final metrics: {e}")
 
@@ -383,7 +431,6 @@ def main(cfg: DictConfig) -> None:
         save_dir=str(run_dir),
         name="",
         version="",
-        default_hp_metric=True  # Enable hp_metric to display hyperparameters in TensorBoard
     )
     
     checkpoint_callback = ModelCheckpoint(
@@ -392,6 +439,22 @@ def main(cfg: DictConfig) -> None:
         every_n_epochs=cfg.get("checkpoint_freq", 1),
         save_top_k=-1,  # Save all checkpoints according to frequency
     )
+
+    # Prepare hparams dict for logging at training end
+    config_name = cfg.get("config_name", "default")
+    hparams_dict = {
+        "config_name": config_name,
+        "learning_rate": cfg.learning_rate,
+        "batch_size": cfg.get("batch_size", 32),
+        "epochs": cfg.epochs,
+        "optimizer": "Adam",
+        "loss_fn": "L2 (unmasked)",
+        "model_base_channels": cfg.model.base_channels,
+        "patches_per_image": cfg.get("patches_per_image", 1),
+        "crop_size": 512,
+        "shuffle_buffer": cfg.get("shuffle_buffer", 10),
+        "precision": cfg.precision,
+    }
 
     trainer = L.Trainer(
         accelerator=cfg.accelerator,
@@ -402,7 +465,7 @@ def main(cfg: DictConfig) -> None:
             checkpoint_callback,
             CompactProgressBar(),
             TensorBoardFlushCallback(),
-            HparamsMetricsCallback(),
+            HparamsMetricsCallback(hparams_dict),
             SyntheticInferenceVisualizerCallback(
                 width=cfg.get("inference_width", 1024),
                 height=cfg.get("inference_height", 512),
@@ -415,22 +478,8 @@ def main(cfg: DictConfig) -> None:
     )
     print(f"[MAIN] ✓ Lightning Trainer created")
 
-    # Log hyperparameters to TensorBoard
-    hparams_dict = {
-        "learning_rate": cfg.learning_rate,
-        "batch_size": cfg.get("batch_size", 32),
-        "epochs": cfg.epochs,
-        "optimizer": "Adam",
-        "loss_fn": "L2 (unmasked)",
-        "model_base_channels": cfg.model.base_channels,
-        "patches_per_image": cfg.get("patches_per_image", 1),
-        "crop_size": 512,
-    }
-    
-    # TensorBoard requires log_hyperparams to be called after trainer initialization
-    # We'll log initial hparams now; final metrics will be appended after training
-    logger_tb.log_hyperparams(hparams_dict)
-    print(f"[MAIN] ✓ Hyperparameters logged to TensorBoard")
+    # Note: hparams + final_loss will be logged together at training end in HparamsMetricsCallback
+    # (TensorBoard requires a single log_hyperparams call with both params and metrics)
 
     # 4. Start Training
     print(f"\n{'='*80}")

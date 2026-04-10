@@ -1,0 +1,15 @@
+defaults:
+  - default
+
+config_name: dev
+
+# Data paths
+shard_path: "dataset/temp/shards/val"
+
+# Hydra configuration to suppress working directory change warning and .hydra/ folder
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .  # Prevent Hydra from creating timestamped output directories
+  output_subdir: null  # Disable .hydra/ subdirectory creation

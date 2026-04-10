@@ -1,6 +1,8 @@
 # WebDataset training configuration (baseline)
 # Usage: python scripts/train_dequantization_net.py --config-name=default
 
+config_name: default
+
 # Data paths
 shard_path: "dataset/temp/shards/train"
 val_shard_path: "dataset/temp/shards/val"
@@ -8,7 +10,7 @@ metadata_parquet: "dataset/temp/training_metadata.parquet"
 
 # Training parameters
 batch_size: 4
-epochs: 1  # Increased from 2 to allow fine-tuning with LR scheduling
+epochs: 4  # Increased from 2 to allow fine-tuning with LR scheduling
 learning_rate: 1e-4  # Initial learning rate (decayed by CosineAnnealingLR: 1e-4 → 1e-6)
 checkpoint_freq: 1
 

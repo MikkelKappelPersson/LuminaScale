@@ -133,7 +133,7 @@ class DatasetPairGenerator:
             t_cdl = time.perf_counter()
             
             # 4. ACES -> sRGB Transform (returns [H, W, C] in [0, 1] float)
-            srgb_32f = self.pytorch_transformer.aces_to_srgb_8u(aces_graded.unsqueeze(0)).squeeze(0)
+            srgb_32f = self.pytorch_transformer.aces_to_srgb_32f(aces_graded.unsqueeze(0)).squeeze(0)
             t_aces = time.perf_counter()
             
             # 5. Quantize to 8-bit (convert to uint8 then back to float for dequantization)

@@ -4,12 +4,30 @@
 
 LuminaScale implements neural models for:
 
--   **Bit-Depth Expansion (BDE)**: Upsampling low-bit-depth imagery (e.g., 8-bit, 10-bit) to higher fidelity using learned super-resolution.
+-   **Bit-Depth Expansion (BDE)/Dequantization**: Upsampling low-bit-depth imagery (e.g., 8-bit, 10-bit) to higher fidelity using learned super-resolution.
 -   **ACES Normalization**: Color space transformation and “blind” normalization to SMPTE Academy Color Encoding System (ACES) without ground-truth targets.
 
+## Architecture
+- Python 3.12+
+- Pytorch Ligtning
+- Cuda optimized
+
+## Platform
+The platform is twofold. one local for development and one HPC for large scale training
+
+### 1. Local
+- managed with pixi 
+- local gpu: rtx 3080
+
+### 2. AI-Cloud HPC
+- Multi gpu
+- uses slurm (use srun or sbatch)
+- gpus available: t4, a40, a10, a40, l40s
+
+ 
 ## Code Style & Language
 
--   **Python 3.12+** (PyTorch ecosystem)
+
 -   **Type hints** on all function signatures; use `typing` module and `from __future__ import annotations` for forward refs.
 -   **Docstrings**: code should be self-documenting through clear naming and type hints.
 -   **Formatting**: Black (line length 100), isort, flake8 (ignore E501 if line length exceeds).

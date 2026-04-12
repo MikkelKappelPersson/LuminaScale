@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from .gpu_cdl_processor import GPUCDLProcessor
+from .image_generator import apply_s_curve_contrast_torch
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,13 @@ class DatasetPairGenerator:
             # srgb_32f is already in [0, 1], so multiply by 255, cast to uint8, then divide by 255
             srgb_8u = ((srgb_32f * 255).round().to(torch.uint8)).float() / 255.0
             t_quant = time.perf_counter()
+            
+            # 6. Apply S-curve contrast to BOTH to make quantization banding visible
+            # This amplifies the tiny ~0.001 differences so network can learn to remove banding
+            # Uses GPU-efficient torch operations, no CPU memory allocation
+            s_curve_strength = 2.5
+            srgb_8u = apply_s_curve_contrast_torch(srgb_8u, strength=s_curve_strength)
+            srgb_32f = apply_s_curve_contrast_torch(srgb_32f, strength=s_curve_strength)
             
             # Note: Cropping already done on CPU before GPU transfer (see above)
             # No need to crop again here

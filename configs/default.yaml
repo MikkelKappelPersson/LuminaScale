@@ -10,9 +10,10 @@ metadata_parquet: "dataset/temp/training_metadata.parquet"
 
 # Training parameters
 batch_size: 4
-epochs: 4  # Increased from 2 to allow fine-tuning with LR scheduling
-learning_rate: 1e-4  # Initial learning rate (decayed by CosineAnnealingLR: 1e-4 → 1e-6)
-checkpoint_freq: 1
+epochs: 1  
+learning_rate: 1e-4  
+checkpoint_freq: 10
+resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 
 # Data loading
 num_workers: 4
@@ -24,7 +25,7 @@ device: cuda
 accelerator: gpu
 devices: auto
 strategy: auto
-precision: 16-mixed
+precision: 32
 
 # Output
 output_dir: ./outputs/training
@@ -32,6 +33,12 @@ output_dir: ./outputs/training
 # Model
 model:
   base_channels: 32
+
+# Loss weights (tuned for smooth dequantization with Charbonnier smoothness)
+loss:
+  l1_weight: 1.0           # Pixel-wise reconstruction (base)
+  charbonnier_weight: 0.05          # Charbonnier loss on OUTPUT (edge-preserving smoothness)
+  grad_match_weight: 0.5   # Edge-aware smoothing (soft): no artifacts in smooth regions
 
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:

@@ -5,6 +5,7 @@ config_name: dev
 
 # Data paths
 shard_path: "dataset/temp/shards/val"
+epochs: 6
 
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:

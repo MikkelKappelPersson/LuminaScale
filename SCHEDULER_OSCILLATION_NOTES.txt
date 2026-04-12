@@ -1,0 +1,47 @@
+#!/usr/bin/env python
+"""
+Research: Check how PyTorch Lightning handles interval='step' schedulers.
+
+Key insight: Lightning has two modes:
+1. interval='epoch': scheduler.step() called once per epoch (in trainer loop)
+2. interval='step': scheduler.step() called after each optimizer.step()
+
+The problem with `interval='step'` is that Lightning might reset the scheduler state
+at epoch boundaries, or there could be an off-by-one error in when it's called.
+
+SOLUTION: Use `interval='epoch'` with a warmup epoch count properly configured,
+or manually call scheduler.step() in training_step() if we want true per-batch updates.
+"""
+
+# The key question: does setting interval="step" in configure_optimizers actually work
+# as expected with PyTorch Lightning's automatic optimization?
+
+# From PyTorch Lightning docs:
+# https://pytorch-lightning.readthedocs.io/en/latest/notebooks/lightning_examples/lr_scheduler.html
+#
+# When you return scheduler config with interval='step':
+# - scheduler.step() is called AFTER optimizer.step() for each batch
+# - The step counter should NOT reset
+#
+# But in our case, we're seeing oscillation which suggests the step counter
+# is either:
+# a) Resetting each epoch
+# b) Being called in wrong order
+# c) State not being properly maintained
+
+print("""
+HYPOTHESIS: The oscillation happens because:
+
+1. We set interval='step' in configure_optimizers()
+2. Lightning calls scheduler.step() after each batch
+3. BUT the internal step counter in LambdaLR might not be properly incremented
+4. OR Lightning is resetting scheduler state at epoch boundaries
+
+TEST RESULT: The scheduler works perfectly when step() is called directly.
+
+SOLUTION: Use manual scheduler management in training_step():
+- Don't rely on Lightning's automatic scheduler.step()  
+- Call scheduler.step() manually after optimizer.step()
+- This gives us full control over when and how often it's updated
+""")
+

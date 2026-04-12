@@ -91,14 +91,23 @@ def save_comparison(ldr, model_out, gt, save_path: Path):
     """Save side-by-side comparison images (original and high-contrast)."""
     import matplotlib.pyplot as plt
     
+    # Calculate unique values for each
+    ldr_np = ldr.transpose(1, 2, 0) if isinstance(ldr, np.ndarray) else ldr.cpu().numpy().transpose(1, 2, 0)
+    model_out_np = np.clip(model_out.transpose(1, 2, 0), 0, 1) if isinstance(model_out, np.ndarray) else np.clip(model_out.cpu().numpy().transpose(1, 2, 0), 0, 1)
+    gt_np = gt.transpose(1, 2, 0) if isinstance(gt, np.ndarray) else gt.cpu().numpy().transpose(1, 2, 0)
+    
+    ldr_unique = len(np.unique(np.round(ldr_np.reshape(-1, 3), decimals=6)))
+    model_unique = len(np.unique(np.round(model_out_np.reshape(-1, 3), decimals=6)))
+    gt_unique = len(np.unique(np.round(gt_np.reshape(-1, 3), decimals=6)))
+    
     # 1. Standard Comparison
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    axes[0].imshow(ldr.transpose(1, 2, 0))
-    axes[0].set_title("8-bit Input (Quantized)")
-    axes[1].imshow(np.clip(model_out.transpose(1, 2, 0), 0, 1))
-    axes[1].set_title("Model Output (Dequantized)")
-    axes[2].imshow(gt.transpose(1, 2, 0))
-    axes[2].set_title("32-bit Reference")
+    axes[0].imshow(ldr_np)
+    axes[0].set_title(f"8-bit Input - {ldr_unique:,} unique", fontsize=12, fontweight="bold")
+    axes[1].imshow(model_out_np)
+    axes[1].set_title(f"Model Output - {model_unique:,} unique", fontsize=12, fontweight="bold")
+    axes[2].imshow(gt_np)
+    axes[2].set_title(f"32-bit Reference - {gt_unique:,} unique", fontsize=12, fontweight="bold")
     
     for ax in axes: ax.axis('off')
     plt.tight_layout()
@@ -111,19 +120,56 @@ def save_comparison(ldr, model_out, gt, save_path: Path):
         return np.clip((x - 0.5) * contrast_factor + 0.5, 0, 1)
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    axes[0].imshow(apply_contrast(ldr.transpose(1, 2, 0)))
-    axes[0].set_title(f"Input (Contrast {contrast_factor}x)")
-    axes[1].imshow(apply_contrast(np.clip(model_out.transpose(1, 2, 0), 0, 1)))
-    axes[1].set_title(f"Model (Contrast {contrast_factor}x)")
-    axes[2].imshow(apply_contrast(gt.transpose(1, 2, 0)))
-    axes[2].set_title(f"Reference (Contrast {contrast_factor}x)")
+    axes[0].imshow(apply_contrast(ldr_np))
+    axes[0].set_title(f"Input (Contrast {contrast_factor}x) - {ldr_unique:,} unique", fontsize=12, fontweight="bold")
+    axes[1].imshow(apply_contrast(model_out_np))
+    axes[1].set_title(f"Model (Contrast {contrast_factor}x) - {model_unique:,} unique", fontsize=12, fontweight="bold")
+    axes[2].imshow(apply_contrast(gt_np))
+    axes[2].set_title(f"Reference (Contrast {contrast_factor}x) - {gt_unique:,} unique", fontsize=12, fontweight="bold")
     
     for ax in axes: ax.axis('off')
     plt.tight_layout()
     contrast_path = save_path.parent / f"{save_path.stem}_contrast{save_path.suffix}"
     plt.savefig(contrast_path, dpi=150)
     plt.close()
+    
+    # 3. Difference Map (reveal what the network actually changed)
+    # Calculate absolute difference and error
+    diff_map = np.abs(model_out_np - ldr_np)  # Show per-pixel changes
+    diff_luma = np.mean(diff_map, axis=2)  # Average across RGB
+    
+    # Also compare model output to ground truth
+    model_to_gt = np.abs(model_out_np - gt_np)
+    model_to_gt_luma = np.mean(model_to_gt, axis=2)
+    
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # Difference: model vs input
+    im0 = axes[0].imshow(diff_luma, cmap='hot')
+    axes[0].set_title(f"Difference Map (Output - Input)\nMean diff: {diff_luma.mean():.6f}", fontsize=12, fontweight="bold")
+    plt.colorbar(im0, ax=axes[0])
+    
+    # Difference: model vs GT (error)
+    im1 = axes[1].imshow(model_to_gt_luma, cmap='hot')
+    axes[1].set_title(f"Model Error (Output - Reference)\nMean error: {model_to_gt_luma.mean():.6f}", fontsize=12, fontweight="bold")
+    plt.colorbar(im1, ax=axes[1])
+    
+    # Histogram of unique value distribution
+    axes[2].hist(ldr_np.flatten(), bins=50, alpha=0.5, label=f"Input ({ldr_unique} unique)", color='red')
+    axes[2].hist(model_out_np.flatten(), bins=50, alpha=0.5, label=f"Output ({model_unique} unique)", color='blue')
+    axes[2].hist(gt_np.flatten(), bins=50, alpha=0.5, label=f"Reference ({gt_unique} unique)", color='green')
+    axes[2].set_xlabel("Pixel Value")
+    axes[2].set_ylabel("Frequency")
+    axes[2].set_title("Value Distribution", fontsize=12, fontweight="bold")
+    axes[2].legend(fontsize=10)
+    axes[2].set_yscale('log')
+    
+    plt.tight_layout()
+    diff_path = save_path.parent / f"{save_path.stem}_diff{save_path.suffix}"
+    plt.savefig(diff_path, dpi=150)
+    plt.close()
     print(f"✓ Comparison plots saved: {save_path} and {contrast_path}")
+    print(f"✓ Difference map saved: {diff_path}")
 
 def main():
     parser = argparse.ArgumentParser(description="LuminaScale Inference Script")
@@ -131,7 +177,7 @@ def main():
     parser.add_argument("--input", type=str, help="Path to input image (optional if --synthetic used)")
     parser.add_argument("--output", type=str, default="outputs/inference/result.exr", help="Path to save output")
     parser.add_argument("--synthetic", action="store_true", help="Generate synthetic sky gradient instead of reading input")
-    parser.add_argument("--width", type=int, default=1024, help="Width for synthetic gradient")
+    parser.add_argument("--width", type=int, default=512, help="Width for synthetic gradient")
     parser.add_argument("--height", type=int, default=512, help="Height for synthetic gradient")
     parser.add_argument("--channels", type=int, default=32, help="Model base channels (default: 32)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda/cpu)")

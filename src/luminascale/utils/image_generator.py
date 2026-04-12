@@ -188,3 +188,67 @@ def quantize_to_8bit(image: np.ndarray) -> np.ndarray:
     # Simulate 8-bit quantization
     quantized = ((np.clip(image, 0, 1) * 255).astype(np.uint8).astype(np.float32)) / 255.0
     return quantized
+
+
+def apply_s_curve_contrast(image: np.ndarray, strength: float = 2.0) -> np.ndarray:
+    """Apply S-curve contrast to amplify differences without clipping.
+    
+    Uses a parametric S-curve: S(x) = x^k / (x^k + (1-x)^k)
+    This expands mid-tones and compresses extremes, making subtle differences visible.
+    
+    Args:
+        image: Input image in [0, 1] range (numpy array)
+        strength: Curve steepness (higher = more aggressive). Typical range 1.0-4.0
+    
+    Returns:
+        Contrast-enhanced image in [0, 1] range
+    """
+    # Clip to valid range
+    x = np.clip(image, 0, 1)
+    
+    # Avoid division by zero at boundaries
+    epsilon = 1e-7
+    x_safe = np.clip(x, epsilon, 1 - epsilon)
+    
+    # S-curve: x^k / (x^k + (1-x)^k)
+    # This expands mid-tones (0.5) and compresses extremes (0, 1)
+    x_power = np.power(x_safe, strength)
+    one_minus_x_power = np.power(1 - x_safe, strength)
+    s_curve = x_power / (x_power + one_minus_x_power)
+    
+    # Smooth boundaries
+    result = np.where(x < epsilon, 0, np.where(x > 1 - epsilon, 1, s_curve))
+    
+    return result
+
+
+def apply_s_curve_contrast_torch(image: torch.Tensor, strength: float = 2.0) -> torch.Tensor:
+    """Apply S-curve contrast using PyTorch (GPU-friendly, memory efficient).
+    
+    Uses a parametric S-curve: S(x) = x^k / (x^k + (1-x)^k)
+    Memory efficient - operates in-place where possible.
+    
+    Args:
+        image: Input tensor in [0, 1] range
+        strength: Curve steepness (higher = more aggressive)
+    
+    Returns:
+        Contrast-enhanced tensor in [0, 1] range
+    """
+    # Clip to valid range
+    x = torch.clamp(image, 0, 1)
+    
+    # Avoid division by zero at boundaries
+    epsilon = 1e-7
+    x_safe = torch.clamp(x, epsilon, 1 - epsilon)
+    
+    # S-curve: x^k / (x^k + (1-x)^k)
+    x_power = torch.pow(x_safe, strength)
+    one_minus_x_power = torch.pow(1 - x_safe, strength)
+    s_curve = x_power / (x_power + one_minus_x_power)
+    
+    # Smooth boundaries
+    result = torch.where(x < epsilon, torch.zeros_like(x), 
+                        torch.where(x > 1 - epsilon, torch.ones_like(x), s_curve))
+    
+    return result

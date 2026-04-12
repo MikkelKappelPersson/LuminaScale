@@ -419,7 +419,8 @@ def main(cfg: DictConfig) -> None:
     print(f"[MAIN] Creating LuminaScaleModule...")
     ls_module = LuminaScaleModule(
         model=model,
-        learning_rate=cfg.learning_rate
+        learning_rate=cfg.learning_rate,
+        loss_weights=dict(cfg.get("loss", {})),
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
@@ -442,13 +443,23 @@ def main(cfg: DictConfig) -> None:
 
     # Prepare hparams dict for logging at training end
     config_name = cfg.get("config_name", "default")
+    
+    # Extract loss weights from config
+    loss_cfg = cfg.get("loss", {})
+    l1_weight = loss_cfg.get("l1_weight", 1.0)
+    charbonnier_weight = loss_cfg.get("tv_weight", 0.05)  # Note: "tv_weight" key maps to charbonnier
+    grad_match_weight = loss_cfg.get("grad_match_weight", 0.5)
+    
     hparams_dict = {
         "config_name": config_name,
         "learning_rate": cfg.learning_rate,
         "batch_size": cfg.get("batch_size", 32),
         "epochs": cfg.epochs,
         "optimizer": "Adam",
-        "loss_fn": "L2 (unmasked)",
+        "loss_fn": "L1 + Charbonnier + EdgeAware",
+        "l1_weight": l1_weight,
+        "charbonnier_weight": charbonnier_weight,
+        "grad_match_weight": grad_match_weight,
         "model_base_channels": cfg.model.base_channels,
         "patches_per_image": cfg.get("patches_per_image", 1),
         "crop_size": 512,
@@ -488,7 +499,14 @@ def main(cfg: DictConfig) -> None:
     print(f"{'='*80}\n")
     
     logger.info(f"🚀 Starting WDS Training. Run ID: {run_id}")
-    trainer.fit(ls_module, train_dataloaders=train_loader)
+    
+    # Resume from checkpoint if specified
+    resume_ckpt_path = cfg.get("resume_ckpt_path", None)
+    if resume_ckpt_path:
+        print(f"[MAIN] Resuming from checkpoint: {resume_ckpt_path}")
+        logger.info(f"Resuming from checkpoint: {resume_ckpt_path}")
+    
+    trainer.fit(ls_module, train_dataloaders=train_loader, ckpt_path=resume_ckpt_path)
     
     print(f"\n{'='*80}")
     print(f"[MAIN] ✓ Training completed!")

@@ -34,22 +34,32 @@ def read_exr(path: Path | str) -> np.ndarray:
     return array.transpose(2, 0, 1)
 
 
-def write_exr(path: Path | str, array: np.ndarray | torch.Tensor):
+def write_exr(path: Path | str, array: np.ndarray | torch.Tensor) -> None:
     """Write an image (numpy [C, H, W] or tensor) to an EXR file."""
     if isinstance(array, torch.Tensor):
         array = array.detach().cpu().numpy()
+    
+    # Ensure float32
+    array = array.astype(np.float32)
         
     # Transpose to [H, W, C] for OpenImageIO
     if array.ndim == 3 and array.shape[0] == 3:
         array = array.transpose(1, 2, 0)
-        
+    
+    # Ensure C-contiguous for OpenImageIO
+    array = np.ascontiguousarray(array)
+    
     spec = oiio.ImageSpec(array.shape[1], array.shape[0], array.shape[2], oiio.FLOAT)
     out = oiio.ImageOutput.create(str(path))
     if out is None:
         raise RuntimeError(f"Could not create EXR output for: {path}")
-        
-    out.open(str(path), spec)
-    out.write_image(array)
+    
+    if not out.open(str(path), spec):
+        raise RuntimeError(f"Could not open EXR file for writing: {path}. Error: {out.geterror()}")
+    
+    if not out.write_image(array):
+        raise RuntimeError(f"Failed to write EXR image: {path}. Error: {out.geterror()}")
+    
     out.close()
 
 

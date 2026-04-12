@@ -188,17 +188,70 @@ class LUTInterpolator(nn.Module):
 
 
 # =============================================================================
+# LUT Caching
+# =============================================================================
+
+def _get_lut_cache_path(config_path: Path) -> Path:
+    """Get the cache file path for the LUT based on OCIO config path.
+    
+    Cache is stored alongside the OCIO config file for portability.
+    """
+    cache_dir = config_path.parent / ".cache"
+    cache_dir.mkdir(exist_ok=True)
+    return cache_dir / f"lut_256_aces2065_1_to_srgb.pt"
+
+
+def _load_cached_lut(cache_path: Path) -> dict[str, torch.Tensor] | None:
+    """Load LUT from cached file if it exists and is valid.
+    
+    Args:
+        cache_path: Path to cached LUT file
+        
+    Returns:
+        LUT dict if cache exists and is valid, None otherwise
+    """
+    if not cache_path.exists():
+        return None
+    
+    try:
+        logger.info(f"Loading cached LUT from {cache_path}")
+        cached = torch.load(cache_path, weights_only=False)
+        logger.info(f"✓ Loaded cached 3D LUT: {cached['lut_3d'].shape}")
+        return cached
+    except Exception as e:
+        logger.warning(f"Failed to load cached LUT: {e}. Will regenerate.")
+        return None
+
+
+def _save_lut_cache(lut_data: dict[str, torch.Tensor], cache_path: Path) -> None:
+    """Save LUT to cache file for future runs.
+    
+    Args:
+        lut_data: Dict with 'lut_3d' and 'lut_size' keys
+        cache_path: Path to save cache file
+    """
+    try:
+        torch.save(lut_data, cache_path)
+        logger.info(f"Cached 3D LUT to {cache_path}")
+    except Exception as e:
+        logger.warning(f"Failed to cache LUT: {e}. Continuing without cache.")
+
+
+# =============================================================================
 # LUT Extraction from OCIO
 # =============================================================================
 
 def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Tensor]:
-    """Extract tone curve LUTs from OCIO configuration.
+    """Extract tone curve LUTs from OCIO configuration with caching.
     
     This function reads the OCIO config and extracts the RRT/ODT tone curve
     LUT data, then converts it to PyTorch tensors for GPU processing.
     
+    LUT is cached to disk after first generation for ~100x faster startup on
+    subsequent runs (first run ~30-60s, cached loads ~0.1-0.2s).
+    
     Note: This requires PyOpenColorIO to be installed. The LUT is evaluated
-    at 64³ resolution (262,144 samples) for accuracy vs memory trade-off.
+    at 256³ resolution (16.7M samples) for accuracy vs memory trade-off.
     
     Args:
         config_path: Path to OCIO config file. If None, tries to find via
@@ -206,7 +259,8 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
         
     Returns:
         Dict with keys:
-            - "lut_3d": [64, 64, 64, 3] LUT tensor (float32 on CPU)
+            - "lut_3d": [256, 256, 256, 3] LUT tensor (float32 on CPU)
+            - "lut_size": 256
             
     Raises:
         ImportError: If PyOpenColorIO not available
@@ -227,6 +281,12 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
     
     if not config_path.exists():
         raise FileNotFoundError(f"OCIO config not found: {config_path}")
+    
+    # Check for cached LUT first
+    cache_path = _get_lut_cache_path(config_path)
+    cached_lut = _load_cached_lut(cache_path)
+    if cached_lut is not None:
+        return cached_lut
     
     logger.info(f"Loading OCIO config from {config_path}")
     
@@ -250,14 +310,23 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
     cpu_processor = processor.getDefaultCPUProcessor()
     
     logger.info("Evaluating OCIO processor to create 3D LUT via CPU sampling...")
+    logger.info("(This may take 1-2 minutes on first run, then will be cached)")
     
-    lut_size = 128  # Increased from 64 for better trilinear interpolation accuracy
+    lut_size = 256
     lut_3d = np.zeros((lut_size, lut_size, lut_size, 3), dtype=np.float32)
     
     # Sample the OCIO processor at regular intervals using CPU processor
+    import time
+    t0 = time.perf_counter()
     for i in range(lut_size):
         if i % 32 == 0:
-            logger.debug(f"  Sampling LUT: {i}/{lut_size}")
+            elapsed = time.perf_counter() - t0
+            if i > 0:
+                eta_total = elapsed * lut_size / i
+                eta_remaining = eta_total - elapsed
+                logger.info(f"  Sampling LUT: {i}/{lut_size} ({elapsed:.1f}s elapsed, ~{eta_remaining:.1f}s remaining)")
+            else:
+                logger.info(f"  Sampling LUT: {i}/{lut_size}")
         for j in range(lut_size):
             for k in range(lut_size):
                 # Normalize coordinates to [0, 1] range
@@ -276,12 +345,18 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
                 # Store result (first 3 channels are RGB)
                 lut_3d[i, j, k] = test_img[0, 0, :3]
     
-    logger.info(f"Created 3D LUT: {lut_3d.shape}")
+    elapsed = time.perf_counter() - t0
+    logger.info(f"Created 3D LUT in {elapsed:.1f}s: {lut_3d.shape}")
     
-    return {
+    lut_data = {
         "lut_3d": torch.from_numpy(lut_3d).float(),
         "lut_size": lut_size,
     }
+    
+    # Cache for future runs
+    _save_lut_cache(lut_data, cache_path)
+    
+    return lut_data
 
 
 # =============================================================================

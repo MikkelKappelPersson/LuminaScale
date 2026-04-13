@@ -1,3 +1,3 @@
-from .dequantization_trainer import LuminaScaleModule
+from .dequantization_trainer import DequantizationTrainer
 
-__all__ = ["LuminaScaleModule"]
+__all__ = ["DequantizationTrainer"]

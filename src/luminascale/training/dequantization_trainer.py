@@ -22,7 +22,7 @@ from ..utils.image_generator import create_primary_gradients, quantize_to_8bit, 
 
 logger = logging.getLogger(__name__)
 
-class LuminaScaleModule(L.LightningModule):
+class DequantizationTrainer(L.LightningModule):
     """LightningModule for training Dequantization-Net."""
 
     def __init__(
@@ -33,7 +33,7 @@ class LuminaScaleModule(L.LightningModule):
         loss_weights: dict | None = None,
     ) -> None:
         super().__init__()
-        print(f"[LuminaScaleModule] Initializing LightningModule...")
+        print(f"[DequantizationTrainer] Initializing LightningModule...")
         self.model = model
         self.learning_rate = learning_rate
         self.vis_freq = vis_freq
@@ -67,7 +67,7 @@ class LuminaScaleModule(L.LightningModule):
         self._cached_srgb_8u = None
         self._cached_srgb_32f = None
         
-        print(f"[LuminaScaleModule] ✓ Initialization complete")
+        print(f"[DequantizationTrainer] ✓ Initialization complete")
 
     def setup(self, stage: str) -> None:
         """Lightning setup hook called before training/validation starts.
@@ -254,27 +254,12 @@ class LuminaScaleModule(L.LightningModule):
             # Problem: Strict gradient matching forced conflicting constraints → worse outputs (3,845 unique)
             # Solution: Use structural smoothing WITHOUT forcing exact gradient matching
             
-            # 1. RECONSTRUCTION LOSS: L1 to match target pixel values
-            l1_loss_val = l1_loss(y_hat, y) * self.l1_weight
-            
-            # 2. STRUCTURE-AWARE SMOOTHING: Charbonnier loss on OUTPUT
-            # Uses smooth L1 that's gentle on big gradients (preserves edges)
-            # but harsh on small ones (removes banding). Better than hard L1 TV.
-            # Naturally encourages interpolation between quantization levels.
-            charbonnier_output = charbonnier_loss(y_hat)
-            tv_loss_val = charbonnier_output * self.charbonnier_weight
-            
-            # Optional: Edge-aware smoothing (penalize gradients only in smooth regions of target)
-            # Prevents learning sharp features where target has none, but allows edges where target has them
-            edge_aware_loss = edge_aware_smoothing_loss(y_hat, y)
-            edge_aware_val = edge_aware_loss * self.grad_match_weight
-            
             # Total loss = reconstruction + global smoothing + edge awareness
-            loss = l1_loss_val + tv_loss_val + edge_aware_val
+            loss = l1_loss(y_hat, y) * self.l1_weight + charbonnier_loss(y_hat) * self.charbonnier_weight + edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight
             
             # Debug: Check loss composition
             if batch_idx == 0 and self.current_epoch % 1 == 0:
-                print(f"\n[Loss Composition] L1: {l1_loss_val.item():.6f} | Charbonnier: {tv_loss_val.item():.6f} | EdgeAware: {edge_aware_val.item():.6f}")
+                print(f"\n[Loss Composition] L1: {l1_loss(y_hat, y).item():.6f} | Charbonnier: {charbonnier_loss(y_hat).item():.6f} | EdgeAware: {edge_aware_smoothing_loss(y_hat, y).item():.6f}")
                 print(f"  [Structure] Charbonnier loss (smooth L1) on output: gentle on edges, strict on banding")
                 print(f"  [Reasoning] Hard L1 TV was destroying edges; Charbonnier preserves them")
                 print(f"  [Strategy] Softer smoothness + edge preservation + edge-aware constraints")
@@ -297,9 +282,9 @@ class LuminaScaleModule(L.LightningModule):
                 yhat_unique = len(np.unique(np.round(yhat_flat, decimals=6)))
                 
                 print(f"\n[Epoch {self.current_epoch} Batch {batch_idx}] Loss Breakdown & Target Sanity:")
-                print(f"  L1 Loss:        {l1_loss_val.item():.6f} (pixel-wise reconstruction)")
-                print(f"  Charbonnier:    {tv_loss_val.item():.6f} (smooth L1: edge-preserving smoothness)")
-                print(f"  EdgeAware:      {edge_aware_val.item():.6f} (no artifacts in smooth regions)")
+                print(f"  L1 Loss:        {l1_loss(y_hat, y).item():.6f} (pixel-wise reconstruction)")
+                print(f"  Charbonnier:    {charbonnier_loss(y_hat).item():.6f} (smooth L1: edge-preserving smoothness)")
+                print(f"  EdgeAware:      {edge_aware_smoothing_loss(y_hat, y).item():.6f} (no artifacts in smooth regions)")
                 print(f"  Total:          {loss.item():.6f}")
                 print(f"  Input (x)  - mean: {x_mean:.5f}, std: {x_std:.5f}, unique values: {x_unique}")
                 print(f"  Target (y) - mean: {y_mean:.5f}, std: {y_std:.5f}, unique values: {y_unique}")
@@ -310,9 +295,9 @@ class LuminaScaleModule(L.LightningModule):
                 if y_minus_x < 0.001:
                     print(f"  WARNING: Target is TOO SIMILAR to input! (diff={y_minus_x:.6f})")
 
-            self.log("loss_L1/train", l1_loss_val, prog_bar=False, sync_dist=True)
-            self.log("loss_TV_output/train", tv_loss_val, prog_bar=False, sync_dist=True)
-            self.log("loss_EdgeAware/train", edge_aware_val, prog_bar=False, sync_dist=True)
+            self.log("loss_L1/train", l1_loss(y_hat, y), prog_bar=False, sync_dist=True)
+            self.log("loss_Charbonnier/train", charbonnier_loss(y_hat), prog_bar=False, sync_dist=True)
+            self.log("loss_EdgeAware/train", edge_aware_smoothing_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_total/train", loss, prog_bar=False, sync_dist=True)
             
             # Log current learning rate (supports dynamic LR scheduling)
@@ -456,23 +441,6 @@ class LuminaScaleModule(L.LightningModule):
                 "frequency": 1,
             },
         }
-
-
-def exposure_mask(
-    img: torch.Tensor, threshold_bright: int = 249, threshold_dark: int = 6
-) -> torch.Tensor:
-    """Compute mask for well-exposed regions (avoid clipped areas)."""
-    gray = (
-        0.299 * img[:, 0:1, :, :]
-        + 0.587 * img[:, 1:2, :, :]
-        + 0.114 * img[:, 2:3, :, :]
-    )
-    gray_8bit = (gray * 255.0).round()
-
-    mask = (gray_8bit >= threshold_dark) & (gray_8bit <= threshold_bright)
-    mask = mask.float()
-
-    return mask
 
 
 def l1_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

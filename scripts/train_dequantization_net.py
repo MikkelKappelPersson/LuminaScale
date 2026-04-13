@@ -46,7 +46,7 @@ from hydra.core.hydra_config import HydraConfig
 warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning")
 
 from luminascale.models import create_dequantization_net
-from luminascale.training.dequantization_trainer import LuminaScaleModule
+from luminascale.training.dequantization_trainer import DequantizationTrainer
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 from luminascale.utils.io import read_exr
 
@@ -416,15 +416,15 @@ def main(cfg: DictConfig) -> None:
     model = model.to(device)
     print(f"[MAIN] Model moved to {device}")
     
-    print(f"[MAIN] Creating LuminaScaleModule...")
-    ls_module = LuminaScaleModule(
+    print(f"[MAIN] Creating DequantizationTrainer...")
+    ls_module = DequantizationTrainer(
         model=model,
         learning_rate=cfg.learning_rate,
         loss_weights=dict(cfg.get("loss", {})),
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
-    print(f"[MAIN] ✓ LuminaScaleModule created")
+    print(f"[MAIN] ✓ DequantizationTrainer created")
     
     # 3. Setup Trainer
     print(f"[MAIN] Creating Lightning Trainer...")

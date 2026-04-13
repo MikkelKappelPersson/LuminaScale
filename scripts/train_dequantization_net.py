@@ -37,7 +37,6 @@ import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 import pytorch_lightning as L
-from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
@@ -47,6 +46,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightnin
 
 from luminascale.models import create_dequantization_net
 from luminascale.training.dequantization_trainer import DequantizationTrainer
+from luminascale.training.logger import CustomTensorBoardLogger
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 from luminascale.utils.io import read_exr
 
@@ -278,35 +278,68 @@ class TensorBoardFlushCallback(Callback):
 
 
 class HparamsMetricsCallback(Callback):
-    """Log final_loss metric after training completes.
+    """Log hparams at training start, final_loss metric at epoch end.
     
-    Adds final_loss to the hparams metrics so TensorBoard can correlate
-    hyperparameters with final training performance.
+    Uses CustomTensorBoardLogger's log_hyperparams_metrics to ensure proper timing.
+    
+    Timeline:
+    1. on_fit_start: Log hparams with initial empty metrics
+    2. on_train_epoch_end: Log hparams + updated final loss after each epoch
+    3. on_train_end: Log hparams + final loss at training completion
     """
     
     def __init__(self, hparams_dict: dict[str, Any]) -> None:
         super().__init__()
         self.hparams_dict = hparams_dict
+        self.final_loss: float | None = None
     
-    def on_train_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Log hparams + final_loss metric after training completes."""
+    def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Log hyperparameters at the very start of training."""
         if trainer.logger is None:
             return
         
         try:
-            # Extract final loss from logged metrics
-            final_loss = trainer.callback_metrics.get("loss_L2/train", None)
+            # Log hparams with empty metrics dict initially
+            if hasattr(trainer.logger, "log_hyperparams_metrics"):
+                trainer.logger.log_hyperparams_metrics(self.hparams_dict, {})
+                logger.info(f"✓ Hyperparameters logged at fit_start:")
+                for k, v in self.hparams_dict.items():
+                    logger.info(f"    {k}: {v}")
+            else:
+                logger.warning("Logger does not have log_hyperparams_metrics method")
+        except Exception as e:
+            logger.error(f"Error logging hyperparameters at fit_start: {e}", exc_info=True)
+    
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Log hparams + final_loss after each training epoch."""
+        if trainer.logger is None:
+            return
+        
+        try:
+            # Capture the epoch's final loss
+            metrics_dict = self._get_metrics_dict(trainer)
             
-            # Add final_loss to hparams metrics
-            metrics_dict: dict[str, Any] = {}
-            if final_loss is not None:
-                loss_value = final_loss.item() if hasattr(final_loss, "item") else float(final_loss)
-                metrics_dict["final_loss"] = loss_value
+            if metrics_dict and hasattr(trainer.logger, "log_hyperparams_metrics"):
+                trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
+                self.final_loss = metrics_dict.get("final_loss")
+                if self.final_loss is not None:
+                    logger.info(f"  [Epoch {trainer.current_epoch}] Final loss: {self.final_loss:.6f}")
+        except Exception as e:
+            logger.error(f"Error logging metrics at epoch end: {e}", exc_info=True)
+    
+    def on_train_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Log final hparams + metrics when training completes."""
+        if trainer.logger is None:
+            return
+        
+        try:
+            # Capture final loss from training completion
+            metrics_dict = self._get_metrics_dict(trainer)
             
-            # Log hparams + metrics together for TensorBoard hparams dashboard
-            if hasattr(trainer.logger, "log_hyperparams"):
-                trainer.logger.log_hyperparams(self.hparams_dict, metrics_dict)
-                logger.info(f"✓ Hparams + final_loss logged: {metrics_dict.get('final_loss', 'N/A'):.6f}")
+            if metrics_dict and hasattr(trainer.logger, "log_hyperparams_metrics"):
+                trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
+                final_loss = metrics_dict.get("final_loss")
+                logger.info(f"✓ Training complete. Final loss: {final_loss:.6f}")
             
             # Log best checkpoint info
             checkpoint_callback: ModelCheckpoint | None = None
@@ -318,7 +351,30 @@ class HparamsMetricsCallback(Callback):
             if checkpoint_callback and checkpoint_callback.best_model_path:
                 logger.info(f"✓ Best checkpoint: {checkpoint_callback.best_model_path}")
         except Exception as e:
-            logger.error(f"Error logging final metrics: {e}")
+            logger.error(f"Error logging final metrics: {e}", exc_info=True)
+    
+    def _get_metrics_dict(self, trainer: L.Trainer) -> dict[str, Any]:
+        """Extract available metrics from trainer callback_metrics.
+        
+        Tries multiple loss keys since loss naming varies.
+        """
+        metrics_dict: dict[str, Any] = {}
+        
+        # Try different loss keys in order of preference
+        loss_keys = [
+            "loss_total/train",      # Our three-term loss: L1 + Charbonnier + EdgeAware
+            "loss_L1/train",         # Fallback to L1
+            "loss",                  # Generic fallback
+        ]
+        
+        for loss_key in loss_keys:
+            if loss_key in trainer.callback_metrics:
+                loss_value = trainer.callback_metrics[loss_key]
+                loss_float = loss_value.item() if hasattr(loss_value, "item") else float(loss_value)
+                metrics_dict["final_loss"] = loss_float
+                break
+        
+        return metrics_dict
 
 
 class CompactProgressBar(TQDMProgressBar):
@@ -428,7 +484,7 @@ def main(cfg: DictConfig) -> None:
     
     # 3. Setup Trainer
     print(f"[MAIN] Creating Lightning Trainer...")
-    logger_tb = TensorBoardLogger(
+    logger_tb = CustomTensorBoardLogger(
         save_dir=str(run_dir),
         name="",
         version="",
@@ -447,19 +503,33 @@ def main(cfg: DictConfig) -> None:
     # Extract loss weights from config
     loss_cfg = cfg.get("loss", {})
     l1_weight = loss_cfg.get("l1_weight", 1.0)
+    l2_weight = loss_cfg.get("l2_weight", 0.0)  # Currently unused, but available for future use
     charbonnier_weight = loss_cfg.get("tv_weight", 0.05)  # Note: "tv_weight" key maps to charbonnier
     grad_match_weight = loss_cfg.get("grad_match_weight", 0.5)
+    
+    # Create dynamic loss_fn string showing the actual formula with weights
+    loss_fn_str = f"L1*{l1_weight} + Charbonnier*{charbonnier_weight} + EdgeAware*{grad_match_weight}"
+    
+    # Create dynamic optimizer string showing the actual optimizer and learning rate
+    optimizer_str = f"Adam(lr={cfg.learning_rate})"
+    
+    # Create dynamic scheduler string showing the actual scheduler and parameters
+    num_epochs = cfg.epochs
+    eta_min = 1e-6
+    scheduler_str = f"CosineAnnealingLR(T_max={num_epochs}, eta_min={eta_min})"
     
     hparams_dict = {
         "config_name": config_name,
         "learning_rate": cfg.learning_rate,
         "batch_size": cfg.get("batch_size", 32),
         "epochs": cfg.epochs,
-        "optimizer": "Adam",
-        "loss_fn": "L1 + Charbonnier + EdgeAware",
-        "l1_weight": l1_weight,
-        "charbonnier_weight": charbonnier_weight,
-        "grad_match_weight": grad_match_weight,
+        "optimizer": optimizer_str,
+        "scheduler": scheduler_str,
+        "loss_fn": loss_fn_str,
+        "weight_l1": l1_weight,
+        "weight_l2": l2_weight,
+        "weight_charbonnier": charbonnier_weight,
+        "weight_grad_match": grad_match_weight,
         "model_base_channels": cfg.model.base_channels,
         "patches_per_image": cfg.get("patches_per_image", 1),
         "crop_size": 512,
@@ -489,8 +559,9 @@ def main(cfg: DictConfig) -> None:
     )
     print(f"[MAIN] ✓ Lightning Trainer created")
 
-    # Note: hparams + final_loss will be logged together at training end in HparamsMetricsCallback
-    # (TensorBoard requires a single log_hyperparams call with both params and metrics)
+    # Note: CustomTensorBoardLogger disables early automatic log_hyperparams call
+    # HparamsMetricsCallback logs hparams at fit_start and final_loss at epoch_end
+    # This ensures hparams are recorded correctly in TensorBoard
 
     # 4. Start Training
     print(f"\n{'='*80}")

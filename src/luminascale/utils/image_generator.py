@@ -6,56 +6,6 @@ import numpy as np
 import torch
 
 
-def create_sky_gradient(
-    width: int = 512,
-    height: int = 512,
-    dtype: str = "uint8",
-) -> np.ndarray:
-    """Create a sky-like gradient image from dark blue (bottom) to light blue (top).
-    
-    This gradient is useful for visualizing 8-bit quantization artifacts:
-    - When saturated, banding patterns reveal quantization levels
-    - Good dequantization removes these artifacts
-    
-    Args:
-        width: Image width in pixels
-        height: Image height in pixels
-        dtype: Output data type ("uint8" for [0-255], "float32" for [0-1])
-    
-    Returns:
-        Sky gradient image [3, height, width] or [height, width, 3] depending on format
-    """
-    # Create vertical gradient (top = light, bottom = dark)
-    # Normalize from 0 to 1
-    y_gradient = np.linspace(1.0, 0.3, height).reshape(-1, 1)
-    gradient = np.repeat(y_gradient, width, axis=1)  # [height, width]
-    
-    # Create RGB image with blue sky color
-    # Dark blue: (0.1, 0.3, 0.6) → Light blue: (0.4, 0.6, 0.9)
-    r = np.linspace(0.48, 0.52, height).reshape(-1, 1)
-    g = np.linspace(0.48, 0.52, height).reshape(-1, 1)
-    b = np.linspace(1, 1, height).reshape(-1, 1)
-    
-    r = np.repeat(r, width, axis=1)
-    g = np.repeat(g, width, axis=1)
-    b = np.repeat(b, width, axis=1)
-    
-    # Stack into RGB image [height, width, 3]
-    sky_rgb = np.stack([r, g, b], axis=2)
-    
-    # Convert to requested format
-    if dtype == "uint8":
-        # Convert to 8-bit: [0, 255]
-        sky_rgb = (np.clip(sky_rgb, 0, 1) * 255).astype(np.uint8)
-    elif dtype == "float32":
-        # Ensure float32: [0, 1]
-        sky_rgb = np.clip(sky_rgb, 0, 1).astype(np.float32)
-    else:
-        raise ValueError(f"Unsupported dtype: {dtype}")
-    
-    # Return as [3, height, width] for PyTorch compatibility
-    return np.transpose(sky_rgb, (2, 0, 1))
-
 
 def create_gradient_image(
     width: int = 512,
@@ -101,66 +51,54 @@ def create_gradient_image(
 
 
 def create_primary_gradients(
-    width: int = 512,
-    height: int = 512,
+    width: int = 128,
+    height: int = 21,
+    block_width: int = 8,
     dtype: str = "float32",
 ) -> np.ndarray:
-    """Create an image with three vertical gradient columns: Red, Green, Blue primaries.
+    """Create smooth continuous color gradients with all three primaries (8-bit quantized range).
     
-    Each column shows a gradient from dark to light in one primary color:
-    - Left: Red primary (high R, low G/B)
-    - Middle: Green primary (high G, low R/B)
-    - Right: Blue primary (high B, low R/G)
-    
-    Useful for visualizing quantization artifacts in each channel separately.
+    Creates: Red primary + Green primary + Blue primary + white separator
+    Smooth gradients using range based on block_width (e.g., 8 → 120-135, 4 → 124-132, 2 → 126-130).
+    With primary at 255 (saturated).
+    Total height: 21 + 21 + 21 + 1 = 64 pixels
     
     Args:
-        width: Image width in pixels (will be divided into 3 columns)
-        height: Image height in pixels
+        width: Image width in pixels (default 128)
+        height: Height of each primary row in pixels (default 21)
+        block_width: Block width determining color range (8, 4, or 2)
         dtype: Output data type ("uint8" for [0-255], "float32" for [0-1])
     
     Returns:
-        Primary gradient image [3, height, width]
+        Image with all three primaries stacked [3, 64, width]
     """
-    # Ensure equal column widths by distributing remainder
-    col_width = width // 3
-    remainder = width % 3
-    col_widths = [col_width + (1 if i < remainder else 0) for i in range(3)]
+    # Get color range based on block_width
+    color_min, color_max = get_gradient_range_from_block_width(width, block_width)
     
-    # Create vertical gradient for the other two channels (0.48 → 0.52)
-    gradient = np.linspace(0.48, 0.52, height).reshape(-1, 1)
+    # Create smooth gradient ramp across the range
+    color_ramp = np.linspace(color_min, color_max, width, dtype=np.float32)  # [width]
     
-    columns = []
+    def create_primary_row(primary_idx: int) -> np.ndarray:
+        """Create a row with smooth color gradient for one primary channel."""
+        primary_max = 1.0  # 255 in float32
+        row = np.ones((height, width, 3), dtype=np.float32)
+        
+        for j in range(3):
+            if j == primary_idx:
+                row[:, :, j] = primary_max  # Primary channel at 255
+            else:
+                row[:, :, j] = color_ramp  # Other channels: smooth gradient
+        
+        return row  # [height, width, 3]
     
-    # Red column: R=1 (full), G and B vary 0.48→0.52
-    red_gradient = np.repeat(gradient, col_widths[0], axis=1)
-    red_col = np.stack([
-        np.ones_like(red_gradient),  # R = 1.0
-        red_gradient,                  # G varies
-        red_gradient                   # B varies
-    ], axis=2)
-    columns.append(red_col)
+    # Create rows for each primary: R=0, G=1, B=2
+    row1 = create_primary_row(0)  # Red primary (R=255, G/B smooth gradient)
+    row2 = create_primary_row(1)  # Green primary (G=255, R/B smooth gradient)
+    row3 = create_primary_row(2)  # Blue primary (B=255, R/G smooth gradient)
+    white_sep = np.ones((1, width, 3), dtype=np.float32)  # White separator [1, width, 3]
     
-    # Green column: G=1 (full), R and B vary 0.48→0.52
-    green_gradient = np.repeat(gradient, col_widths[1], axis=1)
-    green_col = np.stack([
-        green_gradient,                # R varies
-        np.ones_like(green_gradient),  # G = 1.0
-        green_gradient                 # B varies
-    ], axis=2)
-    columns.append(green_col)
-    
-    # Blue column: B=1 (full), R and G vary 0.48→0.52
-    blue_gradient = np.repeat(gradient, col_widths[2], axis=1)
-    blue_col = np.stack([
-        blue_gradient,                 # R varies
-        blue_gradient,                 # G varies
-        np.ones_like(blue_gradient)    # B = 1.0
-    ], axis=2)
-    columns.append(blue_col)
-    
-    # Concatenate horizontally: [height, width, 3]
-    image = np.concatenate(columns, axis=1)
+    # Stack vertically: [height*3+1, width, 3]
+    image = np.concatenate([row1, row2, row3, white_sep], axis=0)
     
     # Convert to requested format
     if dtype == "uint8":
@@ -170,8 +108,142 @@ def create_primary_gradients(
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
     
-    # Return as [3, height, width] for PyTorch compatibility
+    return np.transpose(image, (2, 0, 1))  # [3, height*3+1, width]
+
+
+
+
+
+
+def combine_primary_gradients(
+    width: int = 128,
+    height: int = 21,
+    dtype: str = "float32",
+) -> np.ndarray:
+    """Combine all three gradient variants (8x21, 4x21, 2x21) vertically.
+    
+    Stacks three complete gradient images (each with all three colors + separator):
+    - block_width=8: 16 colors per primary (64px tall: 21+21+21+1)
+    - block_width=4: 32 colors per primary (64px tall: 21+21+21+1)
+    - block_width=2: 64 colors per primary (64px tall: 21+21+21+1)
+    
+    Total height: 64*3 = 192 pixels (showing different gradient widths in all three colors)
+    
+    Args:
+        width: Image width (default 128)
+        height: Height of each primary row within each variant (default 21)
+        dtype: Output data type ("uint8" for [0-255], "float32" for [0-1])
+    
+    Returns:
+        Combined image with all three variants stacked [3, 64*3, width]
+    """
+    # Generate the three variants (each is [3, 64, width])
+    gradient_8 = create_primary_gradients(width=width, height=height, block_width=8, dtype="float32")
+    gradient_4 = create_primary_gradients(width=width, height=height, block_width=4, dtype="float32")
+    gradient_2 = create_primary_gradients(width=width, height=height, block_width=2, dtype="float32")
+    
+    # Stack vertically: [3, 64*3, width]
+    combined = np.concatenate([gradient_8, gradient_4, gradient_2], axis=1)
+    
+    # Convert to requested format
+    if dtype == "uint8":
+        combined = (np.clip(combined, 0, 1) * 255).astype(np.uint8)
+    elif dtype == "float32":
+        combined = np.clip(combined, 0, 1).astype(np.float32)
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    
+    return combined
+
+
+def create_reference_gradients(
+    width: int = 128,
+    height: int = 21,
+    block_width: int = 8,
+    dtype: str = "float32",
+) -> np.ndarray:
+    """Create smooth reference gradient (same 120-135 range, normalized).
+    
+    Reference shows the same 120-135 range as the 8-bit input, but as a smooth
+    continuous gradient instead of discrete values.
+    
+    Args:
+        width: Image width in pixels (default 128)
+        height: Height of each primary row in pixels (default 21)
+        block_width: Not used (kept for API compatibility)
+        dtype: Output data type ("uint8" for [0-255], "float32" for [0-1])
+    
+    Returns:
+        Reference image [3, 64, width]
+    """
+    # Reference uses same range as input (120-135) but smooth
+    color_min,color_max = get_gradient_range_from_block_width(width, block_width)
+
+    color_ramp = np.linspace(color_min, color_max, width, dtype=np.float32)
+    
+    def create_reference_row(primary_idx: int) -> np.ndarray:
+        """Create a reference row with smooth color gradient."""
+        primary_max = 1.0
+        row = np.ones((height, width, 3), dtype=np.float32)
+        
+        for j in range(3):
+            if j == primary_idx:
+                row[:, :, j] = primary_max
+            else:
+                row[:, :, j] = color_ramp
+        
+        return row
+    
+    row1 = create_reference_row(0)
+    row2 = create_reference_row(1)
+    row3 = create_reference_row(2)
+    white_sep = np.ones((1, width, 3), dtype=np.float32)
+    
+    image = np.concatenate([row1, row2, row3, white_sep], axis=0)
+    
+    if dtype == "uint8":
+        image = (np.clip(image, 0, 1) * 255).astype(np.uint8)
+    elif dtype == "float32":
+        image = np.clip(image, 0, 1).astype(np.float32)
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    
     return np.transpose(image, (2, 0, 1))
+
+
+def combine_reference_gradients(
+    width: int = 128,
+    height: int = 21,
+    dtype: str = "float32",
+) -> np.ndarray:
+    """Combine all three reference gradient variants (8x21, 4x21, 2x21) vertically.
+    
+    Stacks three reference images with full 0-255 ranges for comparison.
+    
+    Args:
+        width: Image width (default 128)
+        height: Height of each primary row within each variant (default 21)
+        dtype: Output data type ("uint8" for [0-255], "float32" for [0-1])
+    
+    Returns:
+        Combined reference image [3, 64*3, width]
+    """
+    gradient_block_8 = create_reference_gradients(width=width, height=height, block_width=8, dtype="float32")
+    gradient_block_4 = create_reference_gradients(width=width, height=height, block_width=4, dtype="float32")
+    gradient_block_2 = create_reference_gradients(width=width, height=height, block_width=2, dtype="float32")
+    
+    combined = np.concatenate([gradient_block_8, gradient_block_4, gradient_block_2], axis=1)
+    
+    if dtype == "uint8":
+        combined = (np.clip(combined, 0, 1) * 255).astype(np.uint8)
+    elif dtype == "float32":
+        combined = np.clip(combined, 0, 1).astype(np.float32)
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    
+    return combined
+
+
 
 
 def quantize_to_8bit(image: np.ndarray) -> np.ndarray:
@@ -252,3 +324,22 @@ def apply_s_curve_contrast_torch(image: torch.Tensor, strength: float = 2.0) -> 
                         torch.where(x > 1 - epsilon, torch.ones_like(x), s_curve))
     
     return result
+
+def get_gradient_range_from_block_width(img_width: int, block_width: int):
+    """Calculate normalized color range from block width.
+    
+    Args:
+        img_width: Width of the image in pixels
+        block_width: Width of each block in pixels (e.g., 8, 4, 2)
+    
+    Returns:
+        Tuple of (color_min, color_max) normalized to [0, 1] range
+        Based on 8-bit centered around 128 ± block_width/2
+    """
+    range = img_width / block_width / 2
+    norm = 256 / 2  # 128 (center of 8-bit range)
+    start = norm - range / 2  # e.g., 128 - 4 = 124
+    end = norm + range / 2    # e.g., 128 + 4 = 132
+    
+    # Normalize to [0, 1] range
+    return start / 255.0, end / 255.0

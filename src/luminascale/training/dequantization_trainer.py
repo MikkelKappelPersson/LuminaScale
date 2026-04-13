@@ -22,7 +22,7 @@ from ..utils.image_generator import create_primary_gradients, quantize_to_8bit, 
 
 logger = logging.getLogger(__name__)
 
-class LuminaScaleModule(L.LightningModule):
+class DequantizationTrainer(L.LightningModule):
     """LightningModule for training Dequantization-Net."""
 
     def __init__(
@@ -33,7 +33,7 @@ class LuminaScaleModule(L.LightningModule):
         loss_weights: dict | None = None,
     ) -> None:
         super().__init__()
-        print(f"[LuminaScaleModule] Initializing LightningModule...")
+        print(f"[DequantizationTrainer] Initializing LightningModule...")
         self.model = model
         self.learning_rate = learning_rate
         self.vis_freq = vis_freq
@@ -67,7 +67,7 @@ class LuminaScaleModule(L.LightningModule):
         self._cached_srgb_8u = None
         self._cached_srgb_32f = None
         
-        print(f"[LuminaScaleModule] ✓ Initialization complete")
+        print(f"[DequantizationTrainer] ✓ Initialization complete")
 
     def setup(self, stage: str) -> None:
         """Lightning setup hook called before training/validation starts.
@@ -254,27 +254,12 @@ class LuminaScaleModule(L.LightningModule):
             # Problem: Strict gradient matching forced conflicting constraints → worse outputs (3,845 unique)
             # Solution: Use structural smoothing WITHOUT forcing exact gradient matching
             
-            # 1. RECONSTRUCTION LOSS: L1 to match target pixel values
-            l1_loss_val = l1_loss(y_hat, y) * self.l1_weight
-            
-            # 2. STRUCTURE-AWARE SMOOTHING: Charbonnier loss on OUTPUT
-            # Uses smooth L1 that's gentle on big gradients (preserves edges)
-            # but harsh on small ones (removes banding). Better than hard L1 TV.
-            # Naturally encourages interpolation between quantization levels.
-            charbonnier_output = charbonnier_loss(y_hat)
-            tv_loss_val = charbonnier_output * self.charbonnier_weight
-            
-            # Optional: Edge-aware smoothing (penalize gradients only in smooth regions of target)
-            # Prevents learning sharp features where target has none, but allows edges where target has them
-            edge_aware_loss = edge_aware_smoothing_loss(y_hat, y)
-            edge_aware_val = edge_aware_loss * self.grad_match_weight
-            
             # Total loss = reconstruction + global smoothing + edge awareness
-            loss = l1_loss_val + tv_loss_val + edge_aware_val
+            loss = l1_loss(y_hat, y) * self.l1_weight + charbonnier_loss(y_hat) * self.charbonnier_weight + edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight
             
             # Debug: Check loss composition
             if batch_idx == 0 and self.current_epoch % 1 == 0:
-                print(f"\n[Loss Composition] L1: {l1_loss_val.item():.6f} | Charbonnier: {tv_loss_val.item():.6f} | EdgeAware: {edge_aware_val.item():.6f}")
+                print(f"\n[Loss Composition] L1: {l1_loss(y_hat, y).item():.6f} | Charbonnier: {charbonnier_loss(y_hat).item():.6f} | EdgeAware: {edge_aware_smoothing_loss(y_hat, y).item():.6f}")
                 print(f"  [Structure] Charbonnier loss (smooth L1) on output: gentle on edges, strict on banding")
                 print(f"  [Reasoning] Hard L1 TV was destroying edges; Charbonnier preserves them")
                 print(f"  [Strategy] Softer smoothness + edge preservation + edge-aware constraints")
@@ -297,9 +282,9 @@ class LuminaScaleModule(L.LightningModule):
                 yhat_unique = len(np.unique(np.round(yhat_flat, decimals=6)))
                 
                 print(f"\n[Epoch {self.current_epoch} Batch {batch_idx}] Loss Breakdown & Target Sanity:")
-                print(f"  L1 Loss:        {l1_loss_val.item():.6f} (pixel-wise reconstruction)")
-                print(f"  Charbonnier:    {tv_loss_val.item():.6f} (smooth L1: edge-preserving smoothness)")
-                print(f"  EdgeAware:      {edge_aware_val.item():.6f} (no artifacts in smooth regions)")
+                print(f"  L1 Loss:        {l1_loss(y_hat, y).item():.6f} (pixel-wise reconstruction)")
+                print(f"  Charbonnier:    {charbonnier_loss(y_hat).item():.6f} (smooth L1: edge-preserving smoothness)")
+                print(f"  EdgeAware:      {edge_aware_smoothing_loss(y_hat, y).item():.6f} (no artifacts in smooth regions)")
                 print(f"  Total:          {loss.item():.6f}")
                 print(f"  Input (x)  - mean: {x_mean:.5f}, std: {x_std:.5f}, unique values: {x_unique}")
                 print(f"  Target (y) - mean: {y_mean:.5f}, std: {y_std:.5f}, unique values: {y_unique}")
@@ -310,9 +295,9 @@ class LuminaScaleModule(L.LightningModule):
                 if y_minus_x < 0.001:
                     print(f"  WARNING: Target is TOO SIMILAR to input! (diff={y_minus_x:.6f})")
 
-            self.log("loss_L1/train", l1_loss_val, prog_bar=False, sync_dist=True)
-            self.log("loss_TV_output/train", tv_loss_val, prog_bar=False, sync_dist=True)
-            self.log("loss_EdgeAware/train", edge_aware_val, prog_bar=False, sync_dist=True)
+            self.log("loss_L1/train", l1_loss(y_hat, y), prog_bar=False, sync_dist=True)
+            self.log("loss_Charbonnier/train", charbonnier_loss(y_hat), prog_bar=False, sync_dist=True)
+            self.log("loss_EdgeAware/train", edge_aware_smoothing_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_total/train", loss, prog_bar=False, sync_dist=True)
             
             # Log current learning rate (supports dynamic LR scheduling)
@@ -332,94 +317,12 @@ class LuminaScaleModule(L.LightningModule):
             raise
 
     def on_train_epoch_end(self) -> None:
-        """Log synthetic visualizations at the end of each epoch."""
-        if (self.current_epoch + 1) % self.vis_freq != 0:
-            return
-
-        self.model.eval()
-        with torch.no_grad():
-            # 1. Prepare Synthetic Data (RGB Primaries)
-            # IMPORTANT: Apply CDL BEFORE quantizing to match real training data!
-            prim_hdr = create_primary_gradients(width=512, height=512, dtype="float32")
-            
-            # Apply a moderate CDL grading to the high-bit primaries
-            prim_hdr_graded = np.clip(prim_hdr * 1.3 + 0.05, 0, 1)
-            
-            # Reference keeps the graded version at 32-bit
-            prim_32bit_ref = prim_hdr_graded.copy()
-            
-            # Input is the graded version THEN quantized to 8-bit
-            prim_8bit = quantize_to_8bit(prim_hdr_graded)
-            
-            # Convert to torch tensors and apply S-curve contrast (GPU-efficient)
-            # This amplifies the tiny ~0.001 differences to make them visible
-            prim_8bit_t = torch.from_numpy(prim_8bit).to(self._get_device())
-            prim_32bit_ref_t = torch.from_numpy(prim_32bit_ref).to(self._get_device())
-            
-            s_curve_strength = 2.5
-            prim_8bit_t = apply_s_curve_contrast_torch(prim_8bit_t, strength=s_curve_strength)
-            prim_32bit_ref_t = apply_s_curve_contrast_torch(prim_32bit_ref_t, strength=s_curve_strength)
-            
-            # Convert back to numpy for visualization
-            prim_8bit = prim_8bit_t.cpu().numpy()
-            prim_32bit_ref = prim_32bit_ref_t.cpu().numpy()
-
-            # 2. Run Inference
-            input_tensor = (
-                torch.from_numpy(prim_8bit).float().unsqueeze(0).to(self._get_device())
-            )
-            output_tensor = self.model(input_tensor).squeeze(0)
-            
-            # Debug: Print value ranges
-            print(f"\n[Epoch {self.current_epoch}] Synthetic Test Output Ranges:")
-            print(f"  Input range:       [{input_tensor.min():.4f}, {input_tensor.max():.4f}]")
-            print(f"  Output range:      [{output_tensor.min():.4f}, {output_tensor.max():.4f}]")
-            print(f"  GT (32-bit ref):   [{prim_32bit_ref.min():.4f}, {prim_32bit_ref.max():.4f}]")
-            print(f"  Output - Input min/max: [{(output_tensor - input_tensor.squeeze(0)).min():.6f}, {(output_tensor - input_tensor.squeeze(0)).max():.6f}]")
-
-            # 3. Prepare for plotting [H, W, 3]
-            in_np = np.transpose(prim_8bit, (1, 2, 0))
-            out_np = np.transpose(output_tensor.cpu().numpy(), (1, 2, 0))
-            gt_np = np.transpose(prim_32bit_ref, (1, 2, 0))
-
-            # Count unique values for each
-            in_unique = len(np.unique(np.round(in_np.reshape(-1, 3), decimals=6)))
-            out_unique = len(np.unique(np.round(out_np.reshape(-1, 3), decimals=6)))
-            gt_unique = len(np.unique(np.round(gt_np.reshape(-1, 3), decimals=6)))
-
-            # Boost contrast to reveal banding (25x)
-            contrast_factor = 25.0
-            in_c = np.clip((in_np - 0.5) * contrast_factor + 0.5, 0, 1)
-            out_c = np.clip((out_np - 0.5) * contrast_factor + 0.5, 0, 1)
-            gt_c = np.clip((gt_np - 0.5) * contrast_factor + 0.5, 0, 1)
-
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-            axes[0, 0].imshow(np.clip(in_np, 0, 1), vmin=0, vmax=1)
-            axes[0, 0].set_title(f"Input (8-bit) - {in_unique:,} unique", fontsize=12, fontweight="bold")
-            axes[0, 1].imshow(np.clip(out_np, 0, 1), vmin=0, vmax=1)
-            axes[0, 1].set_title(f"Output (Dequant) - {out_unique:,} unique", fontsize=12, fontweight="bold")
-            axes[0, 2].imshow(np.clip(gt_np, 0, 1), vmin=0, vmax=1)
-            axes[0, 2].set_title(f"Reference (32-bit) - {gt_unique:,} unique", fontsize=12, fontweight="bold")
-
-            axes[1, 0].imshow(np.clip(in_c, 0, 1), vmin=0, vmax=1)
-            axes[1, 0].set_title(f"Input {contrast_factor}x Contrast", fontsize=11)
-            axes[1, 1].imshow(np.clip(out_c, 0, 1), vmin=0, vmax=1)
-            axes[1, 1].set_title(f"Output {contrast_factor}x Contrast", fontsize=11)
-            axes[1, 2].imshow(np.clip(gt_c, 0, 1), vmin=0, vmax=1)
-            axes[1, 2].set_title(f"Reference {contrast_factor}x Contrast", fontsize=11)
-
-            for ax in axes.ravel():
-                ax.axis("off")
-                # Keep titles visible even with axis off
-                ax.set_xticks([])
-                ax.set_yticks([])
-
-            plt.tight_layout()
-            
-            # Log to TensorBoard
-            if self.logger and hasattr(self.logger, "experiment"):
-                self.logger.experiment.add_figure("Visualizations", fig, global_step=self.global_step)
-            plt.close(fig)
+        """Log synthetic visualizations at the end of each epoch.
+        
+        Note: Actual visualization is handled by SyntheticInferenceVisualizerCallback
+        in train_dequantization_net.py. This method is a no-op.
+        """
+        pass
 
     def configure_optimizers(self) -> dict:
         """Configure optimizer with CosineAnnealingLR scheduler.
@@ -456,23 +359,6 @@ class LuminaScaleModule(L.LightningModule):
                 "frequency": 1,
             },
         }
-
-
-def exposure_mask(
-    img: torch.Tensor, threshold_bright: int = 249, threshold_dark: int = 6
-) -> torch.Tensor:
-    """Compute mask for well-exposed regions (avoid clipped areas)."""
-    gray = (
-        0.299 * img[:, 0:1, :, :]
-        + 0.587 * img[:, 1:2, :, :]
-        + 0.114 * img[:, 2:3, :, :]
-    )
-    gray_8bit = (gray * 255.0).round()
-
-    mask = (gray_8bit >= threshold_dark) & (gray_8bit <= threshold_bright)
-    mask = mask.float()
-
-    return mask
 
 
 def l1_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

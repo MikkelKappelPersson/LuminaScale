@@ -37,7 +37,6 @@ import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 import pytorch_lightning as L
-from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
@@ -46,7 +45,8 @@ from hydra.core.hydra_config import HydraConfig
 warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning")
 
 from luminascale.models import create_dequantization_net
-from luminascale.training.dequantization_trainer import LuminaScaleModule
+from luminascale.training.dequantization_trainer import DequantizationTrainer
+from luminascale.training.logger import CustomTensorBoardLogger
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 from luminascale.utils.io import read_exr
 
@@ -95,13 +95,22 @@ class SyntheticInferenceVisualizerCallback(Callback):
         """Run inference at the start of training."""
         logger.info("Running synthetic inference visualization at training start...")
         self._log_synthetic_inference(trainer, pl_module, step=0, epoch_label="start")
+        logger.info("Running real image inference visualization at training start...")
+        self._log_real_image_inference(trainer, pl_module, step=0, epoch_label="start")
     
     def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Run inference after each epoch."""
+        epoch = trainer.current_epoch + 1
+        epoch_label = f"epoch_{trainer.current_epoch}"
         self._log_synthetic_inference(
             trainer, pl_module, 
-            step=trainer.current_epoch + 1, 
-            epoch_label=f"epoch_{trainer.current_epoch}"
+            step=epoch, 
+            epoch_label=epoch_label
+        )
+        self._log_real_image_inference(
+            trainer, pl_module,
+            step=epoch,
+            epoch_label=epoch_label
         )
     
     def _log_synthetic_inference(
@@ -144,13 +153,20 @@ class SyntheticInferenceVisualizerCallback(Callback):
             cmd = [
                 "python",
                 str(self.run_inference_script),
-                "--checkpoint", str(temp_checkpoint),
+                "--checkpoint",
+                str(temp_checkpoint),
                 "--synthetic",
-                "--width", str(self.width),
-                "--height", str(self.height),
-                "--channels", str(self.base_channels),
-                "--output", str(output_exr),
-                "--device", str(pl_module.device).split(":")[0],
+                "--width",
+                str(self.width),
+                "--height",
+                str(self.height),
+                "--channels",
+                str(self.base_channels),
+                "--output",
+                str(output_exr),
+                "--device",
+                str(str(pl_module.device).split(":")[0]),
+                "--apply-contrast-to-output",
             ]
             
             logger.info(f"Running inference: {' '.join(cmd)}")
@@ -164,94 +180,174 @@ class SyntheticInferenceVisualizerCallback(Callback):
             
             logger.info(f"Inference stdout: {result.stdout}")
             
-            # Read generated outputs
+            tb = trainer.logger.experiment  # type: ignore
+            
+            # Log the comparison PNG directly from run_inference.py (3x3 grid with all analysis)
+            if output_png.exists():
+                logger.info(f"Logging comparison grid from {output_png}")
+                try:
+                    from PIL import Image as PILImage
+                    import matplotlib.pyplot as plt
+                    
+                    img = PILImage.open(output_png)
+                    fig = plt.figure(figsize=(14, 12))
+                    ax = fig.add_subplot(111)
+                    ax.imshow(img)
+                    ax.axis('off')
+                    
+                    tb.add_figure("visualization/synthetic", fig, global_step=step)
+                    tb.flush()
+                    plt.close(fig)
+                    logger.info(f"✓ Logged visualization/synthetic")
+                except Exception as e:
+                    logger.error(f"Failed to log comparison PNG: {e}", exc_info=True)
+            else:
+                logger.warning(f"Comparison PNG not found: {output_png}")
+            
+            # Read and log the EXR output as a high-bit image
             if output_exr.exists():
                 logger.info(f"Output EXR found at {output_exr}")
                 output_np = read_exr(output_exr)
                 output_tensor = torch.from_numpy(output_np).float()
+                
+                # Log the model output as an image (normalized to [0, 1])
+                output_clipped = torch.clamp(output_tensor, 0, 1)
+                tb.add_image(f"inference/synthetic", output_clipped, global_step=step)
+                tb.flush()
+                logger.info(f"✓ Logged inference/synthetic")
             else:
                 logger.error(f"Output EXR not found: {output_exr}")
                 logger.error(f"Contents of log_dir: {list(Path(trainer.log_dir).iterdir())}")
                 return
             
-            # For TensorBoard, we also need LDR input and HDR reference
-            # We'll regenerate them to get the images for logging (must match what run_inference.py uses)
-            from luminascale.utils.image_generator import create_primary_gradients, quantize_to_8bit
-            
-            target_w = (self.width // 64) * 64
-            target_h = (self.height // 64) * 64
-            
-            hdr = create_primary_gradients(width=target_w, height=target_h, dtype="float32")
-            hdr_clipped = np.clip(hdr, 0, 1)
-            ldr = quantize_to_8bit(hdr_clipped)
-            # quantize_to_8bit returns float32 in [0, 1], so convert directly without dividing by 255
-            ldr_tensor = torch.from_numpy(ldr).float()
-            hdr_tensor = torch.from_numpy(hdr_clipped).float()
-            
-            # Clip output to [0, 1] range
-            output_clipped = torch.clamp(output_tensor, 0, 1)
-            
-            # Apply 25x contrast stretch to reveal quantization artifacts
-            contrast_factor = 25.0
-            def apply_contrast(x):
-                return torch.clamp((x - 0.5) * contrast_factor + 0.5, 0, 1)
-            
-            ldr_tensor_contrast = apply_contrast(ldr_tensor)
-            output_tensor_contrast = apply_contrast(output_clipped)
-            hdr_tensor_contrast = apply_contrast(hdr_tensor)
-            
-            # Extract run_id from log_dir path (last component)
-            run_id = Path(trainer.log_dir).name
-            
-            # Log high-contrast model output to TensorBoard
-            # Use fixed tag path so images are consolidated into a scrubbable timeline in TensorBoard
-            tb = trainer.logger.experiment  # type: ignore
-            tb.add_image(f"primaries_gradient/eval", output_tensor_contrast, global_step=step)
-            
-            # Create a combined visualization with both normal and contrast views
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-            
-            # Convert tensors to numpy for plotting [H, W, C]
-            ldr_np = ldr_tensor.permute(1, 2, 0).numpy()
-            output_np = output_clipped.permute(1, 2, 0).numpy()
-            hdr_np = hdr_tensor.permute(1, 2, 0).numpy()
-            
-            ldr_contrast_np = ldr_tensor_contrast.permute(1, 2, 0).numpy()
-            output_contrast_np = output_tensor_contrast.permute(1, 2, 0).numpy()
-            hdr_contrast_np = hdr_tensor_contrast.permute(1, 2, 0).numpy()
-            
-            # Row 0: Normal view
-            axes[0, 0].imshow(ldr_np)
-            axes[0, 0].set_title("Input (8-bit LDR)")
-            axes[0, 1].imshow(output_np)
-            axes[0, 1].set_title("Output (Expanded)")
-            axes[0, 2].imshow(hdr_np)
-            axes[0, 2].set_title("Target (32-bit HDR)")
-            
-            # Row 1: Contrast-boosted view (25x)
-            axes[1, 0].imshow(ldr_contrast_np)
-            axes[1, 0].set_title(f"Input {contrast_factor}x Contrast")
-            axes[1, 1].imshow(output_contrast_np)
-            axes[1, 1].set_title(f"Output {contrast_factor}x Contrast")
-            axes[1, 2].imshow(hdr_contrast_np)
-            axes[1, 2].set_title(f"Target {contrast_factor}x Contrast")
-            
-            for ax in axes.ravel():
-                ax.axis("off")
-            
-            plt.tight_layout()
-            tb.add_figure(f"primaries_visualisation/eval", fig, global_step=step)
-            plt.close(fig)
-            
-            tb.flush()
-            logger.info(f"✓ Synthetic inference visualization logged: {epoch_label}")
-            logger.info(f"  Output saved to: {output_exr} and {output_png}")
-            
             # Cleanup only temporary checkpoint (keep EXR and PNG outputs)
-            temp_checkpoint.unlink(missing_ok=True)
+            if temp_checkpoint and temp_checkpoint.exists():
+                temp_checkpoint.unlink()
+            logger.info(f"✓ Synthetic inference visualization logged: {epoch_label}")
+            logger.info(f"  - Comparison grid (PNG): {output_png}")
+            logger.info(f"  - Model output (EXR): {output_exr}")
         
         except Exception as e:
             logger.error(f"Error during synthetic inference visualization: {e}", exc_info=True)
+            # Best effort cleanup
+            if temp_checkpoint is not None:
+                try:
+                    temp_checkpoint.unlink(missing_ok=True)
+                except Exception:  # pragma: no cover
+                    pass
+
+    def _log_real_image_inference(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+        step: int,
+        epoch_label: str
+    ) -> None:
+        """Run inference on a real test image and log results to TensorBoard.
+        
+        Args:
+            trainer: PyTorch Lightning trainer
+            pl_module: Lightning module with the model
+            step: Global step for TensorBoard logging
+            epoch_label: Label for the logged images
+        """
+        if trainer.logger is None or not hasattr(trainer.logger, "experiment"):
+            return
+        
+        if trainer.log_dir is None:
+            logger.error("Trainer log_dir is None, cannot run real image inference")
+            return
+        
+        temp_checkpoint: Path | None = None
+        try:
+            # Path to test image
+            test_image = project_root / "dataset" / "test_images" / "woods_1.jpg"
+            if not test_image.exists():
+                logger.warning(f"Test image not found: {test_image}")
+                return
+            
+            # Save temporary checkpoint for run_inference.py
+            temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_real_{epoch_label}.pt"
+            model = cast(nn.Module, pl_module.model)
+            torch.save(model.state_dict(), temp_checkpoint)
+            
+            # Prepare output paths
+            output_exr = Path(trainer.log_dir) / f"real_image_{epoch_label}.exr"
+            output_png = Path(trainer.log_dir) / f"real_image_{epoch_label}.png"
+            
+            # Run run_inference.py on real image
+            cmd = [
+                "python",
+                str(self.run_inference_script),
+                "--checkpoint",
+                str(temp_checkpoint),
+                "--input",
+                str(test_image),
+                "--output",
+                str(output_exr),
+                "--device",
+                str(str(pl_module.device).split(":")[0]),
+                "--contrast-strength=2.0",
+            ]
+            
+            logger.info(f"Running real image inference: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
+            
+            if result.returncode != 0:
+                logger.error(f"Real image inference failed with return code {result.returncode}")
+                logger.error(f"STDERR: {result.stderr}")
+                return
+            
+            logger.info(f"Real image inference stdout: {result.stdout}")
+            
+            tb = trainer.logger.experiment  # type: ignore
+            
+            # Log the comparison PNG if it was generated
+            if output_png.exists():
+                logger.info(f"Logging real image comparison from {output_png}")
+                try:
+                    from PIL import Image as PILImage
+                    import matplotlib.pyplot as plt
+                    
+                    img = PILImage.open(output_png)
+                    fig = plt.figure(figsize=(14, 12))
+                    ax = fig.add_subplot(111)
+                    ax.imshow(img)
+                    ax.axis('off')
+                    
+                    tb.add_figure("visualization/test", fig, global_step=step)
+                    tb.flush()
+                    plt.close(fig)
+                    logger.info(f"✓ Logged visualization/test")
+                except Exception as e:
+                    logger.error(f"Failed to log real image comparison PNG: {e}", exc_info=True)
+            else:
+                logger.warning(f"Real image comparison PNG not found: {output_png}")
+            
+            # Read and log the EXR output
+            if output_exr.exists():
+                logger.info(f"Real image output EXR found at {output_exr}")
+                output_np = read_exr(output_exr)
+                output_tensor = torch.from_numpy(output_np).float()
+                
+                output_clipped = torch.clamp(output_tensor, 0, 1)
+                tb.add_image(f"inference/test", output_clipped, global_step=step)
+                tb.flush()
+                logger.info(f"✓ Logged inference/test")
+            else:
+                logger.warning(f"Real image output EXR not found: {output_exr}")
+                return
+            
+            # Cleanup only temporary checkpoint
+            if temp_checkpoint and temp_checkpoint.exists():
+                temp_checkpoint.unlink()
+            logger.info(f"✓ Real image inference visualization logged: {epoch_label}")
+            logger.info(f"  - Input: {test_image}")
+            logger.info(f"  - Comparison grid (PNG): {output_png}")
+            logger.info(f"  - Model output (EXR): {output_exr}")
+        
+        except Exception as e:
+            logger.error(f"Error during real image inference visualization: {e}", exc_info=True)
             # Best effort cleanup
             if temp_checkpoint is not None:
                 try:
@@ -278,35 +374,68 @@ class TensorBoardFlushCallback(Callback):
 
 
 class HparamsMetricsCallback(Callback):
-    """Log final_loss metric after training completes.
+    """Log hparams at training start, final_loss metric at epoch end.
     
-    Adds final_loss to the hparams metrics so TensorBoard can correlate
-    hyperparameters with final training performance.
+    Uses CustomTensorBoardLogger's log_hyperparams_metrics to ensure proper timing.
+    
+    Timeline:
+    1. on_fit_start: Log hparams with initial empty metrics
+    2. on_train_epoch_end: Log hparams + updated final loss after each epoch
+    3. on_train_end: Log hparams + final loss at training completion
     """
     
     def __init__(self, hparams_dict: dict[str, Any]) -> None:
         super().__init__()
         self.hparams_dict = hparams_dict
+        self.final_loss: float | None = None
     
-    def on_train_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Log hparams + final_loss metric after training completes."""
+    def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Log hyperparameters at the very start of training."""
         if trainer.logger is None:
             return
         
         try:
-            # Extract final loss from logged metrics
-            final_loss = trainer.callback_metrics.get("loss_L2/train", None)
+            # Log hparams with empty metrics dict initially
+            if hasattr(trainer.logger, "log_hyperparams_metrics"):
+                trainer.logger.log_hyperparams_metrics(self.hparams_dict, {})
+                logger.info(f"✓ Hyperparameters logged at fit_start:")
+                for k, v in self.hparams_dict.items():
+                    logger.info(f"    {k}: {v}")
+            else:
+                logger.warning("Logger does not have log_hyperparams_metrics method")
+        except Exception as e:
+            logger.error(f"Error logging hyperparameters at fit_start: {e}", exc_info=True)
+    
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Log hparams + final_loss after each training epoch."""
+        if trainer.logger is None:
+            return
+        
+        try:
+            # Capture the epoch's final loss
+            metrics_dict = self._get_metrics_dict(trainer)
             
-            # Add final_loss to hparams metrics
-            metrics_dict: dict[str, Any] = {}
-            if final_loss is not None:
-                loss_value = final_loss.item() if hasattr(final_loss, "item") else float(final_loss)
-                metrics_dict["final_loss"] = loss_value
+            if metrics_dict and hasattr(trainer.logger, "log_hyperparams_metrics"):
+                trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
+                self.final_loss = metrics_dict.get("final_loss")
+                if self.final_loss is not None:
+                    logger.info(f"  [Epoch {trainer.current_epoch}] Final loss: {self.final_loss:.6f}")
+        except Exception as e:
+            logger.error(f"Error logging metrics at epoch end: {e}", exc_info=True)
+    
+    def on_train_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Log final hparams + metrics when training completes."""
+        if trainer.logger is None:
+            return
+        
+        try:
+            # Capture final loss from training completion
+            metrics_dict = self._get_metrics_dict(trainer)
             
-            # Log hparams + metrics together for TensorBoard hparams dashboard
-            if hasattr(trainer.logger, "log_hyperparams"):
-                trainer.logger.log_hyperparams(self.hparams_dict, metrics_dict)
-                logger.info(f"✓ Hparams + final_loss logged: {metrics_dict.get('final_loss', 'N/A'):.6f}")
+            if metrics_dict and hasattr(trainer.logger, "log_hyperparams_metrics"):
+                trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
+                final_loss = metrics_dict.get("final_loss")
+                logger.info(f"✓ Training complete. Final loss: {final_loss:.6f}")
             
             # Log best checkpoint info
             checkpoint_callback: ModelCheckpoint | None = None
@@ -318,7 +447,30 @@ class HparamsMetricsCallback(Callback):
             if checkpoint_callback and checkpoint_callback.best_model_path:
                 logger.info(f"✓ Best checkpoint: {checkpoint_callback.best_model_path}")
         except Exception as e:
-            logger.error(f"Error logging final metrics: {e}")
+            logger.error(f"Error logging final metrics: {e}", exc_info=True)
+    
+    def _get_metrics_dict(self, trainer: L.Trainer) -> dict[str, Any]:
+        """Extract available metrics from trainer callback_metrics.
+        
+        Tries multiple loss keys since loss naming varies.
+        """
+        metrics_dict: dict[str, Any] = {}
+        
+        # Try different loss keys in order of preference
+        loss_keys = [
+            "loss_total/train",      # Our three-term loss: L1 + Charbonnier + EdgeAware
+            "loss_L1/train",         # Fallback to L1
+            "loss",                  # Generic fallback
+        ]
+        
+        for loss_key in loss_keys:
+            if loss_key in trainer.callback_metrics:
+                loss_value = trainer.callback_metrics[loss_key]
+                loss_float = loss_value.item() if hasattr(loss_value, "item") else float(loss_value)
+                metrics_dict["final_loss"] = loss_float
+                break
+        
+        return metrics_dict
 
 
 class CompactProgressBar(TQDMProgressBar):
@@ -416,19 +568,19 @@ def main(cfg: DictConfig) -> None:
     model = model.to(device)
     print(f"[MAIN] Model moved to {device}")
     
-    print(f"[MAIN] Creating LuminaScaleModule...")
-    ls_module = LuminaScaleModule(
+    print(f"[MAIN] Creating DequantizationTrainer...")
+    ls_module = DequantizationTrainer(
         model=model,
         learning_rate=cfg.learning_rate,
         loss_weights=dict(cfg.get("loss", {})),
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
-    print(f"[MAIN] ✓ LuminaScaleModule created")
+    print(f"[MAIN] ✓ DequantizationTrainer created")
     
     # 3. Setup Trainer
     print(f"[MAIN] Creating Lightning Trainer...")
-    logger_tb = TensorBoardLogger(
+    logger_tb = CustomTensorBoardLogger(
         save_dir=str(run_dir),
         name="",
         version="",
@@ -447,19 +599,33 @@ def main(cfg: DictConfig) -> None:
     # Extract loss weights from config
     loss_cfg = cfg.get("loss", {})
     l1_weight = loss_cfg.get("l1_weight", 1.0)
+    l2_weight = loss_cfg.get("l2_weight", 0.0)  # Currently unused, but available for future use
     charbonnier_weight = loss_cfg.get("tv_weight", 0.05)  # Note: "tv_weight" key maps to charbonnier
     grad_match_weight = loss_cfg.get("grad_match_weight", 0.5)
+    
+    # Create dynamic loss_fn string showing the actual formula with weights
+    loss_fn_str = f"L1*{l1_weight} + Charbonnier*{charbonnier_weight} + EdgeAware*{grad_match_weight}"
+    
+    # Create dynamic optimizer string showing the actual optimizer and learning rate
+    optimizer_str = f"Adam(lr={cfg.learning_rate})"
+    
+    # Create dynamic scheduler string showing the actual scheduler and parameters
+    num_epochs = cfg.epochs
+    eta_min = 1e-6
+    scheduler_str = f"CosineAnnealingLR(T_max={num_epochs}, eta_min={eta_min})"
     
     hparams_dict = {
         "config_name": config_name,
         "learning_rate": cfg.learning_rate,
         "batch_size": cfg.get("batch_size", 32),
         "epochs": cfg.epochs,
-        "optimizer": "Adam",
-        "loss_fn": "L1 + Charbonnier + EdgeAware",
-        "l1_weight": l1_weight,
-        "charbonnier_weight": charbonnier_weight,
-        "grad_match_weight": grad_match_weight,
+        "optimizer": optimizer_str,
+        "scheduler": scheduler_str,
+        "loss_fn": loss_fn_str,
+        "weight_l1": l1_weight,
+        "weight_l2": l2_weight,
+        "weight_charbonnier": charbonnier_weight,
+        "weight_grad_match": grad_match_weight,
         "model_base_channels": cfg.model.base_channels,
         "patches_per_image": cfg.get("patches_per_image", 1),
         "crop_size": 512,
@@ -478,8 +644,8 @@ def main(cfg: DictConfig) -> None:
             TensorBoardFlushCallback(),
             HparamsMetricsCallback(hparams_dict),
             SyntheticInferenceVisualizerCallback(
-                width=cfg.get("inference_width", 1024),
-                height=cfg.get("inference_height", 512),
+                width=cfg.get("inference_width", 128),
+                height=cfg.get("inference_height", 64),
                 base_channels=cfg.model.base_channels
             )
         ],
@@ -489,8 +655,9 @@ def main(cfg: DictConfig) -> None:
     )
     print(f"[MAIN] ✓ Lightning Trainer created")
 
-    # Note: hparams + final_loss will be logged together at training end in HparamsMetricsCallback
-    # (TensorBoard requires a single log_hyperparams call with both params and metrics)
+    # Note: CustomTensorBoardLogger disables early automatic log_hyperparams call
+    # HparamsMetricsCallback logs hparams at fit_start and final_loss at epoch_end
+    # This ensures hparams are recorded correctly in TensorBoard
 
     # 4. Start Training
     print(f"\n{'='*80}")

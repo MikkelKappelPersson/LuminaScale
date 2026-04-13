@@ -10,7 +10,7 @@ metadata_parquet: "dataset/temp/training_metadata.parquet"
 
 # Training parameters
 batch_size: 4
-epochs: 20  
+epochs: 30  
 learning_rate: 1e-4  
 checkpoint_freq: 10
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
@@ -37,6 +37,7 @@ model:
 # Loss weights (tuned for smooth dequantization with Charbonnier smoothness)
 loss:
   l1_weight: 0.0           # Pixel-wise reconstruction (base)
+  l2_weight: 0.0           # L2 loss (MSE)
   charbonnier_weight: 1.0          # Charbonnier loss on OUTPUT (edge-preserving smoothness)
   grad_match_weight: 0.0   # Edge-aware smoothing (soft): no artifacts in smooth regions
 

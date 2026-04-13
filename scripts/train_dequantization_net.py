@@ -374,14 +374,20 @@ class TensorBoardFlushCallback(Callback):
 
 
 class HparamsMetricsCallback(Callback):
-    """Log hparams at training start, final_loss metric at epoch end.
+    """Log hparams at training start, PSNR metric at epoch end.
     
     Uses CustomTensorBoardLogger's log_hyperparams_metrics to ensure proper timing.
     
+    Metric Strategy:
+    - Uses PSNR (Peak Signal-to-Noise Ratio) for weight-independent metric logging
+    - PSNR is invariant to loss weight changes (unlike weighted loss values)
+    - Falls back to final_loss if PSNR unavailable
+    - Perfect for fair hyperparameter comparison across different weight configurations
+    
     Timeline:
     1. on_fit_start: Log hparams with initial empty metrics
-    2. on_train_epoch_end: Log hparams + updated final loss after each epoch
-    3. on_train_end: Log hparams + final loss at training completion
+    2. on_train_epoch_end: Log hparams + updated PSNR after each epoch
+    3. on_train_end: Log hparams + final PSNR at training completion
     """
     
     def __init__(self, hparams_dict: dict[str, Any]) -> None:
@@ -407,19 +413,23 @@ class HparamsMetricsCallback(Callback):
             logger.error(f"Error logging hyperparameters at fit_start: {e}", exc_info=True)
     
     def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Log hparams + final_loss after each training epoch."""
+        """Log hparams + metrics after each training epoch."""
         if trainer.logger is None:
             return
         
         try:
-            # Capture the epoch's final loss
+            # Capture the epoch's metrics (PSNR or fallback loss)
             metrics_dict = self._get_metrics_dict(trainer)
             
             if metrics_dict and hasattr(trainer.logger, "log_hyperparams_metrics"):
                 trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
-                self.final_loss = metrics_dict.get("final_loss")
-                if self.final_loss is not None:
-                    logger.info(f"  [Epoch {trainer.current_epoch}] Final loss: {self.final_loss:.6f}")
+                # Display both PSNR and loss if available
+                psnr = metrics_dict.get("psnr_db")
+                final_loss = metrics_dict.get("final_loss")
+                if psnr is not None:
+                    logger.info(f"  [Epoch {trainer.current_epoch}] PSNR: {psnr:.2f} dB")
+                elif final_loss is not None:
+                    logger.info(f"  [Epoch {trainer.current_epoch}] Loss: {final_loss:.6f}")
         except Exception as e:
             logger.error(f"Error logging metrics at epoch end: {e}", exc_info=True)
     
@@ -429,13 +439,17 @@ class HparamsMetricsCallback(Callback):
             return
         
         try:
-            # Capture final loss from training completion
+            # Capture final metrics from training completion
             metrics_dict = self._get_metrics_dict(trainer)
             
             if metrics_dict and hasattr(trainer.logger, "log_hyperparams_metrics"):
                 trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
+                psnr = metrics_dict.get("psnr_db")
                 final_loss = metrics_dict.get("final_loss")
-                logger.info(f"✓ Training complete. Final loss: {final_loss:.6f}")
+                if psnr is not None:
+                    logger.info(f"✓ Training complete. PSNR: {psnr:.2f} dB")
+                elif final_loss is not None:
+                    logger.info(f"✓ Training complete. Final loss: {final_loss:.6f}")
             
             # Log best checkpoint info
             checkpoint_callback: ModelCheckpoint | None = None
@@ -450,24 +464,31 @@ class HparamsMetricsCallback(Callback):
             logger.error(f"Error logging final metrics: {e}", exc_info=True)
     
     def _get_metrics_dict(self, trainer: L.Trainer) -> dict[str, Any]:
-        """Extract available metrics from trainer callback_metrics.
+        """Extract weight-independent metrics from trainer callback_metrics.
         
-        Tries multiple loss keys since loss naming varies.
+        Uses PSNR (Peak Signal-to-Noise Ratio) instead of final_loss because:
+        - PSNR is invariant to loss weight changes (unlike weighted loss)
+        - PSNR directly measures reconstruction quality (higher = better)
+        - Perfect for fair hyperparameter tuning across different weight configs
+        
+        Falls back to final_loss if PSNR unavailable.
         """
         metrics_dict: dict[str, Any] = {}
         
-        # Try different loss keys in order of preference
-        loss_keys = [
-            "loss_total/train",      # Our three-term loss: L1 + Charbonnier + EdgeAware
-            "loss_L1/train",         # Fallback to L1
-            "loss",                  # Generic fallback
+        # Prefer PSNR (weight-independent) over loss for hparam tuning
+        metric_keys = [
+            "metric_psnr/train",     # Weight-independent image quality metric
+            "loss_total/train",      # Fallback: weighted loss (weight-dependent)
+            "loss_L1/train",         # Further fallback
         ]
         
-        for loss_key in loss_keys:
-            if loss_key in trainer.callback_metrics:
-                loss_value = trainer.callback_metrics[loss_key]
-                loss_float = loss_value.item() if hasattr(loss_value, "item") else float(loss_value)
-                metrics_dict["final_loss"] = loss_float
+        for metric_key in metric_keys:
+            if metric_key in trainer.callback_metrics:
+                value = trainer.callback_metrics[metric_key]
+                value_float = value.item() if hasattr(value, "item") else float(value)
+                # PSNR is already in dB; loss is just loss
+                metric_name = "psnr_db" if "psnr" in metric_key else "final_loss"
+                metrics_dict[metric_name] = value_float
                 break
         
         return metrics_dict

@@ -42,10 +42,12 @@ class DequantizationTrainer(L.LightningModule):
         if loss_weights is None:
             loss_weights = {
                 "l1_weight": 1.0,
+                "l2_weight": 0.0,
                 "charbonnier_weight": 3.0,
                 "grad_match_weight": 2.0,
             }
         self.l1_weight = loss_weights.get("l1_weight", 1.0)
+        self.l2_weight = loss_weights.get("l2_weight", 0.0)
         self.charbonnier_weight = loss_weights.get("charbonnier_weight", 3.0)
         self.grad_match_weight = loss_weights.get("grad_match_weight", 2.0)
         
@@ -255,11 +257,11 @@ class DequantizationTrainer(L.LightningModule):
             # Solution: Use structural smoothing WITHOUT forcing exact gradient matching
             
             # Total loss = reconstruction + global smoothing + edge awareness
-            loss = l1_loss(y_hat, y) * self.l1_weight + charbonnier_loss(y_hat) * self.charbonnier_weight + edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight
+            loss = l1_loss(y_hat, y) * self.l1_weight + l2_loss(y_hat, y) * self.l2_weight + charbonnier_loss(y_hat) * self.charbonnier_weight + edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight
             
             # Debug: Check loss composition
             if batch_idx == 0 and self.current_epoch % 1 == 0:
-                print(f"\n[Loss Composition] L1: {l1_loss(y_hat, y).item():.6f} | Charbonnier: {charbonnier_loss(y_hat).item():.6f} | EdgeAware: {edge_aware_smoothing_loss(y_hat, y).item():.6f}")
+                print(f"\n[Loss Composition] L1: {l1_loss(y_hat, y).item():.6f} | L2: {l2_loss(y_hat, y).item():.6f} | Charbonnier: {charbonnier_loss(y_hat).item():.6f} | EdgeAware: {edge_aware_smoothing_loss(y_hat, y).item():.6f}")
                 print(f"  [Structure] Charbonnier loss (smooth L1) on output: gentle on edges, strict on banding")
                 print(f"  [Reasoning] Hard L1 TV was destroying edges; Charbonnier preserves them")
                 print(f"  [Strategy] Softer smoothness + edge preservation + edge-aware constraints")
@@ -283,6 +285,7 @@ class DequantizationTrainer(L.LightningModule):
                 
                 print(f"\n[Epoch {self.current_epoch} Batch {batch_idx}] Loss Breakdown & Target Sanity:")
                 print(f"  L1 Loss:        {l1_loss(y_hat, y).item():.6f} (pixel-wise reconstruction)")
+                print(f"  L2 Loss:        {l2_loss(y_hat, y).item():.6f} (MSE: mean squared error)")
                 print(f"  Charbonnier:    {charbonnier_loss(y_hat).item():.6f} (smooth L1: edge-preserving smoothness)")
                 print(f"  EdgeAware:      {edge_aware_smoothing_loss(y_hat, y).item():.6f} (no artifacts in smooth regions)")
                 print(f"  Total:          {loss.item():.6f}")
@@ -296,9 +299,15 @@ class DequantizationTrainer(L.LightningModule):
                     print(f"  WARNING: Target is TOO SIMILAR to input! (diff={y_minus_x:.6f})")
 
             self.log("loss_L1/train", l1_loss(y_hat, y), prog_bar=False, sync_dist=True)
+            self.log("loss_L2/train", l2_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_Charbonnier/train", charbonnier_loss(y_hat), prog_bar=False, sync_dist=True)
             self.log("loss_EdgeAware/train", edge_aware_smoothing_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_total/train", loss, prog_bar=False, sync_dist=True)
+            
+            # Log weight-independent metrics (PSNR, SSIM) for fair hparam comparison
+            # These remain constant regardless of loss weight changes
+            psnr_val = compute_psnr(y_hat, y)
+            self.log("metric_psnr/train", psnr_val, prog_bar=False, sync_dist=True)
             
             # Log current learning rate (supports dynamic LR scheduling)
             current_lr = self.optimizers().param_groups[0]["lr"]
@@ -458,3 +467,25 @@ def edge_aware_smoothing_loss(
     loss_x = (smooth_mask_x * grad_pred_x).mean()
     
     return (loss_y + loss_x) / 2.0
+
+
+def compute_psnr(pred: torch.Tensor, target: torch.Tensor, max_val: float = 1.0) -> torch.Tensor:
+    """Compute Peak Signal-to-Noise Ratio between prediction and target.
+    
+    PSNR is weight-independent and suitable for hyperparameter tuning.
+    Higher PSNR indicates better reconstruction quality.
+    
+    PSNR = 20 * log10(max_val / sqrt(MSE))
+    
+    Args:
+        pred: Model prediction [B, C, H, W] in range [0, 1]
+        target: Target image [B, C, H, W] in range [0, 1]
+        max_val: Maximum pixel value (default 1.0 for normalized images)
+    
+    Returns:
+        PSNR value in dB (higher is better)
+    """
+    mse = F.mse_loss(pred.float(), target.float())
+    # Avoid log(0) by adding small epsilon
+    psnr = 20.0 * torch.log10(max_val / (torch.sqrt(mse) + 1e-10))
+    return psnr

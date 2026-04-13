@@ -47,13 +47,14 @@ def align_to_model(tensor: torch.Tensor) -> torch.Tensor:
         return F.interpolate(tensor, size=(new_h, new_w), mode='bilinear', align_corners=False)
     return tensor
 
-def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width: int | None, height: int | None, output_path: Path, gradient_type: str = "combined", contrast_strength: float = 10.0):
+def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width: int | None, height: int | None, output_path: Path, gradient_type: str = "combined", contrast_strength: float = 10.0, apply_contrast_to_output: bool = False):
     """Generate and run inference on a synthetic primary gradients image.
     
     Args:
         gradient_type: "combined", "8x21", "4x21", or "2x21"
         width: Target width (None = native size)
         height: Target height (None = native size)
+        apply_contrast_to_output: If True, apply S-curve contrast to model output before saving EXR
     
     Note:
         - Each gradient variant contains all three colors (Red, Green, Blue) + white separator
@@ -122,15 +123,20 @@ def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width:
     with torch.no_grad():
         output_tensor = model(input_tensor).squeeze(0).cpu().numpy()
     
-    # Save as EXR (normalized model output)
-    write_exr(output_path, output_tensor)
+    # Optionally apply contrast to output before saving
+    output_to_save = output_tensor
+    if apply_contrast_to_output:
+        output_to_save = apply_s_curve_contrast(output_tensor.transpose(1, 2, 0), strength=contrast_strength).transpose(2, 0, 1)
+    
+    # Save as EXR (normalized model output, possibly with contrast)
+    write_exr(output_path, output_to_save)
     
     # Save a comparison: input vs model output vs reference (full range ground truth)
     reference_clipped = np.clip(reference, 0, 1)
     save_comparison(ldr_chw, output_tensor, np.transpose(reference_clipped, (2, 0, 1)), output_path.with_suffix('.png'), strength=contrast_strength, synthetic=gradient_type)
     print(f"✓ Synthetic inference complete. Model output: {output_path}")
 
-def run_image_inference(model: torch.nn.Module, device: torch.device, input_path: Path, output_path: Path):
+def run_image_inference(model: torch.nn.Module, device: torch.device, input_path: Path, output_path: Path, contrast_strength: float = 20.0, apply_contrast_to_output: bool = False):
     """Run inference on a local image file."""
     print(f"Processing image: {input_path}")
     
@@ -141,16 +147,41 @@ def run_image_inference(model: torch.nn.Module, device: torch.device, input_path
         input_np = np.array(img).transpose(2, 0, 1).astype(np.float32) / 255.0
     
     input_tensor = torch.from_numpy(input_np).float().unsqueeze(0).to(device)
-    input_tensor = align_to_model(input_tensor)
+    original_h, original_w = input_tensor.shape[2], input_tensor.shape[3]
+    
+    input_tensor_aligned = align_to_model(input_tensor)
+    aligned_h, aligned_w = input_tensor_aligned.shape[2], input_tensor_aligned.shape[3]
     
     with torch.no_grad():
-        output_tensor = model(input_tensor).squeeze(0).cpu().numpy()
+        output_tensor = model(input_tensor_aligned).squeeze(0).cpu().numpy()
+    
+    # Optionally apply contrast to output before saving
+    output_to_save = output_tensor
+    if apply_contrast_to_output:
+        output_to_save = apply_s_curve_contrast(output_tensor.transpose(1, 2, 0), strength=contrast_strength).transpose(2, 0, 1)
     
     if output_path.suffix.lower() == '.exr':
-        write_exr(output_path, output_tensor)
+        write_exr(output_path, output_to_save)
     else:
-        out_img = Image.fromarray((np.clip(output_tensor.transpose(1, 2, 0), 0, 1) * 255).astype(np.uint8))
+        out_img = Image.fromarray((np.clip(output_to_save.transpose(1, 2, 0), 0, 1) * 255).astype(np.uint8))
         out_img.save(output_path)
+    
+    # Save comparison visualization (resize input to match output dimensions for shape compatibility)
+    output_clipped = np.clip(output_tensor, 0, 1)
+    
+    # If input was resized by align_to_model, resize back for comparison visualization
+    if (original_h != aligned_h or original_w != aligned_w):
+        # Convert CHW back to HWC for PIL resizing
+        input_hwc = input_np.transpose(1, 2, 0)  # [H_orig, W_orig, C]
+        input_pil = Image.fromarray((np.clip(input_hwc, 0, 1) * 255).astype(np.uint8))
+        # Resize to match output dimensions
+        input_pil_resized = input_pil.resize((aligned_w, aligned_h), Image.Resampling.LANCZOS)
+        # Convert back to CHW float
+        input_chw = np.array(input_pil_resized).astype(np.float32).transpose(2, 0, 1) / 255.0
+    else:
+        input_chw = input_np
+    
+    save_comparison(input_chw, output_clipped, input_chw, output_path.with_suffix('.png'), strength=contrast_strength)
     
     print(f"✓ Inference complete. Saved to: {output_path}")
 
@@ -270,7 +301,8 @@ def main():
     parser.add_argument("--gradient-type", type=str, default="combined", choices=["combined", "8x21", "4x21", "2x21"], help="Type of primary gradient to generate (default: combined)")
     parser.add_argument("--width", type=int, default=None, help="Width for synthetic gradient (default: native size)")
     parser.add_argument("--height", type=int, default=None, help="Height for synthetic gradient (default: native size)")
-    parser.add_argument("--contrast-strength", type=float, default=20.0, help="S-curve contrast strength for visualization (default: 10.0)")
+    parser.add_argument("--contrast-strength", type=float, default=20.0, help="S-curve contrast strength for visualization (default: 20.0)")
+    parser.add_argument("--apply-contrast-to-output", action="store_true", help="Apply S-curve contrast to model output before saving EXR (default: False)")
     parser.add_argument("--channels", type=int, default=32, help="Model base channels (default: 32)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda/cpu)")
 
@@ -296,9 +328,9 @@ def main():
 
     # 2. Run Inference
     if args.synthetic:
-        run_synthetic_inference(model, device, args.width, args.height, output_path, gradient_type=args.gradient_type, contrast_strength=args.contrast_strength)
+        run_synthetic_inference(model, device, args.width, args.height, output_path, gradient_type=args.gradient_type, contrast_strength=args.contrast_strength, apply_contrast_to_output=args.apply_contrast_to_output)
     elif args.input:
-        run_image_inference(model, device, Path(args.input), output_path)
+        run_image_inference(model, device, Path(args.input), output_path, contrast_strength=args.contrast_strength, apply_contrast_to_output=args.apply_contrast_to_output)
     else:
         print("Error: You must provide either --input or --synthetic")
         sys.exit(1)

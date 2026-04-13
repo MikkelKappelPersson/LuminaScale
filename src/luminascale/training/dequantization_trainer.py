@@ -317,94 +317,12 @@ class DequantizationTrainer(L.LightningModule):
             raise
 
     def on_train_epoch_end(self) -> None:
-        """Log synthetic visualizations at the end of each epoch."""
-        if (self.current_epoch + 1) % self.vis_freq != 0:
-            return
-
-        self.model.eval()
-        with torch.no_grad():
-            # 1. Prepare Synthetic Data (RGB Primaries)
-            # IMPORTANT: Apply CDL BEFORE quantizing to match real training data!
-            prim_hdr = create_primary_gradients(width=512, height=512, dtype="float32")
-            
-            # Apply a moderate CDL grading to the high-bit primaries
-            prim_hdr_graded = np.clip(prim_hdr * 1.3 + 0.05, 0, 1)
-            
-            # Reference keeps the graded version at 32-bit
-            prim_32bit_ref = prim_hdr_graded.copy()
-            
-            # Input is the graded version THEN quantized to 8-bit
-            prim_8bit = quantize_to_8bit(prim_hdr_graded)
-            
-            # Convert to torch tensors and apply S-curve contrast (GPU-efficient)
-            # This amplifies the tiny ~0.001 differences to make them visible
-            prim_8bit_t = torch.from_numpy(prim_8bit).to(self._get_device())
-            prim_32bit_ref_t = torch.from_numpy(prim_32bit_ref).to(self._get_device())
-            
-            s_curve_strength = 2.5
-            prim_8bit_t = apply_s_curve_contrast_torch(prim_8bit_t, strength=s_curve_strength)
-            prim_32bit_ref_t = apply_s_curve_contrast_torch(prim_32bit_ref_t, strength=s_curve_strength)
-            
-            # Convert back to numpy for visualization
-            prim_8bit = prim_8bit_t.cpu().numpy()
-            prim_32bit_ref = prim_32bit_ref_t.cpu().numpy()
-
-            # 2. Run Inference
-            input_tensor = (
-                torch.from_numpy(prim_8bit).float().unsqueeze(0).to(self._get_device())
-            )
-            output_tensor = self.model(input_tensor).squeeze(0)
-            
-            # Debug: Print value ranges
-            print(f"\n[Epoch {self.current_epoch}] Synthetic Test Output Ranges:")
-            print(f"  Input range:       [{input_tensor.min():.4f}, {input_tensor.max():.4f}]")
-            print(f"  Output range:      [{output_tensor.min():.4f}, {output_tensor.max():.4f}]")
-            print(f"  GT (32-bit ref):   [{prim_32bit_ref.min():.4f}, {prim_32bit_ref.max():.4f}]")
-            print(f"  Output - Input min/max: [{(output_tensor - input_tensor.squeeze(0)).min():.6f}, {(output_tensor - input_tensor.squeeze(0)).max():.6f}]")
-
-            # 3. Prepare for plotting [H, W, 3]
-            in_np = np.transpose(prim_8bit, (1, 2, 0))
-            out_np = np.transpose(output_tensor.cpu().numpy(), (1, 2, 0))
-            gt_np = np.transpose(prim_32bit_ref, (1, 2, 0))
-
-            # Count unique values for each
-            in_unique = len(np.unique(np.round(in_np.reshape(-1, 3), decimals=6)))
-            out_unique = len(np.unique(np.round(out_np.reshape(-1, 3), decimals=6)))
-            gt_unique = len(np.unique(np.round(gt_np.reshape(-1, 3), decimals=6)))
-
-            # Boost contrast to reveal banding (25x)
-            contrast_factor = 25.0
-            in_c = np.clip((in_np - 0.5) * contrast_factor + 0.5, 0, 1)
-            out_c = np.clip((out_np - 0.5) * contrast_factor + 0.5, 0, 1)
-            gt_c = np.clip((gt_np - 0.5) * contrast_factor + 0.5, 0, 1)
-
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-            axes[0, 0].imshow(np.clip(in_np, 0, 1), vmin=0, vmax=1)
-            axes[0, 0].set_title(f"Input (8-bit) - {in_unique:,} unique", fontsize=12, fontweight="bold")
-            axes[0, 1].imshow(np.clip(out_np, 0, 1), vmin=0, vmax=1)
-            axes[0, 1].set_title(f"Output (Dequant) - {out_unique:,} unique", fontsize=12, fontweight="bold")
-            axes[0, 2].imshow(np.clip(gt_np, 0, 1), vmin=0, vmax=1)
-            axes[0, 2].set_title(f"Reference (32-bit) - {gt_unique:,} unique", fontsize=12, fontweight="bold")
-
-            axes[1, 0].imshow(np.clip(in_c, 0, 1), vmin=0, vmax=1)
-            axes[1, 0].set_title(f"Input {contrast_factor}x Contrast", fontsize=11)
-            axes[1, 1].imshow(np.clip(out_c, 0, 1), vmin=0, vmax=1)
-            axes[1, 1].set_title(f"Output {contrast_factor}x Contrast", fontsize=11)
-            axes[1, 2].imshow(np.clip(gt_c, 0, 1), vmin=0, vmax=1)
-            axes[1, 2].set_title(f"Reference {contrast_factor}x Contrast", fontsize=11)
-
-            for ax in axes.ravel():
-                ax.axis("off")
-                # Keep titles visible even with axis off
-                ax.set_xticks([])
-                ax.set_yticks([])
-
-            plt.tight_layout()
-            
-            # Log to TensorBoard
-            if self.logger and hasattr(self.logger, "experiment"):
-                self.logger.experiment.add_figure("Visualizations", fig, global_step=self.global_step)
-            plt.close(fig)
+        """Log synthetic visualizations at the end of each epoch.
+        
+        Note: Actual visualization is handled by SyntheticInferenceVisualizerCallback
+        in train_dequantization_net.py. This method is a no-op.
+        """
+        pass
 
     def configure_optimizers(self) -> dict:
         """Configure optimizer with CosineAnnealingLR scheduler.

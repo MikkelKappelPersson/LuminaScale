@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -547,14 +548,7 @@ def main(cfg: DictConfig) -> None:
     
     # Run directory setup
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path(cfg.output_dir).resolve() / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    
-    print(f"[MAIN] Run directory: {run_dir}")
-    
-    # Log config
-    with open(run_dir / "config.yaml", "w") as f:
-        f.write(OmegaConf.to_yaml(cfg))
+    print(f"[MAIN] Run ID: {run_id}")
 
     # 1. Create WebDataset Loaders
     # On-the-fly patch generation: WebDataset stores 880 unique images once, then .repeat(patches_per_image)
@@ -599,6 +593,33 @@ def main(cfg: DictConfig) -> None:
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
     print(f"[MAIN] ✓ DequantizationTrainer created")
     
+    # Prepare hparams dict for logging at training end
+    config_name = cfg.get("config_name", "default")
+    
+    # Extract loss weights from config
+    loss_cfg = cfg.get("loss", {})
+    l1_weight = loss_cfg.get("l1_weight", 1.0)
+    l2_weight = loss_cfg.get("l2_weight", 0.0)  # Currently unused, but available for future use
+    charbonnier_weight = loss_cfg.get("charbonnier_weight", 0.05)
+    grad_match_weight = loss_cfg.get("grad_match_weight", 0.5)
+    
+    # Create dynamic loss_fn string showing the actual formula with weights
+    loss_fn_str = (
+        f"L1*{l1_weight} + L2*{l2_weight} + "
+        f"Charbonnier*{charbonnier_weight} + EdgeAware*{grad_match_weight}"
+    )
+
+    # Append a sanitized version of the loss formula to the TensorBoard/run directory name
+    run_dir_suffix = re.sub(r"[^A-Za-z0-9._-]+", "_", loss_fn_str).strip("_")
+    run_dir = Path(cfg.output_dir).resolve() / f"{run_id}_{run_dir_suffix}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[MAIN] Run directory: {run_dir}")
+
+    # Log config
+    with open(run_dir / "config.yaml", "w") as f:
+        f.write(OmegaConf.to_yaml(cfg))
+
     # 3. Setup Trainer
     print(f"[MAIN] Creating Lightning Trainer...")
     logger_tb = CustomTensorBoardLogger(
@@ -613,19 +634,6 @@ def main(cfg: DictConfig) -> None:
         every_n_epochs=cfg.get("checkpoint_freq", 1),
         save_top_k=-1,  # Save all checkpoints according to frequency
     )
-
-    # Prepare hparams dict for logging at training end
-    config_name = cfg.get("config_name", "default")
-    
-    # Extract loss weights from config
-    loss_cfg = cfg.get("loss", {})
-    l1_weight = loss_cfg.get("l1_weight", 1.0)
-    l2_weight = loss_cfg.get("l2_weight", 0.0)  # Currently unused, but available for future use
-    charbonnier_weight = loss_cfg.get("tv_weight", 0.05)  # Note: "tv_weight" key maps to charbonnier
-    grad_match_weight = loss_cfg.get("grad_match_weight", 0.5)
-    
-    # Create dynamic loss_fn string showing the actual formula with weights
-    loss_fn_str = f"L1*{l1_weight} + Charbonnier*{charbonnier_weight} + EdgeAware*{grad_match_weight}"
     
     # Create dynamic optimizer string showing the actual optimizer and learning rate
     optimizer_str = f"Adam(lr={cfg.learning_rate})"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=train_wds
+#SBATCH --job-name=train_dequantization_net
 #SBATCH --output=outputs/logs/train_%j.out
 #SBATCH --error=outputs/logs/train_%j.err
 #SBATCH --cpus-per-task=16

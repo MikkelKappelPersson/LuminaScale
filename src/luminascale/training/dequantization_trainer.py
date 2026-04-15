@@ -259,15 +259,15 @@ class DequantizationTrainer(L.LightningModule):
             # Total loss = reconstruction + global smoothing + edge awareness
             loss = l1_loss(y_hat, y) * self.l1_weight + l2_loss(y_hat, y) * self.l2_weight + charbonnier_loss(y_hat) * self.charbonnier_weight + edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight
             
-            # Debug: Check loss composition
+            # Log loss composition on first batch of each epoch
             if batch_idx == 0 and self.current_epoch % 1 == 0:
-                print(f"\n[Loss Composition] L1: {l1_loss(y_hat, y).item():.6f} | L2: {l2_loss(y_hat, y).item():.6f} | Charbonnier: {charbonnier_loss(y_hat).item():.6f} | EdgeAware: {edge_aware_smoothing_loss(y_hat, y).item():.6f}")
-                print(f"  [Structure] Charbonnier loss (smooth L1) on output: gentle on edges, strict on banding")
-                print(f"  [Reasoning] Hard L1 TV was destroying edges; Charbonnier preserves them")
-                print(f"  [Strategy] Softer smoothness + edge preservation + edge-aware constraints")
-
-            # Debug: Verify we're training against correct target (not just reproducing input)
-            if batch_idx == 0 and self.current_epoch % 1 == 0:  # Log every epoch, batch 0
+                l1_val = l1_loss(y_hat, y).item()
+                l2_val = l2_loss(y_hat, y).item()
+                char_val = charbonnier_loss(y_hat).item()
+                edge_val = edge_aware_smoothing_loss(y_hat, y).item()
+                print(f"[E{self.current_epoch}] Loss: L1={l1_val:.6f} L2={l2_val:.6f} Charbonnier={char_val:.6f} EdgeAware={edge_val:.6f} | Total={loss.item():.6f}")
+                
+                # Verify training target differs from input
                 x_mean, x_std = x.mean().item(), x.std().item()
                 y_mean, y_std = y.mean().item(), y.std().item()
                 yhat_mean, yhat_std = y_hat.mean().item(), y_hat.std().item()
@@ -275,28 +275,16 @@ class DequantizationTrainer(L.LightningModule):
                 yhat_minus_x = (y_hat - x).abs().mean().item()
                 yhat_minus_y = (y_hat - y).abs().mean().item()
                 
-                # Count unique values to see if input and target actually differ
-                x_flat = x.flatten().detach().cpu().numpy()
-                y_flat = y.flatten().detach().cpu().numpy()
-                yhat_flat = y_hat.flatten().detach().cpu().numpy()
-                x_unique = len(np.unique(np.round(x_flat, decimals=6)))
-                y_unique = len(np.unique(np.round(y_flat, decimals=6)))
-                yhat_unique = len(np.unique(np.round(yhat_flat, decimals=6)))
+                # Count unique values
+                x_unique = len(np.unique(np.round(x.flatten().detach().cpu().numpy(), decimals=6)))
+                y_unique = len(np.unique(np.round(y.flatten().detach().cpu().numpy(), decimals=6)))
+                yhat_unique = len(np.unique(np.round(y_hat.flatten().detach().cpu().numpy(), decimals=6)))
                 
-                print(f"\n[Epoch {self.current_epoch} Batch {batch_idx}] Loss Breakdown & Target Sanity:")
-                print(f"  L1 Loss:        {l1_loss(y_hat, y).item():.6f} (pixel-wise reconstruction)")
-                print(f"  L2 Loss:        {l2_loss(y_hat, y).item():.6f} (MSE: mean squared error)")
-                print(f"  Charbonnier:    {charbonnier_loss(y_hat).item():.6f} (smooth L1: edge-preserving smoothness)")
-                print(f"  EdgeAware:      {edge_aware_smoothing_loss(y_hat, y).item():.6f} (no artifacts in smooth regions)")
-                print(f"  Total:          {loss.item():.6f}")
-                print(f"  Input (x)  - mean: {x_mean:.5f}, std: {x_std:.5f}, unique values: {x_unique}")
-                print(f"  Target (y) - mean: {y_mean:.5f}, std: {y_std:.5f}, unique values: {y_unique}")
-                print(f"  Output (ŷ) - mean: {yhat_mean:.5f}, std: {yhat_std:.5f}, unique values: {yhat_unique}")
-                print(f"  |y - x|    - mean: {y_minus_x:.6f} (target diff from input)")
-                print(f"  |ŷ - x|    - mean: {yhat_minus_x:.6f} (output diff from input)")
-                print(f"  |ŷ - y|    - mean: {yhat_minus_y:.6f} (output error vs target)")
+                print(f"  Input:  μ={x_mean:.5f} σ={x_std:.5f} unique={x_unique}")
+                print(f"  Target: μ={y_mean:.5f} σ={y_std:.5f} unique={y_unique} | Δ from input={y_minus_x:.6f}")
+                print(f"  Output: μ={yhat_mean:.5f} σ={yhat_std:.5f} unique={yhat_unique} | Δ from target={yhat_minus_y:.6f}")
                 if y_minus_x < 0.001:
-                    print(f"  WARNING: Target is TOO SIMILAR to input! (diff={y_minus_x:.6f})")
+                    logger.warning(f"Target too similar to input (Δ={y_minus_x:.6f}). Check data pipeline!")
 
             self.log("loss_L1/train", l1_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_L2/train", l2_loss(y_hat, y), prog_bar=False, sync_dist=True)

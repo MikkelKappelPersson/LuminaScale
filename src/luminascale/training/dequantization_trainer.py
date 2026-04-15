@@ -34,6 +34,10 @@ class DequantizationTrainer(L.LightningModule):
     ) -> None:
         super().__init__()
         print(f"[DequantizationTrainer] Initializing LightningModule...")
+        
+        # Disable automatic optimization to use manual_backward() for detailed timing
+        self.automatic_optimization = False
+        
         self.model = model
         self.learning_rate = learning_rate
         self.vis_freq = vis_freq
@@ -61,6 +65,17 @@ class DequantizationTrainer(L.LightningModule):
         
         # Device: always CUDA for training
         self.device_cuda = torch.device("cuda")
+        
+        # Performance profiling per epoch
+        self.epoch_timings = {
+            "data_load_ms": [],
+            "forward_pass_ms": [],
+            "loss_compute_ms": [],
+            "backward_pass_ms": [],
+            "total_batch_ms": [],
+        }
+        self.epoch_gpu_memory = []  # Peak GPU memory per batch
+        self.current_epoch_start_time = None
         
         # Cache for on-the-fly patch generation with WebDataset
         # When using .repeat() in WebDataset, consecutive items are the same image
@@ -106,12 +121,15 @@ class DequantizationTrainer(L.LightningModule):
         # Just return the batch as-is for tensors; Lightning will move them
         return batch
 
-    def _process_batch(self, batch: tuple[list[bytes], list[dict]]) -> tuple[torch.Tensor, torch.Tensor]:
+    def _process_batch(self, batch: tuple[list[bytes], list[dict]]) -> tuple[torch.Tensor, torch.Tensor, dict | None]:
         """Convert raw WDS batch (bytes) into graded training pairs (LDR, HDR) on GPU.
         
         With WebDataset.repeat(patches_per_image), consecutive items are from the same image.
         Implementation: Load full image once, cache it decoded/graded, reuse for all 32 patches
         by generating random crops from the cached version. Avoids 31 redundant EXR decodes.
+        
+        Returns: (srgb_8u_batch, srgb_32f_batch, timing_dict)
+        timing_dict contains component breakdown for cache misses, or cache_hit_ms for cache hits
         """
         # Lazy initialization of pair_generator
         device = self._get_device()
@@ -141,24 +159,32 @@ class DequantizationTrainer(L.LightningModule):
         if is_repeated_image:
             # CACHE HIT: Generate random crops from already-decoded/graded full image
             # This avoids the expensive EXR decode + CDL + color transform pipeline
-            logger.debug(f"[PROCESS BATCH] Cache HIT for image '{current_image_id}' - reusing decoded image ({len(exr_bytes_list)} crops)")
-            srgb_8u_batch, srgb_32f_batch = self._generate_crops_from_cached_image(
+            t_crop_start = time.perf_counter()
+            srgb_8u_batch, srgb_32f_batch, crop_timing = self._generate_crops_from_cached_image(
                 num_crops=len(exr_bytes_list),
                 crop_size=self.crop_size,
                 device=current_device
             )
+            crop_time_ms = (time.perf_counter() - t_crop_start) * 1000
+            logger.debug(f"[PROCESS BATCH] Cache HIT for '{current_image_id}' - generated crops in {crop_time_ms:.1f}ms")
+            # Return cache hit timing breakdown
+            batch_timing_breakdown = crop_timing
         else:
             # CACHE MISS: Decode full image from EXR bytes, apply CDL, transform to sRGB, then cache
             logger.debug(f"[PROCESS BATCH] Cache MISS - decoding image '{current_image_id}'")
-            t_start = time.perf_counter()
+            t_decode_start = time.perf_counter()
+            
+            # Step 1: EXR DECODE
+            t_exr_start = time.perf_counter()
+            # (time is measured inside generate_batch_from_bytes, we'll extract it)
             
             # Decode full image(s) into graded sRGB pairs
-            srgb_8u_batch, srgb_32f_batch = self.pair_generator.generate_batch_from_bytes(
+            srgb_8u_batch, srgb_32f_batch, batch_timing_breakdown = self.pair_generator.generate_batch_from_bytes(
                 exr_bytes_list, 
                 crop_size=self.crop_size
             )
-            decode_ms = (time.perf_counter() - t_start) * 1000
-            logger.debug(f"[PROCESS BATCH] Decoded and generated {len(exr_bytes_list)} image pairs in {decode_ms:7.1f}ms")
+            total_decode_ms = (time.perf_counter() - t_decode_start) * 1000
+            logger.debug(f"[PROCESS BATCH] Decoded and graded {len(exr_bytes_list)} image(s) in {total_decode_ms:.1f}ms")
             
             # Cache the decoded/graded images for reuse on subsequent patches loops
             if current_image_id and len(exr_bytes_list) == 1:
@@ -167,9 +193,9 @@ class DequantizationTrainer(L.LightningModule):
                 self._last_image_id = current_image_id
                 logger.debug(f"[PROCESS BATCH] Cached image '{current_image_id}' for reuse")
         
-        return srgb_8u_batch, srgb_32f_batch
+        return srgb_8u_batch, srgb_32f_batch, batch_timing_breakdown
     
-    def _generate_crops_from_cached_image(self, num_crops: int, crop_size: int = 512, device: torch.device | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def _generate_crops_from_cached_image(self, num_crops: int, crop_size: int = 512, device: torch.device | None = None) -> tuple[torch.Tensor, torch.Tensor, dict]:
         """Generate random crops from cached decoded/graded full image.
         
         This is called when WebDataset.repeat() shows the same image again.
@@ -179,7 +205,13 @@ class DequantizationTrainer(L.LightningModule):
             num_crops: Number of random crops to generate
             crop_size: Size of each crop (default 512)
             device: Device to create random tensor on (defaults to model device)
+            
+        Returns:
+            (srgb_8u_batch, srgb_32f_batch, timing_breakdown_dict)
         """
+        t0 = time.perf_counter()
+        timing = {}
+        
         if device is None:
             device = self._get_device()
         if self._cached_srgb_8u is None or self._cached_srgb_32f is None:
@@ -190,6 +222,7 @@ class DequantizationTrainer(L.LightningModule):
         cached_32f = self._cached_srgb_32f
         
         # Extract single full image if batched
+        t_extract = time.perf_counter()
         if cached_8u.ndim == 4:
             full_8u = cached_8u[0]  # [3, H, W]
             full_32f = cached_32f[0]
@@ -200,10 +233,12 @@ class DequantizationTrainer(L.LightningModule):
         # Convert from [3, H, W] to [H, W, 3] for cropping
         full_8u = full_8u.permute(1, 2, 0)  # [3, H, W] -> [H, W, 3]
         full_32f = full_32f.permute(1, 2, 0)
+        timing["extract_and_permute_ms"] = (time.perf_counter() - t_extract) * 1000
         
         H, W = full_8u.shape[0], full_8u.shape[1]
         
         # Generate num_crops random crops from the full image
+        t_crop_gen = time.perf_counter()
         srgb_8u_crops = []
         srgb_32f_crops = []
         
@@ -222,42 +257,87 @@ class DequantizationTrainer(L.LightningModule):
             srgb_8u_crops.append(crop_8u)
             srgb_32f_crops.append(crop_32f)
         
+        timing["crop_generation_ms"] = (time.perf_counter() - t_crop_gen) * 1000
+        
         # Stack into batch [num_crops, H, W, 3] then convert to [num_crops, 3, H, W]
+        t_stack = time.perf_counter()
         srgb_8u_batch = torch.stack(srgb_8u_crops).permute(0, 3, 1, 2)  # [N, H, W, 3] -> [N, 3, H, W]
         srgb_32f_batch = torch.stack(srgb_32f_crops).permute(0, 3, 1, 2)
+        timing["stacking_ms"] = (time.perf_counter() - t_stack) * 1000
         
-        return srgb_8u_batch, srgb_32f_batch
+        timing["total_cache_hit_ms"] = (time.perf_counter() - t0) * 1000
+        
+        return srgb_8u_batch, srgb_32f_batch, timing
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
 
     def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         try:
+            # Start epoch timing on first batch
+            if batch_idx == 0:
+                self.current_epoch_start_time = time.perf_counter()
+                self.epoch_timings = {"data_load_ms": [], "forward_pass_ms": [], "loss_compute_ms": [], "backward_pass_ms": [], "total_batch_ms": [], "component_timings": [], "dataloader_fetch_ms": [], "process_batch_ms": []}
+                self.epoch_gpu_memory = []
+            
+            t_batch_start = time.perf_counter()
             self.last_batch_gpu_ms = None
+            batch_timing_breakdown = None  # For component-level timing data
+            
+            # === DATA LOADING ===
+            t_data_start = time.perf_counter()
+            t_process_batch_start = time.perf_counter()
             if isinstance(batch, (list, tuple)):
                 if len(batch) >= 2:
                     if isinstance(batch[0], torch.Tensor) and isinstance(batch[1], torch.Tensor):
                         x, y = batch
                     # WebDataset case: batch is (exr_bytes_list, metadata_list)
                     elif isinstance(batch[0], list) and len(batch[0]) > 0 and isinstance(batch[0][0], bytes):
-                        t_start = time.perf_counter()
-                        x, y = self._process_batch(batch)
-                        self.last_batch_gpu_ms = (time.perf_counter()-t_start)*1000
+                        t_process_batch_start = time.perf_counter()
+                        x, y, batch_timing_breakdown = self._process_batch(batch)
+                        process_batch_ms = (time.perf_counter() - t_process_batch_start) * 1000
+                        self.epoch_timings["process_batch_ms"].append(process_batch_ms)
                     else:
                         x, y = batch
                 else:
                     raise ValueError(f"Batch tuple has {len(batch)} elements, expected 2")
             else:
                 raise ValueError(f"Batch type {type(batch)} is not tuple/list")
+            data_load_ms = (time.perf_counter() - t_data_start) * 1000
             
+            # === FORWARD PASS ===
+            t_forward_start = time.perf_counter()
             y_hat = self.model(x)
-
-            # === Revised two-term loss for smooth dequantization ===
-            # Problem: Strict gradient matching forced conflicting constraints → worse outputs (3,845 unique)
-            # Solution: Use structural smoothing WITHOUT forcing exact gradient matching
+            forward_ms = (time.perf_counter() - t_forward_start) * 1000
             
-            # Total loss = reconstruction + global smoothing + edge awareness
+            # === LOSS COMPUTATION ===
+            t_loss_start = time.perf_counter()
             loss = l1_loss(y_hat, y) * self.l1_weight + l2_loss(y_hat, y) * self.l2_weight + charbonnier_loss(y_hat) * self.charbonnier_weight + edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight
+            loss_ms = (time.perf_counter() - t_loss_start) * 1000
+            
+            # === BACKWARD PASS & OPTIMIZATION ===
+            t_backward_start = time.perf_counter()
+            self.manual_backward(loss)
+            self.optimizers().step()
+            self.optimizers().zero_grad()
+            backward_ms = (time.perf_counter() - t_backward_start) * 1000
+            
+            total_batch_ms = (time.perf_counter() - t_batch_start) * 1000
+            
+            # Track metrics per batch
+            self.epoch_timings["data_load_ms"].append(data_load_ms)
+            self.epoch_timings["forward_pass_ms"].append(forward_ms)
+            self.epoch_timings["loss_compute_ms"].append(loss_ms)
+            self.epoch_timings["backward_pass_ms"].append(backward_ms)
+            self.epoch_timings["total_batch_ms"].append(total_batch_ms)
+            
+            # Store component timing breakdown if available
+            if batch_timing_breakdown is not None:
+                self.epoch_timings["component_timings"].append(batch_timing_breakdown)
+            
+            # GPU memory tracking
+            if torch.cuda.is_available():
+                self.epoch_gpu_memory.append(torch.cuda.memory_allocated() / 1e9)  # GB
             
             # Log loss composition on first batch of each epoch
             if batch_idx == 0 and self.current_epoch % 1 == 0:
@@ -303,6 +383,7 @@ class DequantizationTrainer(L.LightningModule):
             
             # Store metrics for progress bar display
             self.last_batch_loss = loss.item()
+            self.last_batch_gpu_ms = total_batch_ms
             return loss
             
         except Exception as e:
@@ -314,12 +395,114 @@ class DequantizationTrainer(L.LightningModule):
             raise
 
     def on_train_epoch_end(self) -> None:
-        """Log synthetic visualizations at the end of each epoch.
+        """Print epoch performance summary with timing breakdown."""
+        if not self.epoch_timings["total_batch_ms"]:
+            return  # No batches processed
         
-        Note: Actual visualization is handled by SyntheticInferenceVisualizerCallback
-        in train_dequantization_net.py. This method is a no-op.
-        """
-        pass
+        # Calculate statistics
+        data_load_avg = np.mean(self.epoch_timings["data_load_ms"])
+        forward_avg = np.mean(self.epoch_timings["forward_pass_ms"])
+        loss_avg = np.mean(self.epoch_timings["loss_compute_ms"])
+        backward_avg = np.mean(self.epoch_timings["backward_pass_ms"])
+        total_avg = np.mean(self.epoch_timings["total_batch_ms"])
+        total_epoch = (time.perf_counter() - self.current_epoch_start_time) if self.current_epoch_start_time else 0
+        
+        gpu_memory_max = max(self.epoch_gpu_memory) if self.epoch_gpu_memory else 0
+        gpu_memory_avg = np.mean(self.epoch_gpu_memory) if self.epoch_gpu_memory else 0
+        
+        num_batches = len(self.epoch_timings["total_batch_ms"])
+        throughput = num_batches / total_epoch if total_epoch > 0 else 0
+        
+        # Print formatted table
+        print(f"\n{'='*90}")
+        print(f"EPOCH {self.current_epoch} - Performance Summary")
+        print(f"{'='*90}")
+        print(f"{'Metric':<25} {'Time (ms)':<15} {'% of Batch':<15}")
+        print(f"{'-'*90}")
+        print(f"{'Data Loading':<25} {data_load_avg:>13.2f}  {(data_load_avg/total_avg)*100:>13.1f}%")
+        
+        # Show DataLoader fetch vs process_batch breakdown at top level
+        if self.epoch_timings["process_batch_ms"]:
+            process_batch_avg = np.mean(self.epoch_timings["process_batch_ms"])
+            dataloader_fetch_ms = data_load_avg - process_batch_avg
+            print(f"  {'└─ Data Loading Breakdown:':<25}")
+            print(f"    {'├─ DataLoader Fetch (Workers):':<25} {dataloader_fetch_ms:>13.2f}  {(dataloader_fetch_ms/data_load_avg)*100:>13.1f}%")
+            print(f"    {'├─ Process Batch (_process_batch):':<25} {process_batch_avg:>13.2f}  {(process_batch_avg/data_load_avg)*100:>13.1f}%")
+        
+        # Display component breakdown if available
+        if self.epoch_timings["component_timings"]:
+            components = {}
+            cache_hit_times = {}
+            for comp_timing in self.epoch_timings["component_timings"]:
+                if comp_timing:
+                    if "total_cache_hit_ms" in comp_timing:
+                        # This is a cache hit breakdown
+                        for key, value in comp_timing.items():
+                            if key not in cache_hit_times:
+                                cache_hit_times[key] = []
+                            cache_hit_times[key].append(value)
+                    else:
+                        # This is a cache miss breakdown
+                        for key, value in comp_timing.items():
+                            if key not in components:
+                                components[key] = []
+                            components[key].append(value)
+            
+            # Calculate averages for each component
+            print(f"      {'└─ Component Details (inside _process_batch):':<25}")
+            
+            # Show cache hit breakdown if available
+            if cache_hit_times and "total_cache_hit_ms" in cache_hit_times:
+                cache_hit_avg = np.mean(cache_hit_times["total_cache_hit_ms"])
+                cache_hit_pct = (cache_hit_avg / data_load_avg) * 100
+                print(f"        {'├─ Cache Hits (crop gen):':<22} {cache_hit_avg:>13.2f}  {cache_hit_pct:>13.1f}%")
+                
+                # Show cache hit sub-components
+                for sub_key in ["extract_and_permute_ms", "crop_generation_ms", "stacking_ms"]:
+                    if sub_key in cache_hit_times:
+                        sub_avg = np.mean(cache_hit_times[sub_key])
+                        sub_pct = (sub_avg / cache_hit_avg) * 100 if cache_hit_avg > 0 else 0
+                        sub_label = sub_key.replace("_ms", "").replace("_", " ").title()
+                        print(f"      {'├─ ' + sub_label:<20} {sub_avg:>13.2f}  {sub_pct:>13.1f}% (of cache)")
+            
+            # Show measured components (from cache misses)
+            if components:
+                # Calculate total of measured components
+                comp_totals = {}
+                for comp_name in ["oiio_decode_ms", "gpu_transfer_ms", "cdl_ms", "aces_transform_ms", "quantization_ms"]:
+                    if comp_name in components and components[comp_name]:
+                        comp_totals[comp_name] = np.mean(components[comp_name])
+                
+                total_measured = sum(comp_totals.values()) if comp_totals else 0
+                
+                for comp_name in ["oiio_decode_ms", "gpu_transfer_ms", "cdl_ms", "aces_transform_ms", "quantization_ms"]:
+                    if comp_name in comp_totals:
+                        comp_avg = comp_totals[comp_name]
+                        comp_pct = (comp_avg / data_load_avg) * 100 if data_load_avg > 0 else 0
+                        display_name = comp_name.replace("_ms", "").replace("_", " ").title()
+                        print(f"        {'├─ ' + display_name:<20} {comp_avg:>13.2f}  {comp_pct:>13.1f}%")
+                
+                # Show batching overhead (tensor ops, format conversions, etc)
+                if "batching_overhead_ms" in components and components["batching_overhead_ms"]:
+                    overhead_avg = np.mean(components["batching_overhead_ms"])
+                    overhead_pct = (overhead_avg / data_load_avg) * 100 if data_load_avg > 0 else 0
+                    overhead_label = "├─ Batching Overhead (tensor ops, etc)"
+                    print(f"        {overhead_label:<40} {overhead_avg:>13.2f}  {overhead_pct:>13.1f}%")
+        
+        print(f"{'Forward Pass':<25} {forward_avg:>13.2f}  {(forward_avg/total_avg)*100:>13.1f}%")
+        print(f"{'Loss Computation':<25} {loss_avg:>13.2f}  {(loss_avg/total_avg)*100:>13.1f}%")
+        print(f"{'Backward Pass + Optim':<25} {backward_avg:>13.2f}  {(backward_avg/total_avg)*100:>13.1f}%")
+        print(f"{'-'*90}")
+        print(f"{'Total Batch Time':<25} {total_avg:>13.2f}  {'100.0':>13}%")
+        print(f"{'='*90}")
+        print(f"{'Dataset':<25} {'Value':<15}")
+        print(f"{'-'*90}")
+        print(f"{'Total Epoch Time':<25} {total_epoch:>13.2f}s")
+        print(f"{'Batches Processed':<25} {num_batches:>13}")
+        print(f"{'Throughput (batches/s)':<25} {throughput:>13.2f}")
+        print(f"{'GPU Memory (Current)':<25} {gpu_memory_avg:>13.2f} GB")
+        print(f"{'GPU Memory (Peak)':<25} {gpu_memory_max:>13.2f} GB")
+        print(f"{'='*90}\n")
 
     def configure_optimizers(self) -> dict:
         """Configure optimizer with CosineAnnealingLR scheduler.

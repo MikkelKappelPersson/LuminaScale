@@ -187,7 +187,7 @@ class LuminaScaleWebDataset:
         
         
         # Build the WebDataset pipeline
-        dataset = wds.WebDataset(self.shard_path, resampled=False)
+        dataset = wds.WebDataset(self.shard_path, resampled=False, empty_check=False)
         
         # Split by worker (instead of .shardselection method)
         dataset = dataset.select(wds.shardlists.split_by_worker)

@@ -5,12 +5,13 @@ config_name: dev
 
 # Data paths
 shard_path: "dataset/temp/shards/val"
-epochs: 2
+epochs: 4
 
 # Optimize throughput without multiple patches strategy
 patches_per_image: 1    # Process each image once
 batch_size: 16          # Larger batches for better GPU utilization (3-5x speedup)
 num_workers: 8          # More workers for parallel data loading (2x speedup)
+prefetch_size: 2        # Async prefetch buffer: queue 2 batches for shard I/O overlap
 
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:

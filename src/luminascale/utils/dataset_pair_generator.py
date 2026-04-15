@@ -91,35 +91,50 @@ class DatasetPairGenerator:
                     logger.debug(f"OIIO failed to open EXR for sample {idx}")
                     continue
                 
-                pixels = buf_input.read_image("float")
+                # Get image spec for ROI calculation (fast, no decode yet)
+                spec = buf_input.spec()
+                h, w, c = spec.height, spec.width, spec.nchannels
+                
+                # Calculate crop region to minimize OIIO decode overhead
+                # Instead of reading full image and cropping, read only the ROI
+                if crop_size > 0 and (h > crop_size or w > crop_size):
+                    top = max(0, (h - crop_size) // 2)
+                    left = max(0, (w - crop_size) // 2)
+                    # ROI decode: only read the crop region from disk
+                    # This avoids decoding and loading full image data
+                    try:
+                        # OIIO read_region: (xbegin, xend, ybegin, yend)
+                        pixels = buf_input.read_region("float", left, left + crop_size, top, top + crop_size)
+                        if pixels is not None:
+                            # Returned shape is (crop_size, crop_size, nchannels)
+                            pixels = pixels.reshape((crop_size, crop_size, c))
+                    except Exception as e:
+                        logger.debug(f"OIIO ROI read failed, falling back to full read: {e}")
+                        # Fallback: read full image if ROI fails
+                        pixels = buf_input.read_image("float")
+                        if pixels is not None and pixels.ndim == 1:
+                            pixels = pixels.reshape((h, w, c))
+                        elif pixels is not None and pixels.shape[0] == 3:
+                            pixels = pixels.transpose(1, 2, 0)
+                        # Crop in memory
+                        if pixels is not None:
+                            pixels = pixels[top:top+crop_size, left:left+crop_size, :]
+                else:
+                    # Image smaller than crop size or no crop needed - read full
+                    pixels = buf_input.read_image("float")
+                    if pixels is not None and pixels.ndim == 1:
+                        pixels = pixels.reshape((h, w, c))
+                    elif pixels is not None and pixels.shape[0] == 3:
+                        pixels = pixels.transpose(1, 2, 0)
+                
                 buf_input.close()
                 
                 t_decode = time.perf_counter()
                 decode_times.append((t_decode - t_sample) * 1000)
                 
                 if pixels is None or len(pixels) == 0:
-                    logger.debug(f"OIIO read_image returned None/empty for sample {idx}")
+                    logger.debug(f"OIIO read returned None/empty for sample {idx}")
                     continue
-                
-                # Handle pixel format
-                if pixels.ndim == 1:
-                    # Need to reshape - get dimensions from ImageInput again
-                    # (OIIO already closed, so use a quick re-open with minimal overhead)
-                    buf_input = oiio.ImageInput.open(temp_file)
-                    spec = buf_input.spec()
-                    h, w, c = spec.height, spec.width, spec.nchannels
-                    buf_input.close()
-                    pixels = pixels.reshape((h, w, c))
-                elif pixels.ndim == 3 and pixels.shape[2] != 3:
-                    if pixels.shape[0] == 3:
-                        pixels = pixels.transpose(1, 2, 0)
-                
-                # Crop
-                h, w = pixels.shape[0], pixels.shape[1]
-                if crop_size > 0 and (h > crop_size or w > crop_size):
-                    top = max(0, (h - crop_size) // 2)
-                    left = max(0, (w - crop_size) // 2)
-                    pixels = pixels[top:top+crop_size, left:left+crop_size, :]
                 
                 # Convert to tensor
                 aces_tensor = torch.from_numpy(pixels.copy()).to(self.device)

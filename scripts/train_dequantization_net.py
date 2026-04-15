@@ -578,6 +578,11 @@ def main(cfg: DictConfig) -> None:
     train_loader = train_dataset.get_loader(num_workers=cfg.get("num_workers", 4))
     print(f"[MAIN] ✓ WebLoader created")
     
+    # DISABLED: Async prefetching causes gradient issues with Lightning's training loop
+    # prefetch_size = cfg.get("prefetch_size", 2)
+    # train_loader = AsyncPrefetchLoader(train_loader, prefetch_size=prefetch_size)
+    # print(f"[MAIN] ✓ Async prefetch loader enabled (prefetch_size={prefetch_size})")
+    
     # 2. Setup Lightning Module
     print(f"[MAIN] Creating model...")
     model = create_dequantization_net(in_channels=3, base_channels=cfg.model.base_channels)  # type: ignore

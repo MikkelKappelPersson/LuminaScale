@@ -4,7 +4,7 @@
 #SBATCH --error=outputs/logs/train_%j.err
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --gres=gpu:1,gpu_mem:24G
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --time=48:00:00
 #SBATCH --partition=prioritized
 #SBATCH --account=aau

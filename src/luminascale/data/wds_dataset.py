@@ -177,11 +177,11 @@ class LuminaScaleWebDataset:
                         split_col = table['split'].to_pylist()
                         filtered_indices = [i for i, s in enumerate(split_col) if s == split]
                         self.total_samples = len(filtered_indices)
-                        logger.info(f"Filtered metadata: {self.total_samples} samples in '{split}' split from {metadata_parquet}")
+                        logger.debug(f"Filtered metadata: {self.total_samples} samples in '{split}' split from {metadata_parquet}")
                     else:
                         # No split column, use all samples
                         self.total_samples = len(table)
-                        logger.info(f"Loaded metadata: {self.total_samples} total samples from {metadata_parquet} (no split column found)")
+                        logger.debug(f"Loaded metadata: {self.total_samples} total samples from {metadata_parquet} (no split column found)")
                 except Exception as e:
                     logger.warning(f"Failed to read metadata from {metadata_parquet}: {e}")
         
@@ -203,7 +203,7 @@ class LuminaScaleWebDataset:
         # Caching in _process_batch() will reuse decoded images across repeats
         if self.patches_per_image > 1:
             dataset = dataset.repeat(self.patches_per_image)
-            logger.info(f"Configured dataset to repeat {self.patches_per_image} times for on-the-fly patch generation")
+            logger.debug(f"Configured dataset to repeat {self.patches_per_image} times for on-the-fly patch generation")
             
         # Map our custom decoder
         dataset = dataset.map(decode_exr_and_json)
@@ -215,11 +215,11 @@ class LuminaScaleWebDataset:
         dataset = dataset.map(collate_wds_batch)
         
         self.dataset = dataset
-        logger.info(f"Initialized WebDataset with {len(self.shard_path) if isinstance(self.shard_path, list) else 'multiple'} shards")
+        logger.debug(f"Initialized WebDataset with {len(self.shard_path) if isinstance(self.shard_path, list) else 'multiple'} shards")
 
     def get_loader(self, num_workers: int = 4):
         """Returns a stable WebLoader (Dataloader equivalent)."""
-        logger.info(f"Creating WebLoader with num_workers={num_workers}")
+        logger.debug(f"Creating WebLoader with num_workers={num_workers}")
         
         loader = wds.WebLoader(
             self.dataset, 
@@ -241,7 +241,7 @@ class LuminaScaleWebDataset:
             # So total_samples_with_patches = parquet_unique_images × patches_per_image
             total_samples_with_patches = self.total_samples * self.patches_per_image
             estimated_batches = total_samples_with_patches // self.batch_size
-            logger.info(
+            logger.debug(
                 f"Estimated total batches: {estimated_batches} "
                 f"({self.total_samples} unique images × {self.patches_per_image} patches_per_image / {self.batch_size} batch_size) "
                 f"[shards contain pre-baked patches]"

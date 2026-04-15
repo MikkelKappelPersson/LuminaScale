@@ -107,7 +107,7 @@ class LUTInterpolator(nn.Module):
         # Register as buffer so it moves to/from device with model
         self.register_buffer("lut_3d", lut_3d.float())
         self.lut_size = lut_3d.shape[0]
-        logger.info(f"LUTInterpolator initialized with {self.lut_size}³ LUT")
+        logger.debug(f"LUTInterpolator initialized with {self.lut_size}³ LUT")
     
     def lookup_nearest(self, rgb: torch.Tensor) -> torch.Tensor:
         """Nearest-neighbor 3D LUT lookup (fast, lower accuracy).
@@ -214,9 +214,9 @@ def _load_cached_lut(cache_path: Path) -> dict[str, torch.Tensor] | None:
         return None
     
     try:
-        logger.info(f"Loading cached LUT from {cache_path}")
+        logger.debug(f"Loading cached LUT from {cache_path}")
         cached = torch.load(cache_path, weights_only=False)
-        logger.info(f"✓ Loaded cached 3D LUT: {cached['lut_3d'].shape}")
+        logger.debug(f"✓ Loaded cached 3D LUT: {cached['lut_3d'].shape}")
         return cached
     except Exception as e:
         logger.warning(f"Failed to load cached LUT: {e}. Will regenerate.")
@@ -232,7 +232,7 @@ def _save_lut_cache(lut_data: dict[str, torch.Tensor], cache_path: Path) -> None
     """
     try:
         torch.save(lut_data, cache_path)
-        logger.info(f"Cached 3D LUT to {cache_path}")
+        logger.debug(f"Cached 3D LUT to {cache_path}")
     except Exception as e:
         logger.warning(f"Failed to cache LUT: {e}. Continuing without cache.")
 
@@ -288,7 +288,7 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
     if cached_lut is not None:
         return cached_lut
     
-    logger.info(f"Loading OCIO config from {config_path}")
+    logger.debug(f"Loading OCIO config from {config_path}")
     
     # Try to set search path if method exists (for shader/file resolution)
     try:
@@ -309,8 +309,8 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
     # Create CPU processor for sampling
     cpu_processor = processor.getDefaultCPUProcessor()
     
-    logger.info("Evaluating OCIO processor to create 3D LUT via CPU sampling...")
-    logger.info("(This may take 1-2 minutes on first run, then will be cached)")
+    logger.debug("Evaluating OCIO processor to create 3D LUT via CPU sampling...")
+    logger.debug("(This may take 1-2 minutes on first run, then will be cached)")
     
     lut_size = 256
     lut_3d = np.zeros((lut_size, lut_size, lut_size, 3), dtype=np.float32)
@@ -324,9 +324,9 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
             if i > 0:
                 eta_total = elapsed * lut_size / i
                 eta_remaining = eta_total - elapsed
-                logger.info(f"  Sampling LUT: {i}/{lut_size} ({elapsed:.1f}s elapsed, ~{eta_remaining:.1f}s remaining)")
+                logger.debug(f"  Sampling LUT: {i}/{lut_size} ({elapsed:.1f}s elapsed, ~{eta_remaining:.1f}s remaining)")
             else:
-                logger.info(f"  Sampling LUT: {i}/{lut_size}")
+                logger.debug(f"  Sampling LUT: {i}/{lut_size}")
         for j in range(lut_size):
             for k in range(lut_size):
                 # Normalize coordinates to [0, 1] range
@@ -346,7 +346,7 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
                 lut_3d[i, j, k] = test_img[0, 0, :3]
     
     elapsed = time.perf_counter() - t0
-    logger.info(f"Created 3D LUT in {elapsed:.1f}s: {lut_3d.shape}")
+    logger.debug(f"Created 3D LUT in {elapsed:.1f}s: {lut_3d.shape}")
     
     lut_data = {
         "lut_3d": torch.from_numpy(lut_3d).float(),
@@ -408,7 +408,7 @@ class ACESColorTransformer(nn.Module):
         self.device = torch.device(device)
         self.use_lut = use_lut
         
-        logger.info(f"Initializing ACESColorTransformer on {self.device}")
+        logger.debug(f"Initializing ACESColorTransformer on {self.device}")
         
         # Load transformation matrices to device
         matrices = ACESMatrices.to_device(self.device)
@@ -427,7 +427,7 @@ class ACESColorTransformer(nn.Module):
         else:
             self.lut_interpolator = None
         
-        logger.info(f"ACESColorTransformer ready. LUT: {self.use_lut}, Device: {self.device}")
+        logger.debug(f"ACESColorTransformer ready. LUT: {self.use_lut}, Device: {self.device}")
     
     def _apply_matrix(
         self,

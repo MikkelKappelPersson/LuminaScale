@@ -43,7 +43,7 @@ class GPUCDLProcessor:
             device: torch device (defaults to CUDA if available).
         """
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"GPU CDL Processor initialized on {self.device}")
+        logger.debug(f"GPU CDL Processor initialized on {self.device}")
 
     def apply_cdl_gpu(
         self,
@@ -221,4 +221,4 @@ class GPUCDLProcessor:
         """Clear GPU cache."""
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
-            logger.info("GPU cache cleared")
+            logger.debug("GPU cache cleared")

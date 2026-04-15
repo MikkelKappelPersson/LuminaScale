@@ -31,6 +31,10 @@ src_path = str(project_root / "src")
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
+# Configure matplotlib to use non-interactive backend (suppresses Fontconfig warnings in headless envs)
+import matplotlib
+matplotlib.use('Agg')
+
 import hydra
 import torch
 import warnings
@@ -51,10 +55,11 @@ from luminascale.training.logger import CustomTensorBoardLogger
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 from luminascale.utils.io import read_exr
 
-# Enable DEBUG to see per-image timing breakdowns from dataset loading
+# Use INFO level to suppress verbose DEBUG/INFO messages
+# Set to DEBUG to see per-image timing breakdowns from dataset loading
 # Use minimal format and stderr to prevent mixing with stdout progress bar
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(message)s",
     stream=sys.stderr,
     force=True
@@ -94,9 +99,9 @@ class SyntheticInferenceVisualizerCallback(Callback):
     
     def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Run inference at the start of training."""
-        logger.info("Running synthetic inference visualization at training start...")
+        logger.debug("Running synthetic inference visualization at training start...")
         self._log_synthetic_inference(trainer, pl_module, step=0, epoch_label="start")
-        logger.info("Running real image inference visualization at training start...")
+        logger.debug("Running real image inference visualization at training start...")
         self._log_real_image_inference(trainer, pl_module, step=0, epoch_label="start")
     
     def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
@@ -144,7 +149,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
             # Cast model as nn.Module to access state_dict
             model = cast(nn.Module, pl_module.model)
             torch.save(model.state_dict(), temp_checkpoint)
-            logger.info(f"Saved temporary checkpoint to {temp_checkpoint}")
+            logger.debug(f"Saved temporary checkpoint to {temp_checkpoint}")
             
             # Prepare output paths
             output_exr = Path(trainer.log_dir) / f"synthetic_{epoch_label}.exr"
@@ -170,7 +175,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 "--apply-contrast-to-output",
             ]
             
-            logger.info(f"Running inference: {' '.join(cmd)}")
+            logger.debug(f"Running inference: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
             
             if result.returncode != 0:
@@ -179,13 +184,13 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 logger.error(f"STDERR: {result.stderr}")
                 return
             
-            logger.info(f"Inference stdout: {result.stdout}")
+            logger.debug(f"Inference stdout: {result.stdout}")
             
             tb = trainer.logger.experiment  # type: ignore
             
             # Log the comparison PNG directly from run_inference.py (3x3 grid with all analysis)
             if output_png.exists():
-                logger.info(f"Logging comparison grid from {output_png}")
+                logger.debug(f"Logging comparison grid from {output_png}")
                 try:
                     from PIL import Image as PILImage
                     import matplotlib.pyplot as plt
@@ -199,7 +204,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
                     tb.add_figure("visualization/synthetic", fig, global_step=step)
                     tb.flush()
                     plt.close(fig)
-                    logger.info(f"✓ Logged visualization/synthetic")
+                    logger.debug(f"✓ Logged visualization/synthetic")
                 except Exception as e:
                     logger.error(f"Failed to log comparison PNG: {e}", exc_info=True)
             else:
@@ -207,7 +212,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
             
             # Read and log the EXR output as a high-bit image
             if output_exr.exists():
-                logger.info(f"Output EXR found at {output_exr}")
+                logger.debug(f"Output EXR found at {output_exr}")
                 output_np = read_exr(output_exr)
                 output_tensor = torch.from_numpy(output_np).float()
                 
@@ -215,7 +220,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 output_clipped = torch.clamp(output_tensor, 0, 1)
                 tb.add_image(f"inference/synthetic", output_clipped, global_step=step)
                 tb.flush()
-                logger.info(f"✓ Logged inference/synthetic")
+                logger.debug(f"✓ Logged inference/synthetic")
             else:
                 logger.error(f"Output EXR not found: {output_exr}")
                 logger.error(f"Contents of log_dir: {list(Path(trainer.log_dir).iterdir())}")
@@ -224,9 +229,9 @@ class SyntheticInferenceVisualizerCallback(Callback):
             # Cleanup only temporary checkpoint (keep EXR and PNG outputs)
             if temp_checkpoint and temp_checkpoint.exists():
                 temp_checkpoint.unlink()
-            logger.info(f"✓ Synthetic inference visualization logged: {epoch_label}")
-            logger.info(f"  - Comparison grid (PNG): {output_png}")
-            logger.info(f"  - Model output (EXR): {output_exr}")
+            logger.debug(f"✓ Synthetic inference visualization logged: {epoch_label}")
+            logger.debug(f"  - Comparison grid (PNG): {output_png}")
+            logger.debug(f"  - Model output (EXR): {output_exr}")
         
         except Exception as e:
             logger.error(f"Error during synthetic inference visualization: {e}", exc_info=True)
@@ -291,7 +296,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 "--contrast-strength=2.0",
             ]
             
-            logger.info(f"Running real image inference: {' '.join(cmd)}")
+            logger.debug(f"Running real image inference: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
             
             if result.returncode != 0:
@@ -299,13 +304,13 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 logger.error(f"STDERR: {result.stderr}")
                 return
             
-            logger.info(f"Real image inference stdout: {result.stdout}")
+            logger.debug(f"Real image inference stdout: {result.stdout}")
             
             tb = trainer.logger.experiment  # type: ignore
             
             # Log the comparison PNG if it was generated
             if output_png.exists():
-                logger.info(f"Logging real image comparison from {output_png}")
+                logger.debug(f"Logging real image comparison from {output_png}")
                 try:
                     from PIL import Image as PILImage
                     import matplotlib.pyplot as plt
@@ -319,7 +324,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
                     tb.add_figure("visualization/test", fig, global_step=step)
                     tb.flush()
                     plt.close(fig)
-                    logger.info(f"✓ Logged visualization/test")
+                    logger.debug(f"✓ Logged visualization/test")
                 except Exception as e:
                     logger.error(f"Failed to log real image comparison PNG: {e}", exc_info=True)
             else:
@@ -327,14 +332,14 @@ class SyntheticInferenceVisualizerCallback(Callback):
             
             # Read and log the EXR output
             if output_exr.exists():
-                logger.info(f"Real image output EXR found at {output_exr}")
+                logger.debug(f"Real image output EXR found at {output_exr}")
                 output_np = read_exr(output_exr)
                 output_tensor = torch.from_numpy(output_np).float()
                 
                 output_clipped = torch.clamp(output_tensor, 0, 1)
                 tb.add_image(f"inference/test", output_clipped, global_step=step)
                 tb.flush()
-                logger.info(f"✓ Logged inference/test")
+                logger.debug(f"✓ Logged inference/test")
             else:
                 logger.warning(f"Real image output EXR not found: {output_exr}")
                 return
@@ -342,10 +347,10 @@ class SyntheticInferenceVisualizerCallback(Callback):
             # Cleanup only temporary checkpoint
             if temp_checkpoint and temp_checkpoint.exists():
                 temp_checkpoint.unlink()
-            logger.info(f"✓ Real image inference visualization logged: {epoch_label}")
-            logger.info(f"  - Input: {test_image}")
-            logger.info(f"  - Comparison grid (PNG): {output_png}")
-            logger.info(f"  - Model output (EXR): {output_exr}")
+            logger.debug(f"✓ Real image inference visualization logged: {epoch_label}")
+            logger.debug(f"  - Input: {test_image}")
+            logger.debug(f"  - Comparison grid (PNG): {output_png}")
+            logger.debug(f"  - Model output (EXR): {output_exr}")
         
         except Exception as e:
             logger.error(f"Error during real image inference visualization: {e}", exc_info=True)
@@ -405,9 +410,9 @@ class HparamsMetricsCallback(Callback):
             # Log hparams with empty metrics dict initially
             if hasattr(trainer.logger, "log_hyperparams_metrics"):
                 trainer.logger.log_hyperparams_metrics(self.hparams_dict, {})
-                logger.info(f"✓ Hyperparameters logged at fit_start:")
+                logger.debug(f"✓ Hyperparameters logged at fit_start:")
                 for k, v in self.hparams_dict.items():
-                    logger.info(f"    {k}: {v}")
+                    logger.debug(f"    {k}: {v}")
             else:
                 logger.warning("Logger does not have log_hyperparams_metrics method")
         except Exception as e:
@@ -428,9 +433,9 @@ class HparamsMetricsCallback(Callback):
                 psnr = metrics_dict.get("psnr_db")
                 final_loss = metrics_dict.get("final_loss")
                 if psnr is not None:
-                    logger.info(f"  [Epoch {trainer.current_epoch}] PSNR: {psnr:.2f} dB")
+                    logger.debug(f"  [Epoch {trainer.current_epoch}] PSNR: {psnr:.2f} dB")
                 elif final_loss is not None:
-                    logger.info(f"  [Epoch {trainer.current_epoch}] Loss: {final_loss:.6f}")
+                    logger.debug(f"  [Epoch {trainer.current_epoch}] Loss: {final_loss:.6f}")
         except Exception as e:
             logger.error(f"Error logging metrics at epoch end: {e}", exc_info=True)
     
@@ -448,9 +453,9 @@ class HparamsMetricsCallback(Callback):
                 psnr = metrics_dict.get("psnr_db")
                 final_loss = metrics_dict.get("final_loss")
                 if psnr is not None:
-                    logger.info(f"✓ Training complete. PSNR: {psnr:.2f} dB")
+                    logger.debug(f"✓ Training complete. PSNR: {psnr:.2f} dB")
                 elif final_loss is not None:
-                    logger.info(f"✓ Training complete. Final loss: {final_loss:.6f}")
+                    logger.debug(f"✓ Training complete. Final loss: {final_loss:.6f}")
             
             # Log best checkpoint info
             checkpoint_callback: ModelCheckpoint | None = None
@@ -460,7 +465,7 @@ class HparamsMetricsCallback(Callback):
                     break
             
             if checkpoint_callback and checkpoint_callback.best_model_path:
-                logger.info(f"✓ Best checkpoint: {checkpoint_callback.best_model_path}")
+                logger.debug(f"✓ Best checkpoint: {checkpoint_callback.best_model_path}")
         except Exception as e:
             logger.error(f"Error logging final metrics: {e}", exc_info=True)
     
@@ -694,13 +699,13 @@ def main(cfg: DictConfig) -> None:
     print(f"[MAIN] About to call trainer.fit() with train_loader...")
     print(f"{'='*80}\n")
     
-    logger.info(f"🚀 Starting WDS Training. Run ID: {run_id}")
+    logger.debug(f"🚀 Starting WDS Training. Run ID: {run_id}")
     
     # Resume from checkpoint if specified
     resume_ckpt_path = cfg.get("resume_ckpt_path", None)
     if resume_ckpt_path:
         print(f"[MAIN] Resuming from checkpoint: {resume_ckpt_path}")
-        logger.info(f"Resuming from checkpoint: {resume_ckpt_path}")
+        logger.debug(f"Resuming from checkpoint: {resume_ckpt_path}")
     
     trainer.fit(ls_module, train_dataloaders=train_loader, ckpt_path=resume_ckpt_path)
     

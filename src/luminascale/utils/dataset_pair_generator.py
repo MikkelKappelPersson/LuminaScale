@@ -165,8 +165,8 @@ class DatasetPairGenerator:
                 )
             elif idx == 0:
                 global _first_sample_logged
-                if not _first_sample_logged and logger.isEnabledFor(logging.INFO):
-                    logger.info(f"First Sample Profile: Decode={(t_decode-t_sample)*1000:.1f}ms | GPU={(t_gpu-t_decode)*1000:.1f}ms")
+                if not _first_sample_logged and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"First Sample Profile: Decode={(t_decode-t_sample)*1000:.1f}ms | GPU={(t_gpu-t_decode)*1000:.1f}ms")
                     _first_sample_logged = True
             
         # Stack batches: each tensor is [C, 512, 512] -> result is [N, C, 512, 512]

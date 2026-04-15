@@ -78,7 +78,7 @@ class DequantizationTrainer(L.LightningModule):
         """
         # Force model to be in train mode
         self.model.train()
-        logger.info(f"[setup] Model on device: {next(self.model.parameters()).device}")
+        logger.debug(f"[setup] Model on device: {next(self.model.parameters()).device}")
 
     def _get_device(self) -> torch.device:
         """Get the device for tensor operations.
@@ -126,7 +126,7 @@ class DequantizationTrainer(L.LightningModule):
         # Update device if it changed (e.g., model moved to different GPU)
         current_device = self._get_device()
         if self.pair_generator.device != current_device:
-            logger.info(f"Updating DatasetPairGenerator device to match model: {current_device}")
+            logger.debug(f"Updating DatasetPairGenerator device to match model: {current_device}")
             self.pair_generator.device = current_device
             self.pair_generator.pytorch_transformer.device = current_device
             self.pair_generator.cdl_processor.device = current_device

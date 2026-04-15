@@ -25,6 +25,10 @@ except ImportError:
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
+# Configure matplotlib to use non-interactive backend (suppresses Fontconfig warnings in headless envs)
+import matplotlib
+matplotlib.use('Agg')
+
 from luminascale.models import create_dequantization_net
 from luminascale.utils.io import read_exr, write_exr, oiio_aces_to_display
 from luminascale.utils.image_generator import (

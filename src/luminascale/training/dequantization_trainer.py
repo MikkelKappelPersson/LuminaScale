@@ -46,6 +46,7 @@ class DequantizationTrainer(L.LightningModule):
         batch_size: int = 1,
         num_workers: int = 2,
         precision: str = "32",
+        enable_profiling: bool = False,
     ) -> None:
         super().__init__()
         print(f"[DequantizationTrainer] Initializing LightningModule...")
@@ -77,6 +78,7 @@ class DequantizationTrainer(L.LightningModule):
         self.batch_size = batch_size  # Batch size for throughput calculation (samples/sec)
         self.num_workers = num_workers  # Number of data loading workers
         self.precision = precision  # Mixed precision setting (e.g., "16-mixed", "32")
+        self.enable_profiling = enable_profiling  # Enable CUDA synchronization for profiling (slows down training)
         # Track last batch metrics for progress bar
         self.last_batch_gpu_ms = None
         self.last_batch_loss = None
@@ -386,7 +388,7 @@ class DequantizationTrainer(L.LightningModule):
                         
                         # Measure GPU transfer overhead: time between tensor creation and GPU availability
                         # This includes PCIe transfer, GPU memory allocation, and synchronization
-                        if torch.cuda.is_available():
+                        if torch.cuda.is_available() and self.enable_profiling:
                             t_transfer_start = time.perf_counter()
                             torch.cuda.synchronize()  # Wait for GPU memory allocation to complete
                             gpu_transfer_ms = (time.perf_counter() - t_transfer_start) * 1000
@@ -404,7 +406,7 @@ class DequantizationTrainer(L.LightningModule):
             
             # === CHECKPOINT 1: Before Forward ===
             t_gpu_sync_before_forward = time.perf_counter()
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and self.enable_profiling:
                 torch.cuda.synchronize()  # Ensure GPU is idle before starting forward
             gpu_sync_before_forward_ms = (time.perf_counter() - t_gpu_sync_before_forward) * 1000
             
@@ -441,7 +443,7 @@ class DequantizationTrainer(L.LightningModule):
             
             # === CHECKPOINT 2: Before Backward (sync to see actual forward+loss time) ===
             t_gpu_sync_before_backward = time.perf_counter()
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and self.enable_profiling:
                 torch.cuda.synchronize()  # Wait for forward+loss GPU ops to complete
             gpu_sync_before_backward_ms = (time.perf_counter() - t_gpu_sync_before_backward) * 1000
             
@@ -463,7 +465,7 @@ class DequantizationTrainer(L.LightningModule):
             
             # === CHECKPOINT 3: After Optimizer (sync to ensure all GPU ops complete) ===
             t_gpu_sync_after_backward = time.perf_counter()
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and self.enable_profiling:
                 torch.cuda.synchronize()  # Ensure all GPU operations complete
             gpu_sync_after_backward_ms = (time.perf_counter() - t_gpu_sync_after_backward) * 1000
             

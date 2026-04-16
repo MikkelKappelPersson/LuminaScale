@@ -67,7 +67,9 @@ class DatasetPairGenerator:
         
         t0 = time.perf_counter()
         
+        # Detailed timing buckets
         decode_times, gpu_times, cdl_times, aces_times, quant_times = [], [], [], [], []
+        temp_io_times, oiio_open_times, look_gen_times, permute_times = [], [], [], []
         
         # SINGLE PASS: Process all samples, collect valid results
         # Eliminates validation pass which was opening files twice per sample!
@@ -80,13 +82,20 @@ class DatasetPairGenerator:
             try:
                 t_sample = time.perf_counter()
                 
-                # Write to temp file (can't avoid this - OIIO needs file path)
+                # === TEMP FILE I/O ===
+                t_io_start = time.perf_counter()
                 with tempfile.NamedTemporaryFile(suffix='.exr', delete=False) as tmp:
                     tmp.write(exr_bytes)
                     temp_file = tmp.name
+                t_io = time.perf_counter()
+                temp_io_times.append((t_io - t_io_start) * 1000)
                 
-                # Open and read in ONE operation (no separate validation pass)
+                # === OIIO OPEN ===
+                t_open_start = time.perf_counter()
                 buf_input = oiio.ImageInput.open(temp_file)
+                t_open = time.perf_counter()
+                oiio_open_times.append((t_open - t_open_start) * 1000)
+                
                 if not buf_input:
                     logger.debug(f"OIIO failed to open EXR for sample {idx}")
                     continue
@@ -130,32 +139,38 @@ class DatasetPairGenerator:
                 buf_input.close()
                 
                 t_decode = time.perf_counter()
-                decode_times.append((t_decode - t_sample) * 1000)
+                decode_times.append((t_decode - t_open) * 1000)
                 
                 if pixels is None or len(pixels) == 0:
                     logger.debug(f"OIIO read returned None/empty for sample {idx}")
                     continue
                 
-                # Convert to tensor
+                # === GPU TRANSFER ===
+                t_gpu_start = time.perf_counter()
                 aces_tensor = torch.from_numpy(pixels.copy()).to(self.device)
                 t_gpu = time.perf_counter()
-                gpu_times.append((t_gpu - t_decode) * 1000)
+                gpu_times.append((t_gpu - t_gpu_start) * 1000)
                 
-                # CDL
+                # === LOOK GENERATION ===
+                t_look_start = time.perf_counter()
                 from .look_generator import get_single_random_look
                 look = get_single_random_look()
+                t_look = time.perf_counter()
+                look_gen_times.append((t_look - t_look_start) * 1000)
+                
+                # === CDL ===
                 t_cdl_start = time.perf_counter()
                 aces_graded = self.cdl_processor.apply_cdl_gpu(aces_tensor, look)
                 t_cdl = time.perf_counter()
                 cdl_times.append((t_cdl - t_cdl_start) * 1000)
                 
-                # ACES
+                # === ACES TRANSFORM ===
                 t_aces_start = time.perf_counter()
                 srgb_32f = self.pytorch_transformer.aces_to_srgb_32f(aces_graded.unsqueeze(0)).squeeze(0)
                 t_aces = time.perf_counter()
                 aces_times.append((t_aces - t_aces_start) * 1000)
                 
-                # Quantization
+                # === QUANTIZATION ===
                 t_quant_start = time.perf_counter()
                 srgb_8u = ((srgb_32f * 255).round().to(torch.uint8)).float() / 255.0
                 srgb_8u = apply_s_curve_contrast_torch(srgb_8u, strength=2.5)
@@ -163,9 +178,13 @@ class DatasetPairGenerator:
                 t_quant = time.perf_counter()
                 quant_times.append((t_quant - t_quant_start) * 1000)
                 
-                # Store results
+                # === PERMUTE & STORE ===
+                t_permute_start = time.perf_counter()
                 tensors_8u.append(srgb_8u.permute(2, 0, 1))
                 tensors_32f.append(srgb_32f.permute(2, 0, 1))
+                t_permute = time.perf_counter()
+                permute_times.append((t_permute - t_permute_start) * 1000)
+                
                 processed_samples.append(idx)
                 
             except Exception as e:
@@ -176,6 +195,7 @@ class DatasetPairGenerator:
                     os.remove(temp_file)
         
         # Stack results (now much fewer intermediate tensors!)
+        t_stack_start = time.perf_counter()
         if not tensors_8u:
             # Fallback for empty batch
             return torch.empty(0, 3, crop_size, crop_size, device=self.device), \
@@ -183,22 +203,33 @@ class DatasetPairGenerator:
         
         srgb_8u_batch = torch.stack(tensors_8u)
         srgb_32f_batch = torch.stack(tensors_32f)
+        t_stack = time.perf_counter()
+        stack_time_ms = (t_stack - t_stack_start) * 1000
         
         total_time = (time.perf_counter() - t0) * 1000
         
-        # Return timing breakdown
+        # Return detailed timing breakdown
         timing_breakdown = {
             "oiio_decode_ms": np.mean(decode_times) if decode_times else 0,
             "gpu_transfer_ms": np.mean(gpu_times) if gpu_times else 0,
             "cdl_ms": np.mean(cdl_times) if cdl_times else 0,
             "aces_transform_ms": np.mean(aces_times) if aces_times else 0,
             "quantization_ms": np.mean(quant_times) if quant_times else 0,
+            "temp_io_ms": np.mean(temp_io_times) if temp_io_times else 0,
+            "oiio_open_ms": np.mean(oiio_open_times) if oiio_open_times else 0,
+            "look_gen_ms": np.mean(look_gen_times) if look_gen_times else 0,
+            "permute_ms": np.mean(permute_times) if permute_times else 0,
+            "stack_batch_ms": stack_time_ms,
             "total_decode_batch_ms": total_time
         }
+        
+        # Calculate overhead from new granular timings
+        explicit_overhead = timing_breakdown["temp_io_ms"] + timing_breakdown["oiio_open_ms"] + timing_breakdown["look_gen_ms"] + timing_breakdown["permute_ms"]
         logger.debug(f"Batch({len(processed_samples)} samples) {total_time:.1f}ms: "
                     f"Decode={timing_breakdown['oiio_decode_ms']:.1f}ms, "
                     f"GPU={timing_breakdown['gpu_transfer_ms']:.1f}ms, "
-                    f"CDL={timing_breakdown['cdl_ms']:.1f}ms")
+                    f"CDL={timing_breakdown['cdl_ms']:.1f}ms, "
+                    f"Overhead(TempIO+Open+Look+Perm)={explicit_overhead:.1f}ms")
             
         return srgb_8u_batch, srgb_32f_batch, timing_breakdown
 

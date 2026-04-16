@@ -43,6 +43,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pytorch_lightning as L
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback, RichModelSummary, RichProgressBar
+from pytorch_lightning.profilers import SimpleProfiler
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 
@@ -501,13 +502,32 @@ class HparamsMetricsCallback(Callback):
 
 
 class CustomRichProgressBar(RichProgressBar):
-    """Rich progress bar with custom batch metrics (GPU time and loss)."""
+    """Rich progress bar with custom batch metrics (GPU time and loss).
+    
+    Shows samples/sec (normalized by batch_size) instead of batches/sec for fair comparison.
+    """
     
     def get_metrics(self, trainer: L.Trainer, pl_module: L.LightningModule) -> dict[str, Any]:
-        """Override to inject batch-specific metrics into progress bar."""
+        """Override to inject batch-specific metrics and show samples/sec."""
         items = super().get_metrics(trainer, pl_module)
         # Remove redundant info
         items.pop("v_num", None)
+        
+        # Calculate samples/sec from raw speed
+        batch_size = getattr(pl_module, 'batch_size', 1)
+        if self.progress is not None:
+            try:
+                for task_id in self.progress.task_ids:
+                    task = self.progress._tasks[task_id]
+                    # task.speed is in iterations/sec (batches/sec) 
+                    if task.speed is not None and isinstance(task.speed, (int, float)) and task.speed > 0:
+                        samples_per_sec = task.speed * batch_size
+                        # Override the speed display in items
+                        items["samples/s"] = f"{samples_per_sec:.2f}"
+                        # Also keep the batch speed for reference
+                        break
+            except Exception:
+                pass  # Gracefully fall back if accessing task fails
         
         # Inject batch GPU time and loss from module if available
         if hasattr(pl_module, 'last_batch_gpu_ms') and pl_module.last_batch_gpu_ms is not None:
@@ -576,13 +596,18 @@ def main(cfg: DictConfig) -> None:
     print(f"[MAIN] ✓ WebDataset created")
     
     print(f"[MAIN] Getting WebLoader...")
-    train_loader = train_dataset.get_loader(num_workers=cfg.get("num_workers", 4))
-    print(f"[MAIN] ✓ WebLoader created")
+    prefetch_factor = cfg.get("prefetch_size", 2)  # Reuse prefetch_size config as prefetch_factor
+    train_loader = train_dataset.get_loader(
+        num_workers=cfg.get("num_workers", 4),
+        prefetch_factor=prefetch_factor
+    )
+    print(f"[MAIN] ✓ WebLoader created (num_workers={cfg.get('num_workers', 4)}, prefetch_factor={prefetch_factor})")
     
-    # DISABLED: Async prefetching causes gradient issues with Lightning's training loop
+    # DISABLED: Async prefetch with background thread causes synchronization overhead with Lightning
+    # Reduces throughput from 6.25 → 5.57 samples/sec. WebDataset's num_workers + persistent_workers
+    # is sufficient for our I/O patterns. Keeping simple synchronous loading.
     # prefetch_size = cfg.get("prefetch_size", 2)
     # train_loader = AsyncPrefetchLoader(train_loader, prefetch_size=prefetch_size)
-    # print(f"[MAIN] ✓ Async prefetch loader enabled (prefetch_size={prefetch_size})")
     
     # 2. Setup Lightning Module
     print(f"[MAIN] Creating model...")
@@ -599,6 +624,8 @@ def main(cfg: DictConfig) -> None:
         model=model,
         learning_rate=cfg.learning_rate,
         loss_weights=dict(cfg.get("loss", {})),
+        crop_size=cfg.get("crop_size", 512),
+        batch_size=cfg.batch_size,
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
@@ -690,6 +717,10 @@ def main(cfg: DictConfig) -> None:
                 base_channels=cfg.model.base_channels
             )
         ],
+        profiler=SimpleProfiler(
+            filename="training_profile.txt",
+            extended=True,
+        ),
         precision=cfg.precision,
         strategy=cfg.strategy,
         log_every_n_steps=1,  # Log every batch for detailed TensorBoard curves

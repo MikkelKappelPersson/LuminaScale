@@ -11,6 +11,26 @@
 			"/^python -m py_compile scripts/train_dequantization_net\\.py$/": {
 				"approve": true,
 				"matchCommandLine": true
+			},
+			"/^python -m py_compile src/luminascale/training/dequantization_trainer\\.py 2>&1 \\| head -50$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^python -m py_compile src/luminascale/utils/dataset_pair_generator\\.py src/luminascale/training/dequantization_trainer\\.py 2>&1 \\| head -50$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^python -m py_compile src/luminascale/training/dequantization_trainer\\.py 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^python -m py_compile /run/media/mikkelkp/MKP01/med8_project/LuminaScale/scripts/train_dequantization_net\\.py 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
+			},
+			"/^python -m py_compile /run/media/mikkelkp/MKP01/med8_project/LuminaScale/src/luminascale/training/dequantization_trainer\\.py 2>&1$/": {
+				"approve": true,
+				"matchCommandLine": true
 			}
 		}
 	}

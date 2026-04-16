@@ -4,14 +4,19 @@ defaults:
 config_name: dev
 
 # Data paths
-shard_path: "dataset/temp/shards/val"
-epochs: 2
+shard_path: "dataset/temp/shards/train"
+epochs: 1
 
 # Optimize throughput without multiple patches strategy
 patches_per_image: 1    # Process each image once
-batch_size: 16          # Larger batches for better GPU utilization (3-5x speedup)
-num_workers: 8          # More workers for parallel data loading (2x speedup)
-prefetch_size: 2        # Async prefetch buffer: queue 2 batches for shard I/O overlap
+batch_size: 1          # Larger batch for better GPU utilization
+num_workers: 2         # Optimal: minimizes GIL contention while maintaining I/O
+prefetch_size: 1       # Reserved for future async prefetching experiments
+
+crop_size: 1024        # 1024x1024 crops for better GPU efficiency
+
+# Mixed precision (FP16 with automatic loss scaling) for faster GPU compute
+precision: "16-mixed"
 
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:

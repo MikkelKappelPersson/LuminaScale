@@ -17,8 +17,11 @@ def decode_exr_and_json(sample: dict) -> tuple[bytes, dict]:
     """Custom decoder for LuminaScale Shards.
     
     Transforms:
-    - .exr -> Raw bytes (needs processing on GPU)
+    - .exr -> Raw bytes (passed to GPU for OIIO/CUDA decoding)
     - .json -> Decoded metadata dictionary
+    
+    Note: The actual EXR decoding happens on GPU via OIIO/CUDA, not CPU.
+    With num_workers=2 and persistent_workers=True, we minimize GIL contention.
     
     Returns:
         (exr_bytes, metadata_dict) tuple
@@ -217,16 +220,32 @@ class LuminaScaleWebDataset:
         self.dataset = dataset
         logger.debug(f"Initialized WebDataset with {len(self.shard_path) if isinstance(self.shard_path, list) else 'multiple'} shards")
 
-    def get_loader(self, num_workers: int = 4):
-        """Returns a stable WebLoader (Dataloader equivalent)."""
-        logger.debug(f"Creating WebLoader with num_workers={num_workers}")
+    def get_loader(self, num_workers: int = 4, prefetch_factor: int = 2):
+        """Returns a stable WebLoader (Dataloader equivalent).
         
-        loader = wds.WebLoader(
-            self.dataset, 
-            batch_size=None, # Batching already handled by .batched()
-            num_workers=num_workers,
-            pin_memory=True
-        )
+        Args:
+            num_workers: Number of worker processes for parallel data loading
+            prefetch_factor: Batches to prefetch per worker (default 2)
+                             Higher values increase prefetching but memory usage.
+        """
+        logger.debug(f"Creating WebLoader with num_workers={num_workers}, prefetch_factor={prefetch_factor}")
+        
+        loader_kwargs = {
+            "batch_size": None,  # Batching already handled by .batched()
+            "num_workers": num_workers,
+            "pin_memory": True,
+            "persistent_workers": True if num_workers > 0 else False,
+        }
+        
+        # Add prefetch_factor if num_workers > 0 (only meaningful with multiprocessing)
+        if num_workers > 0:
+            try:
+                loader_kwargs["prefetch_factor"] = prefetch_factor
+            except TypeError:
+                # WebLoader might not support prefetch_factor, skip it
+                logger.debug("WebLoader does not support prefetch_factor parameter")
+        
+        loader = wds.WebLoader(self.dataset, **loader_kwargs)
         return loader
     
     def get_estimated_batches(self) -> int | None:

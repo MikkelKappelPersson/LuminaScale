@@ -9,14 +9,14 @@ val_shard_path: "dataset/temp/shards/val"
 metadata_parquet: "dataset/temp/training_metadata.parquet"
 
 # Training parameters
-batch_size: 4
+batch_size: 1
 epochs: 20  
 learning_rate: 1e-4  
 checkpoint_freq: 10
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 
 # Data loading
-num_workers: 4
+num_workers: 8
 shuffle_buffer: 10
 patches_per_image: 1
 
@@ -33,6 +33,9 @@ output_dir: ./outputs/training
 # Model
 model:
   base_channels: 32
+
+# Image processing
+crop_size: 512
 
 # Loss weights (tuned for smooth dequantization with Charbonnier smoothness)
 loss:

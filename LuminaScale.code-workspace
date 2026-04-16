@@ -31,6 +31,10 @@
 			"/^python -m py_compile /run/media/mikkelkp/MKP01/med8_project/LuminaScale/src/luminascale/training/dequantization_trainer\\.py 2>&1$/": {
 				"approve": true,
 				"matchCommandLine": true
+			},
+			"/^python -c \"from src\\.luminascale\\.utils\\.metrics import compute_ssim, compute_delta_e_aces; print\\('✓ Metrics imported successfully'\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
 			}
 		}
 	}

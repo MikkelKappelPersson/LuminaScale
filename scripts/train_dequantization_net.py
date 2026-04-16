@@ -471,32 +471,54 @@ class HparamsMetricsCallback(Callback):
             logger.error(f"Error logging final metrics: {e}", exc_info=True)
     
     def _get_metrics_dict(self, trainer: L.Trainer) -> dict[str, Any]:
-        """Extract weight-independent metrics from trainer callback_metrics.
+        """Extract metrics from validation data for hparams logging.
         
-        Uses PSNR (Peak Signal-to-Noise Ratio) instead of final_loss because:
-        - PSNR is invariant to loss weight changes (unlike weighted loss)
-        - PSNR directly measures reconstruction quality (higher = better)
-        - Perfect for fair hyperparameter tuning across different weight configs
+        Extracts quality metrics (PSNR, SSIM, ΔE) computed on validation set only:
+        - PSNR (Peak Signal-to-Noise Ratio): Reconstruction quality [dB]
+        - SSIM (Structural Similarity): Structure preservation [dB]
+        - ΔE (Delta-E CIE): Perceptual color accuracy [0-∞)
         
-        Falls back to final_loss if PSNR unavailable.
+        These validation metrics are:
+        - Weight-independent (PSNR, unlike weighted loss)
+        - Unbiased (computed on unseen validation data, not training data)
+        - Suitable for hyperparameter tuning and model selection
+        
+        Also logs throughput (samples/sec) for data pipeline optimization.
+        
+        Falls back to loss if validation metrics unavailable.
         """
         metrics_dict: dict[str, Any] = {}
         
-        # Prefer PSNR (weight-independent) over loss for hparam tuning
+        # Extract quality metrics from VALIDATION set (preferred for hparam tuning)
         metric_keys = [
-            "metric_psnr/train",     # Weight-independent image quality metric
-            "loss_total/train",      # Fallback: weighted loss (weight-dependent)
-            "loss_L1/train",         # Further fallback
+            "metric_psnr/val",      # Weight-independent, unbiased quality metric
+            "metric_loss/val",      # Fallback: validation loss
+            "loss_total/train",     # Final fallback: training loss (less reliable)
         ]
         
         for metric_key in metric_keys:
             if metric_key in trainer.callback_metrics:
                 value = trainer.callback_metrics[metric_key]
                 value_float = value.item() if hasattr(value, "item") else float(value)
-                # PSNR is already in dB; loss is just loss
+                # PSNR is in dB; loss is just numeric loss
                 metric_name = "psnr_db" if "psnr" in metric_key else "final_loss"
                 metrics_dict[metric_name] = value_float
                 break
+        
+        # Add additional quality metrics from validation
+        if "metric_ssim/val" in trainer.callback_metrics:
+            ssim = trainer.callback_metrics["metric_ssim/val"]
+            metrics_dict["ssim_db"] = ssim.item() if hasattr(ssim, "item") else float(ssim)
+        
+        if "metric_delta_e/val" in trainer.callback_metrics:
+            delta_e = trainer.callback_metrics["metric_delta_e/val"]
+            metrics_dict["delta_e"] = delta_e.item() if hasattr(delta_e, "item") else float(delta_e)
+        
+        # Add throughput metric for data pipeline optimization
+        if hasattr(trainer.lightning_module, 'last_epoch_throughput_samples_per_sec'):
+            throughput = trainer.lightning_module.last_epoch_throughput_samples_per_sec
+            if throughput is not None:
+                metrics_dict["throughput_samples_per_sec"] = throughput
         
         return metrics_dict
 
@@ -560,6 +582,9 @@ class CustomRichProgressBar(RichProgressBar):
 def main(cfg: DictConfig) -> None:
     """Main training entry point for WebDataset pipeline."""
     
+    # Import os (needed for OCIO environment setup and CPU affinity)
+    import os
+    
     # Configure torch for optimal performance with Tensor Cores
     torch.set_float32_matmul_precision('high')
     
@@ -577,13 +602,10 @@ def main(cfg: DictConfig) -> None:
     print(f"[MAIN] Run ID: {run_id}")
 
     # 1. Create WebDataset Loaders
-    # On-the-fly patch generation: WebDataset stores 880 unique images once, then .repeat(patches_per_image)
-    # loops through the stream to create 880 * 32 = 28,160 total samples. Each time an image appears,
-    # a fresh random crop is generated. This matches the OnTheFlyBDEDataset pattern.
-    # Total batches = unique_images * patches_per_image / batch_size
+    # WebDataset streams unique images from shards, generating random crops on-the-fly
+    # Each image appears once; random crops are generated per batch iteration
     print(f"[MAIN] Creating WebDataset with shard_path: {cfg.get('shard_path')}")
     print(f"[MAIN] batch_size={cfg.get('batch_size', 32)}, num_workers={cfg.get('num_workers', 4)}")
-    print(f"[MAIN] patches_per_image={cfg.get('patches_per_image', 1)} (on-the-fly generation via .repeat())")
     
     train_dataset = LuminaScaleWebDataset(
         shard_path=cfg.get("shard_path"),
@@ -591,7 +613,6 @@ def main(cfg: DictConfig) -> None:
         shuffle_buffer=cfg.get("shuffle_buffer", 1000),
         is_training=True,
         metadata_parquet=cfg.get("metadata_parquet"),
-        patches_per_image=cfg.get("patches_per_image", 1),
     )
     print(f"[MAIN] ✓ WebDataset created")
     
@@ -603,11 +624,33 @@ def main(cfg: DictConfig) -> None:
     )
     print(f"[MAIN] ✓ WebLoader created (num_workers={cfg.get('num_workers', 4)}, prefetch_factor={prefetch_factor})")
     
-    # DISABLED: Async prefetch with background thread causes synchronization overhead with Lightning
-    # Reduces throughput from 6.25 → 5.57 samples/sec. WebDataset's num_workers + persistent_workers
-    # is sufficient for our I/O patterns. Keeping simple synchronous loading.
-    # prefetch_size = cfg.get("prefetch_size", 2)
-    # train_loader = AsyncPrefetchLoader(train_loader, prefetch_size=prefetch_size)
+    # NOTE: Multiprocessing-based async prefetch doesn't work with WebDataset workers due to
+    # "daemonic processes are not allowed to have children" limitation. WebDataset's native
+    # num_workers + persistent_workers already provides good I/O efficiency.
+    # Best config: batch_size=4, num_workers=2, crop_size=1024, precision="16-mixed" = 7.20 samples/sec
+    
+    # Create validation dataloader if val_shard_path is specified (best practice for monitoring)
+    val_loader = None
+    val_shard_path = cfg.get("val_shard_path")
+    if val_shard_path:
+        print(f"[MAIN] Creating validation WebDataset with shard_path: {val_shard_path}")
+        val_dataset = LuminaScaleWebDataset(
+            shard_path=val_shard_path,
+            batch_size=cfg.get("batch_size", 32),
+            shuffle_buffer=cfg.get("shuffle_buffer", 1000),
+            is_training=False,  # No shuffling or augmentation for validation
+            metadata_parquet=cfg.get("metadata_parquet"),
+        )
+        print(f"[MAIN] ✓ Validation WebDataset created")
+        
+        print(f"[MAIN] Getting validation WebLoader...")
+        val_loader = val_dataset.get_loader(
+            num_workers=cfg.get("num_workers", 4),
+            prefetch_factor=prefetch_factor
+        )
+        print(f"[MAIN] ✓ Validation WebLoader created")
+    else:
+        print(f"[MAIN] ⚠ val_shard_path not specified; skipping validation")
     
     # 2. Setup Lightning Module
     print(f"[MAIN] Creating model...")
@@ -625,7 +668,10 @@ def main(cfg: DictConfig) -> None:
         learning_rate=cfg.learning_rate,
         loss_weights=dict(cfg.get("loss", {})),
         crop_size=cfg.get("crop_size", 512),
+        val_crop_size=cfg.get("val_crop_size"),  # Can differ from training crop size
         batch_size=cfg.batch_size,
+        num_workers=cfg.get("num_workers", 2),
+        precision=cfg.get("precision", "32"),
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
@@ -694,7 +740,6 @@ def main(cfg: DictConfig) -> None:
         "weight_charbonnier": charbonnier_weight,
         "weight_grad_match": grad_match_weight,
         "model_base_channels": cfg.model.base_channels,
-        "patches_per_image": cfg.get("patches_per_image", 1),
         "crop_size": 512,
         "shuffle_buffer": cfg.get("shuffle_buffer", 10),
         "precision": cfg.precision,
@@ -704,6 +749,7 @@ def main(cfg: DictConfig) -> None:
         accelerator=cfg.accelerator,
         devices=cfg.devices,
         max_epochs=cfg.epochs,
+        num_sanity_val_steps=0,  # Skip sanity check for faster startup
         logger=logger_tb,
         callbacks=[
             checkpoint_callback,
@@ -745,7 +791,12 @@ def main(cfg: DictConfig) -> None:
         print(f"[MAIN] Resuming from checkpoint: {resume_ckpt_path}")
         logger.debug(f"Resuming from checkpoint: {resume_ckpt_path}")
     
-    trainer.fit(ls_module, train_dataloaders=train_loader, ckpt_path=resume_ckpt_path)
+    trainer.fit(
+        ls_module,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,  # Validation during training (if configured)
+        ckpt_path=resume_ckpt_path
+    )
     
     print(f"\n{'='*80}")
     print(f"[MAIN] ✓ Training completed!")

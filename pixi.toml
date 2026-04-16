@@ -6,6 +6,7 @@ platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
+tensorboard = "python -m tensorboard.main --logdir=outputs/training --port=6008 --bind_all --load_fast=false"
 
 [system-requirements]
 cuda = "12.8"

@@ -8,13 +8,13 @@ shard_path: "dataset/temp/shards/train"
 epochs: 1
 
 # Optimize throughput without multiple patches strategy
-patches_per_image: 1    # Process each image once
+
 batch_size: 1          # Larger batch for better GPU utilization
-num_workers: 2         # Optimal: minimizes GIL contention while maintaining I/O
-prefetch_size: 1       # Reserved for future async prefetching experiments
+num_workers: 1         # Optimal: minimizes GIL contention while maintaining I/O
+ 
 
-crop_size: 1024        # 1024x1024 crops for better GPU efficiency
-
+crop_size: 2048
+val_crop_size: 1024  # Faster validation with smaller crops
 # Mixed precision (FP16 with automatic loss scaling) for faster GPU compute
 precision: "16-mixed"
 

@@ -16,16 +16,15 @@ checkpoint_freq: 10
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 
 # Data loading
-num_workers: 8
-shuffle_buffer: 10
-patches_per_image: 1
+num_workers: 1
+shuffle_buffer: 50
 
 # Hardware
 device: cuda
 accelerator: gpu
 devices: auto
 strategy: auto
-precision: 32
+precision: 16-mixed
 
 # Output
 output_dir: ./outputs/training
@@ -35,7 +34,8 @@ model:
   base_channels: 32
 
 # Image processing
-crop_size: 512
+crop_size: 2028
+val_crop_size: 2028  # Validation crop size (can differ from training for speed)
 
 # Loss weights (tuned for smooth dequantization with Charbonnier smoothness)
 loss:

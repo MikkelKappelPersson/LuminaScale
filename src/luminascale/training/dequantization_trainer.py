@@ -18,6 +18,8 @@ from rich.table import Table
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
+from torchmetrics.image.psnr import PeakSignalNoiseRatio
+from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 
 # from torch.utils.tensorboard import SummaryWriter (handled by Lightning)
 
@@ -26,6 +28,7 @@ console = Console()
 from ..data.wds_dataset import LuminaScaleWebDataset
 from ..utils.dataset_pair_generator import DatasetPairGenerator
 from ..utils.image_generator import create_primary_gradients, quantize_to_8bit, apply_s_curve_contrast_torch
+from ..utils.metrics import DeltaEACES
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,10 @@ class DequantizationTrainer(L.LightningModule):
         vis_freq: int = 5,
         loss_weights: dict | None = None,
         crop_size: int = 512,
+        val_crop_size: int | None = None,
         batch_size: int = 1,
+        num_workers: int = 2,
+        precision: str = "32",
     ) -> None:
         super().__init__()
         print(f"[DequantizationTrainer] Initializing LightningModule...")
@@ -66,12 +72,16 @@ class DequantizationTrainer(L.LightningModule):
         
         # Note: Do NOT call save_hyperparameters() here - full config is logged at training end via HparamsMetricsCallback
         self.pair_generator = None  # Lazy initialization for WebDataset batches
-        self.crop_size = crop_size  # Configurable crop size for WebDataset batches
+        self.crop_size = crop_size  # Configurable crop size for WebDataset batches (training)
+        self.val_crop_size = val_crop_size if val_crop_size is not None else crop_size  # Validation crop size (can differ for speed)
         self.batch_size = batch_size  # Batch size for throughput calculation (samples/sec)
+        self.num_workers = num_workers  # Number of data loading workers
+        self.precision = precision  # Mixed precision setting (e.g., "16-mixed", "32")
         # Track last batch metrics for progress bar
         self.last_batch_gpu_ms = None
         self.last_batch_loss = None
         self.estimated_total_batches = None  # Set by training script if metadata available
+        self.last_epoch_throughput_samples_per_sec = None  # Store for hparams logging
         
         # Device: always CUDA for training
         self.device_cuda = torch.device("cuda")
@@ -101,6 +111,16 @@ class DequantizationTrainer(L.LightningModule):
         self._last_image_id = None
         self._cached_srgb_8u = None
         self._cached_srgb_32f = None
+        
+        # Validation metrics (computed on validation set, not training data)
+        # NOTE: Quality metrics (PSNR, SSIM, ΔE) are only computed on validation data for unbiased evaluation.
+        # Use official torchmetrics classes for better DDP integration and stateful accumulation
+        self.val_psnr = PeakSignalNoiseRatio(data_range=1.0)  # Assumes images normalized to [0, 1]
+        self.val_ssim = StructuralSimilarityIndexMeasure(data_range=1.0)  # Assumes images normalized to [0, 1]
+        self.val_delta_e = DeltaEACES()  # Custom metric for ACES color space ΔE
+        self.val_psnr_db = None  # For hparams logging
+        self.val_ssim_db = None  # For hparams logging
+        self.val_delta_e_mean = None
         
         print(f"[DequantizationTrainer] ✓ Initialization complete")
 
@@ -139,16 +159,22 @@ class DequantizationTrainer(L.LightningModule):
         # Just return the batch as-is for tensors; Lightning will move them
         return batch
 
-    def _process_batch(self, batch: tuple[list[bytes], list[dict]]) -> tuple[torch.Tensor, torch.Tensor, dict | None]:
+    def _process_batch(self, batch: tuple[list[bytes], list[dict]], crop_size: int | None = None) -> tuple[torch.Tensor, torch.Tensor, dict | None]:
         """Convert raw WDS batch (bytes) into graded training pairs (LDR, HDR) on GPU.
         
         With WebDataset.repeat(patches_per_image), consecutive items are from the same image.
         Implementation: Load full image once, cache it decoded/graded, reuse for all 32 patches
         by generating random crops from the cached version. Avoids 31 redundant EXR decodes.
         
+        Args:
+            batch: Tuple of (exr_bytes_list, metadata_list)
+            crop_size: Optional crop size override. If None, uses self.crop_size
+        
         Returns: (srgb_8u_batch, srgb_32f_batch, timing_dict)
         timing_dict contains component breakdown for cache misses, or cache_hit_ms for cache hits
         """
+        if crop_size is None:
+            crop_size = self.crop_size
         t_total_start = time.perf_counter()
         timing = {}
         
@@ -206,7 +232,7 @@ class DequantizationTrainer(L.LightningModule):
             # Decode full image(s) into graded sRGB pairs
             srgb_8u_batch, srgb_32f_batch, batch_timing_breakdown = self.pair_generator.generate_batch_from_bytes(
                 exr_bytes_list, 
-                crop_size=self.crop_size
+                crop_size=crop_size
             )
             total_decode_ms = (time.perf_counter() - t_decode_start) * 1000
             logger.debug(f"[PROCESS BATCH] Decoded and graded {len(exr_bytes_list)} image(s) in {total_decode_ms:.1f}ms")
@@ -550,12 +576,6 @@ class DequantizationTrainer(L.LightningModule):
             self.log("loss_Charbonnier/train", charbonnier_loss(y_hat), prog_bar=False, sync_dist=True)
             self.log("loss_EdgeAware/train", edge_aware_smoothing_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_total/train", loss, prog_bar=False, sync_dist=True)
-            
-            # Log weight-independent metrics (PSNR, SSIM) for fair hparam comparison
-            # These remain constant regardless of loss weight changes
-            psnr_val = compute_psnr(y_hat, y)
-            self.log("metric_psnr/train", psnr_val, prog_bar=False, sync_dist=True)
-            
             # Log current learning rate (supports dynamic LR scheduling)
             current_lr = self.optimizers().param_groups[0]["lr"]
             self.log("learning_rate", current_lr, prog_bar=False, sync_dist=True)
@@ -616,6 +636,9 @@ class DequantizationTrainer(L.LightningModule):
         # Calculate both batches/sec and samples/sec for comparison
         throughput_batches = num_batches / total_epoch if total_epoch > 0 else 0
         throughput_samples = (num_batches * self.batch_size) / total_epoch if total_epoch > 0 else 0
+        
+        # Store for hparams logging
+        self.last_epoch_throughput_samples_per_sec = throughput_samples
         
         # Get overhead averages for accounting table
         gpu_sync_avg = np.mean(self.epoch_timings["gpu_sync_overhead_ms"]) if self.epoch_timings["gpu_sync_overhead_ms"] else 0
@@ -784,7 +807,97 @@ class DequantizationTrainer(L.LightningModule):
         dataset_table.add_row("GPU Memory (Current)", f"{gpu_memory_avg:.2f} GB")
         dataset_table.add_row("GPU Memory (Peak)", f"{gpu_memory_max:.2f} GB")
         
+        # Add performance hyperparameters
+        dataset_table.add_row("[bold]─ Configuration ─[/bold]", "")
+        dataset_table.add_row("Batch Size", str(self.batch_size))
+        dataset_table.add_row("Num Workers", str(self.num_workers))
+        dataset_table.add_row("Crop Size", f"{self.crop_size}×{self.crop_size}")
+        dataset_table.add_row("Precision", self.precision)
+        
         console.print(dataset_table)
+
+    def validation_step(self, batch: dict | tuple | list, batch_idx: int) -> dict:
+        """Validation: forward pass + compute all quality metrics.
+        
+        Computes PSNR, SSIM, ΔE on validation data only (not training data)
+        to prevent overfitting and provide unbiased quality assessment.
+        
+        Quality metrics logged here are per-batch and automatically aggregated
+        by Lightning across all validation batches at epoch end.
+        
+        Handles both WebDataset format (tuple/list) and dictionary format.
+        Uses val_crop_size which can differ from training crop_size for speed.
+        """
+        # Handle WebDataset format: batch is (exr_bytes_list, metadata_list)
+        if isinstance(batch, (tuple, list)):
+            if len(batch) == 2:
+                # WebDataset case: decode batch
+                if isinstance(batch[0], list) and len(batch[0]) > 0 and isinstance(batch[0][0], bytes):
+                    # Use val_crop_size for validation crops (can be smaller for speed)
+                    x, y, _ = self._process_batch(batch, crop_size=self.val_crop_size)
+                else:
+                    # Standard tuple/list format: (x, y)
+                    x, y = batch[0], batch[1]
+            else:
+                raise ValueError(f"Batch tuple has {len(batch)} elements, expected 2")
+        elif isinstance(batch, dict):
+            # Dictionary format: {"noisy": x, "reference": y}
+            x = batch["noisy"]
+            y = batch["reference"]
+        else:
+            raise ValueError(f"Batch type {type(batch)} is not tuple/list/dict")
+        
+        y_hat = self.model(x)
+        
+        # Compute loss (same weighting as training)
+        loss = (l1_loss(y_hat, y) * self.l1_weight + 
+               l2_loss(y_hat, y) * self.l2_weight + 
+               charbonnier_loss(y_hat) * self.charbonnier_weight + 
+               edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight)
+        
+        # Update stateful metrics (torchmetrics handles aggregation + DDP sync internally)
+        # PSNR and SSIM use official torchmetrics implementations
+        self.val_psnr.update(y_hat, y)
+        self.val_ssim.update(y_hat, y)
+        
+        # ΔE (Delta-E ACES) uses custom metric with proper DDP support
+        self.val_delta_e.update(y_hat, y)
+        
+        # Log loss per batch (aggregated by Lightning)
+        batch_size = x.size(0) if hasattr(x, 'size') else 1
+        self.log("metric_loss/val", loss, on_step=False, on_epoch=True, sync_dist=True, batch_size=batch_size)
+        # PSNR, SSIM, ΔE will be logged in on_validation_epoch_end() after compute()
+        
+        return {"val_loss": loss}
+
+    def on_validation_epoch_end(self) -> None:
+        """Compute epoch-level validation metrics and store for hparams logging.
+        
+        Calls .compute() on stateful metrics (PSNR, SSIM, ΔE from torchmetrics) and logs them,
+        then resets metrics for the next epoch.
+        
+        These metrics measure model quality on unseen data and are suitable for
+        hyperparameter comparison, early stopping, and best-model selection.
+        """
+        # Compute epoch-level metrics from accumulated batches
+        psnr_epoch = self.val_psnr.compute()
+        ssim_epoch = self.val_ssim.compute()
+        delta_e_epoch = self.val_delta_e.compute()
+        
+        # Log epoch-level metrics
+        self.log("metric_psnr/val", psnr_epoch, on_epoch=True, sync_dist=True)
+        self.log("metric_ssim/val", ssim_epoch, on_epoch=True, sync_dist=True)
+        self.log("metric_delta_e/val", delta_e_epoch, on_epoch=True, sync_dist=True)
+        
+        # Reset metrics for next epoch
+        self.val_psnr.reset()
+        self.val_ssim.reset()
+        self.val_delta_e.reset()
+        
+        # Store for hparams logging
+        self.val_psnr_db = psnr_epoch.item() if hasattr(psnr_epoch, "item") else float(psnr_epoch)
+        self.val_ssim_db = ssim_epoch.item() if hasattr(ssim_epoch, "item") else float(ssim_epoch)
+        self.val_delta_e_mean = delta_e_epoch.item() if hasattr(delta_e_epoch, "item") else float(delta_e_epoch)
 
     def configure_optimizers(self) -> dict:
         """Configure optimizer with CosineAnnealingLR scheduler.
@@ -920,25 +1033,3 @@ def edge_aware_smoothing_loss(
     loss_x = (smooth_mask_x * grad_pred_x).mean()
     
     return (loss_y + loss_x) / 2.0
-
-
-def compute_psnr(pred: torch.Tensor, target: torch.Tensor, max_val: float = 1.0) -> torch.Tensor:
-    """Compute Peak Signal-to-Noise Ratio between prediction and target.
-    
-    PSNR is weight-independent and suitable for hyperparameter tuning.
-    Higher PSNR indicates better reconstruction quality.
-    
-    PSNR = 20 * log10(max_val / sqrt(MSE))
-    
-    Args:
-        pred: Model prediction [B, C, H, W] in range [0, 1]
-        target: Target image [B, C, H, W] in range [0, 1]
-        max_val: Maximum pixel value (default 1.0 for normalized images)
-    
-    Returns:
-        PSNR value in dB (higher is better)
-    """
-    mse = F.mse_loss(pred.float(), target.float())
-    # Avoid log(0) by adding small epsilon
-    psnr = 20.0 * torch.log10(max_val / (torch.sqrt(mse) + 1e-10))
-    return psnr

@@ -20,7 +20,6 @@ checkpoint_freq: 5  # More frequent checkpoints in long-running jobs
 # Data loading
 num_workers: 16  # More CPU workers for efficient data loading
 shuffle_buffer: 100  # Larger shuffle buffer for better randomization
-patches_per_image: 64  # Extract more patches per image during training
 
 # Hardware
 accelerator: gpu
@@ -30,3 +29,6 @@ precision: 16-mixed
 
 # Output
 output_dir: ${oc.env:OUTPUT_DIR,/lustre/scratch/fs62fb/outputs/training}
+
+# Image processing
+val_crop_size: 2028  # Validation at same resolution as training for fair comparison

@@ -13,8 +13,14 @@ import torch.nn.functional as F
 import torch.optim as optim
 import matplotlib.pyplot as plt
 import numpy as np
+from rich.table import Table
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
 
 # from torch.utils.tensorboard import SummaryWriter (handled by Lightning)
+
+console = Console()
 
 from ..data.wds_dataset import LuminaScaleWebDataset
 from ..utils.dataset_pair_generator import DatasetPairGenerator
@@ -345,14 +351,13 @@ class DequantizationTrainer(L.LightningModule):
                 l2_val = l2_loss(y_hat, y).item()
                 char_val = charbonnier_loss(y_hat).item()
                 edge_val = edge_aware_smoothing_loss(y_hat, y).item()
-                print(f"[E{self.current_epoch}] Loss: L1={l1_val:.6f} L2={l2_val:.6f} Charbonnier={char_val:.6f} EdgeAware={edge_val:.6f} | Total={loss.item():.6f}")
+                total_loss = loss.item()
                 
                 # Verify training target differs from input
                 x_mean, x_std = x.mean().item(), x.std().item()
                 y_mean, y_std = y.mean().item(), y.std().item()
                 yhat_mean, yhat_std = y_hat.mean().item(), y_hat.std().item()
                 y_minus_x = (y - x).abs().mean().item()
-                yhat_minus_x = (y_hat - x).abs().mean().item()
                 yhat_minus_y = (y_hat - y).abs().mean().item()
                 
                 # Count unique values
@@ -360,9 +365,45 @@ class DequantizationTrainer(L.LightningModule):
                 y_unique = len(np.unique(np.round(y.flatten().detach().cpu().numpy(), decimals=6)))
                 yhat_unique = len(np.unique(np.round(y_hat.flatten().detach().cpu().numpy(), decimals=6)))
                 
-                print(f"  Input:  μ={x_mean:.5f} σ={x_std:.5f} unique={x_unique}")
-                print(f"  Target: μ={y_mean:.5f} σ={y_std:.5f} unique={y_unique} | Δ from input={y_minus_x:.6f}")
-                print(f"  Output: μ={yhat_mean:.5f} σ={yhat_std:.5f} unique={yhat_unique} | Δ from target={yhat_minus_y:.6f}")
+                # Create loss components table
+                loss_table = Table(
+                    title=f"[bold cyan]Epoch {self.current_epoch} - Loss Components[/bold cyan]",
+                    show_header=True,
+                    header_style="bold magenta",
+                    border_style="cyan",
+                    padding=(0, 1),
+                )
+                loss_table.add_column("Loss Type", style="cyan", no_wrap=True)
+                loss_table.add_column("Value", justify="right", style="yellow")
+                
+                loss_table.add_row("L1", f"{l1_val:.6f}")
+                loss_table.add_row("L2", f"{l2_val:.6f}")
+                loss_table.add_row("Charbonnier", f"{char_val:.6f}")
+                loss_table.add_row("EdgeAware", f"{edge_val:.6f}")
+                loss_table.add_row("[bold]Total[/bold]", f"[bold green]{total_loss:.6f}[/bold green]")
+                
+                console.print(loss_table)
+                
+                # Create statistics table
+                stats_table = Table(
+                    title="[bold cyan]Input/Target/Output Statistics[/bold cyan]",
+                    show_header=True,
+                    header_style="bold magenta",
+                    border_style="cyan",
+                    padding=(0, 1),
+                )
+                stats_table.add_column("Tensor", style="cyan", no_wrap=True)
+                stats_table.add_column("μ (mean)", justify="right", style="green")
+                stats_table.add_column("σ (std)", justify="right", style="green")
+                stats_table.add_column("Unique Values", justify="right", style="yellow")
+                stats_table.add_column("Δ from Ref", justify="right", style="magenta")
+                
+                stats_table.add_row("Input", f"{x_mean:.5f}", f"{x_std:.5f}", str(x_unique), "—")
+                stats_table.add_row("Target", f"{y_mean:.5f}", f"{y_std:.5f}", str(y_unique), f"{y_minus_x:.6f}")
+                stats_table.add_row("Output", f"{yhat_mean:.5f}", f"{yhat_std:.5f}", str(yhat_unique), f"{yhat_minus_y:.6f}")
+                
+                console.print(stats_table)
+                
                 if y_minus_x < 0.001:
                     logger.warning(f"Target too similar to input (Δ={y_minus_x:.6f}). Check data pipeline!")
 
@@ -395,7 +436,7 @@ class DequantizationTrainer(L.LightningModule):
             raise
 
     def on_train_epoch_end(self) -> None:
-        """Print epoch performance summary with timing breakdown."""
+        """Print epoch performance summary with timing breakdown using rich."""
         if not self.epoch_timings["total_batch_ms"]:
             return  # No batches processed
         
@@ -413,21 +454,39 @@ class DequantizationTrainer(L.LightningModule):
         num_batches = len(self.epoch_timings["total_batch_ms"])
         throughput = num_batches / total_epoch if total_epoch > 0 else 0
         
-        # Print formatted table
-        print(f"\n{'='*90}")
-        print(f"EPOCH {self.current_epoch} - Performance Summary")
-        print(f"{'='*90}")
-        print(f"{'Metric':<25} {'Time (ms)':<15} {'% of Batch':<15}")
-        print(f"{'-'*90}")
-        print(f"{'Data Loading':<25} {data_load_avg:>13.2f}  {(data_load_avg/total_avg)*100:>13.1f}%")
+        # Create main performance table
+        perf_table = Table(
+            title=f"[bold cyan]Epoch {self.current_epoch} - Performance Summary[/bold cyan]",
+            show_header=True,
+            header_style="bold magenta",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+        perf_table.add_column("Metric", style="cyan", no_wrap=True)
+        perf_table.add_column("Time (ms)", justify="right", style="green")
+        perf_table.add_column("% of Batch", justify="right", style="yellow")
         
-        # Show DataLoader fetch vs process_batch breakdown at top level
+        # Add main metrics
+        perf_table.add_row(
+            "Data Loading",
+            f"{data_load_avg:.2f}",
+            f"{(data_load_avg/total_avg)*100:.1f}%"
+        )
+        
+        # Show DataLoader fetch vs process_batch breakdown
         if self.epoch_timings["process_batch_ms"]:
             process_batch_avg = np.mean(self.epoch_timings["process_batch_ms"])
             dataloader_fetch_ms = data_load_avg - process_batch_avg
-            print(f"  {'└─ Data Loading Breakdown:':<25}")
-            print(f"    {'├─ DataLoader Fetch (Workers):':<25} {dataloader_fetch_ms:>13.2f}  {(dataloader_fetch_ms/data_load_avg)*100:>13.1f}%")
-            print(f"    {'├─ Process Batch (_process_batch):':<25} {process_batch_avg:>13.2f}  {(process_batch_avg/data_load_avg)*100:>13.1f}%")
+            perf_table.add_row(
+                "  └─ DataLoader Fetch",
+                f"{dataloader_fetch_ms:.2f}",
+                f"{(dataloader_fetch_ms/data_load_avg)*100:.1f}%"
+            )
+            perf_table.add_row(
+                "  └─ Process Batch",
+                f"{process_batch_avg:.2f}",
+                f"{(process_batch_avg/data_load_avg)*100:.1f}%"
+            )
         
         # Display component breakdown if available
         if self.epoch_timings["component_timings"]:
@@ -436,73 +495,106 @@ class DequantizationTrainer(L.LightningModule):
             for comp_timing in self.epoch_timings["component_timings"]:
                 if comp_timing:
                     if "total_cache_hit_ms" in comp_timing:
-                        # This is a cache hit breakdown
                         for key, value in comp_timing.items():
                             if key not in cache_hit_times:
                                 cache_hit_times[key] = []
                             cache_hit_times[key].append(value)
                     else:
-                        # This is a cache miss breakdown
                         for key, value in comp_timing.items():
                             if key not in components:
                                 components[key] = []
                             components[key].append(value)
             
-            # Calculate averages for each component
-            print(f"      {'└─ Component Details (inside _process_batch):':<25}")
-            
             # Show cache hit breakdown if available
             if cache_hit_times and "total_cache_hit_ms" in cache_hit_times:
                 cache_hit_avg = np.mean(cache_hit_times["total_cache_hit_ms"])
                 cache_hit_pct = (cache_hit_avg / data_load_avg) * 100
-                print(f"        {'├─ Cache Hits (crop gen):':<22} {cache_hit_avg:>13.2f}  {cache_hit_pct:>13.1f}%")
+                perf_table.add_row(
+                    "    ├─ Cache Hits (crop gen)",
+                    f"{cache_hit_avg:.2f}",
+                    f"{cache_hit_pct:.1f}%"
+                )
                 
-                # Show cache hit sub-components
                 for sub_key in ["extract_and_permute_ms", "crop_generation_ms", "stacking_ms"]:
                     if sub_key in cache_hit_times:
                         sub_avg = np.mean(cache_hit_times[sub_key])
                         sub_pct = (sub_avg / cache_hit_avg) * 100 if cache_hit_avg > 0 else 0
                         sub_label = sub_key.replace("_ms", "").replace("_", " ").title()
-                        print(f"      {'├─ ' + sub_label:<20} {sub_avg:>13.2f}  {sub_pct:>13.1f}% (of cache)")
+                        perf_table.add_row(
+                            f"      ├─ {sub_label}",
+                            f"{sub_avg:.2f}",
+                            f"{sub_pct:.1f}% (of cache)"
+                        )
             
-            # Show measured components (from cache misses)
+            # Show measured components
             if components:
-                # Calculate total of measured components
                 comp_totals = {}
                 for comp_name in ["oiio_decode_ms", "gpu_transfer_ms", "cdl_ms", "aces_transform_ms", "quantization_ms"]:
                     if comp_name in components and components[comp_name]:
                         comp_totals[comp_name] = np.mean(components[comp_name])
-                
-                total_measured = sum(comp_totals.values()) if comp_totals else 0
                 
                 for comp_name in ["oiio_decode_ms", "gpu_transfer_ms", "cdl_ms", "aces_transform_ms", "quantization_ms"]:
                     if comp_name in comp_totals:
                         comp_avg = comp_totals[comp_name]
                         comp_pct = (comp_avg / data_load_avg) * 100 if data_load_avg > 0 else 0
                         display_name = comp_name.replace("_ms", "").replace("_", " ").title()
-                        print(f"        {'├─ ' + display_name:<20} {comp_avg:>13.2f}  {comp_pct:>13.1f}%")
+                        perf_table.add_row(
+                            f"    ├─ {display_name}",
+                            f"{comp_avg:.2f}",
+                            f"{comp_pct:.1f}%"
+                        )
                 
-                # Show batching overhead (tensor ops, format conversions, etc)
                 if "batching_overhead_ms" in components and components["batching_overhead_ms"]:
                     overhead_avg = np.mean(components["batching_overhead_ms"])
                     overhead_pct = (overhead_avg / data_load_avg) * 100 if data_load_avg > 0 else 0
-                    overhead_label = "├─ Batching Overhead (tensor ops, etc)"
-                    print(f"        {overhead_label:<40} {overhead_avg:>13.2f}  {overhead_pct:>13.1f}%")
+                    perf_table.add_row(
+                        "    ├─ Batching Overhead",
+                        f"{overhead_avg:.2f}",
+                        f"{overhead_pct:.1f}%"
+                    )
         
-        print(f"{'Forward Pass':<25} {forward_avg:>13.2f}  {(forward_avg/total_avg)*100:>13.1f}%")
-        print(f"{'Loss Computation':<25} {loss_avg:>13.2f}  {(loss_avg/total_avg)*100:>13.1f}%")
-        print(f"{'Backward Pass + Optim':<25} {backward_avg:>13.2f}  {(backward_avg/total_avg)*100:>13.1f}%")
-        print(f"{'-'*90}")
-        print(f"{'Total Batch Time':<25} {total_avg:>13.2f}  {'100.0':>13}%")
-        print(f"{'='*90}")
-        print(f"{'Dataset':<25} {'Value':<15}")
-        print(f"{'-'*90}")
-        print(f"{'Total Epoch Time':<25} {total_epoch:>13.2f}s")
-        print(f"{'Batches Processed':<25} {num_batches:>13}")
-        print(f"{'Throughput (batches/s)':<25} {throughput:>13.2f}")
-        print(f"{'GPU Memory (Current)':<25} {gpu_memory_avg:>13.2f} GB")
-        print(f"{'GPU Memory (Peak)':<25} {gpu_memory_max:>13.2f} GB")
-        print(f"{'='*90}\n")
+        perf_table.add_row(
+            "Forward Pass",
+            f"{forward_avg:.2f}",
+            f"{(forward_avg/total_avg)*100:.1f}%"
+        )
+        perf_table.add_row(
+            "Loss Computation",
+            f"{loss_avg:.2f}",
+            f"{(loss_avg/total_avg)*100:.1f}%"
+        )
+        perf_table.add_row(
+            "Backward Pass + Optim",
+            f"{backward_avg:.2f}",
+            f"{(backward_avg/total_avg)*100:.1f}%"
+        )
+        
+        perf_table.add_row(
+            "[bold]Total Batch Time[/bold]",
+            f"[bold green]{total_avg:.2f}[/bold green]",
+            "[bold yellow]100.0%[/bold yellow]"
+        )
+        
+        console.print(perf_table)
+        
+        # Create dataset metrics table
+        dataset_table = Table(
+            title="[bold cyan]Dataset Metrics[/bold cyan]",
+            show_header=True,
+            header_style="bold magenta",
+            border_style="cyan",
+            padding=(0, 1),
+        )
+        dataset_table.add_column("Metric", style="cyan", no_wrap=True)
+        dataset_table.add_column("Value", justify="right", style="green")
+        
+        dataset_table.add_row("Total Epoch Time", f"{total_epoch:.2f}s")
+        dataset_table.add_row("Batches Processed", str(num_batches))
+        dataset_table.add_row("Throughput (batches/s)", f"{throughput:.2f}")
+        dataset_table.add_row("GPU Memory (Current)", f"{gpu_memory_avg:.2f} GB")
+        dataset_table.add_row("GPU Memory (Peak)", f"{gpu_memory_max:.2f} GB")
+        
+        console.print(dataset_table)
 
     def configure_optimizers(self) -> dict:
         """Configure optimizer with CosineAnnealingLR scheduler.

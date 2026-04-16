@@ -7,7 +7,11 @@
 	"settings": {
 		"chat.tools.terminal.autoApprove": {
 			"pixi": true,
-			"timeout": true
+			"timeout": true,
+			"/^python -m py_compile scripts/train_dequantization_net\\.py$/": {
+				"approve": true,
+				"matchCommandLine": true
+			}
 		}
 	}
 }

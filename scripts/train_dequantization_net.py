@@ -42,7 +42,7 @@ import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 import pytorch_lightning as L
-from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback, RichModelSummary, RichProgressBar
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 
@@ -500,15 +500,14 @@ class HparamsMetricsCallback(Callback):
         return metrics_dict
 
 
-class CompactProgressBar(TQDMProgressBar):
-    """Compact progress bar with minimal redundant information."""
+class CustomRichProgressBar(RichProgressBar):
+    """Rich progress bar with custom batch metrics (GPU time and loss)."""
     
     def get_metrics(self, trainer: L.Trainer, pl_module: L.LightningModule) -> dict[str, Any]:
         """Override to inject batch-specific metrics into progress bar."""
         items = super().get_metrics(trainer, pl_module)
         # Remove redundant info
         items.pop("v_num", None)
-        items.pop("train_loss", None)
         
         # Inject batch GPU time and loss from module if available
         if hasattr(pl_module, 'last_batch_gpu_ms') and pl_module.last_batch_gpu_ms is not None:
@@ -519,19 +518,21 @@ class CompactProgressBar(TQDMProgressBar):
         return items
     
     def on_train_epoch_start(
-        self, trainer: L.Trainer, *args: Any
+        self, trainer: L.Trainer, pl_module: L.LightningModule
     ) -> None:
-        """Override epoch start to use compact format and set estimated total."""
-        super().on_train_epoch_start(trainer)
-        # Customize the progress bar description to be more compact
-        if hasattr(self, 'train_progress_bar') and self.train_progress_bar is not None:
-            self.train_progress_bar.set_description(f"Epoch {trainer.current_epoch}")
-            # Set estimated total batches from metadata if available
-            # Extract pl_module from args if available (PyTorch Lightning may pass it)
-            if len(args) > 0:
-                pl_module = args[0]
-                if hasattr(pl_module, 'estimated_total_batches') and pl_module.estimated_total_batches is not None:
-                    self.train_progress_bar.total = pl_module.estimated_total_batches
+        """Override epoch start to set estimated total batches."""
+        super().on_train_epoch_start(trainer, pl_module)
+        
+        # Set estimated total batches from metadata if available
+        if hasattr(pl_module, 'estimated_total_batches') and pl_module.estimated_total_batches is not None:
+            # Access the rich progress bar and set the total
+            if hasattr(self, 'progress') and self.progress is not None:
+                # For RichProgressBar, we need to update the task total
+                for task_id in self.progress.task_ids:
+                    task = self.progress._tasks[task_id]
+                    # Check if this is the training task (usually matches the epoch description)
+                    if "Epoch" in str(task.description) or task.total is None or task.total == 0:
+                        self.progress.update(task_id, total=pl_module.estimated_total_batches)
 
 
 
@@ -679,7 +680,8 @@ def main(cfg: DictConfig) -> None:
         logger=logger_tb,
         callbacks=[
             checkpoint_callback,
-            CompactProgressBar(),
+            RichModelSummary(max_depth=2),
+            CustomRichProgressBar(refresh_rate=100, leave=True),
             TensorBoardFlushCallback(),
             HparamsMetricsCallback(hparams_dict),
             SyntheticInferenceVisualizerCallback(

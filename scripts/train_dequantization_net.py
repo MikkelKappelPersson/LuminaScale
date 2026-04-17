@@ -149,6 +149,11 @@ class SyntheticInferenceVisualizerCallback(Callback):
             temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_{epoch_label}.pt"
             # Cast model as nn.Module to access state_dict
             model = cast(nn.Module, pl_module.model)
+            
+            # Unwrap torch.compile wrapper if present (torch.compile adds "_orig_mod" layer)
+            if hasattr(model, '_orig_mod'):
+                model = model._orig_mod
+            
             torch.save(model.state_dict(), temp_checkpoint)
             logger.debug(f"Saved temporary checkpoint to {temp_checkpoint}")
             
@@ -276,6 +281,11 @@ class SyntheticInferenceVisualizerCallback(Callback):
             # Save temporary checkpoint for run_inference.py
             temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_real_{epoch_label}.pt"
             model = cast(nn.Module, pl_module.model)
+            
+            # Unwrap torch.compile wrapper if present (torch.compile adds "_orig_mod" layer)
+            if hasattr(model, '_orig_mod'):
+                model = model._orig_mod
+            
             torch.save(model.state_dict(), temp_checkpoint)
             
             # Prepare output paths
@@ -661,6 +671,19 @@ def main(cfg: DictConfig) -> None:
     device = torch.device("cuda")
     model = model.to(device)
     print(f"[MAIN] Model moved to {device}")
+    
+    # Compile the model for performance (PyTorch 2.0+)
+    # See: https://lightning.ai/docs/pytorch/2.5.5/advanced/compile.html
+    if cfg.get("enable_compile", True):
+        print(f"[MAIN] Compiling model with torch.compile (mode='reduce-overhead' for CUDA Graphs)...")
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print(f"[MAIN] ✓ Model compiled successfully")
+        except Exception as e:
+            logger.warning(f"Failed to compile model: {e}. Continuing with uncompiled model.")
+            print(f"[MAIN] ⚠ Compilation failed: {e}. Proceeding without compilation.")
+    else:
+        print(f"[MAIN] Model compilation disabled (enable_compile=False)")
     
     print(f"[MAIN] Creating DequantizationTrainer...")
     ls_module = DequantizationTrainer(

@@ -21,6 +21,10 @@ precision: "16-mixed"
 # Disable profiling CUDA synchronizations for maximum throughput
 enable_profiling: false
 
+# torch.compile disabled due to Triton 3.0 compatibility issue
+# Re-enable with: enable_compile=true (after fixing triton.compiler.compiler issues)
+enable_compile: false
+
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:
   job:

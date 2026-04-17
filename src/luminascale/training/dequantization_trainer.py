@@ -414,8 +414,8 @@ class DequantizationTrainer(L.LightningModule):
             # === FORWARD PASS ===
             t_forward_start = time.perf_counter()
             
-            # Profile GPU kernels on first batch only to minimize overhead
-            if batch_idx == 0 and torch.cuda.is_available():
+            # Profile GPU kernels on first batch only (if profiling enabled)
+            if batch_idx == 0 and torch.cuda.is_available() and self.enable_profiling:
                 with profile(
                     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                     record_shapes=False,
@@ -584,108 +584,110 @@ class DequantizationTrainer(L.LightningModule):
         gpu_transfer_avg = np.mean(self.epoch_timings["gpu_transfer_overhead_ms"]) if self.epoch_timings["gpu_transfer_overhead_ms"] else 0
         framework_overhead_avg = np.mean(self.epoch_timings["framework_overhead_ms"]) if self.epoch_timings["framework_overhead_ms"] else 0
         
-        # Create consolidated time accounting table
-        accounting_table = Table(
-            title=f"[bold cyan]Epoch {self.current_epoch} - Batch Time Breakdown[/bold cyan]",
-            show_header=True,
-            header_style="bold magenta",
-            border_style="cyan",
-            padding=(0, 1),
-        )
-        accounting_table.add_column("Operation", style="cyan", no_wrap=True)
-        accounting_table.add_column("Time (ms)", justify="right", style="green")
-        accounting_table.add_column("% of Total", justify="right", style="yellow")
-        accounting_table.add_column("Source", style="dim", no_wrap=True)
-        
-        # Primary operations with explanations
-        accounting_table.add_row(
-            "Data Loading",
-            f"{data_load_avg:.2f}",
-            f"{(data_load_avg/total_avg)*100:.1f}%",
-            "EXR decode, CDL, ACES, quantization, GPU transfer"
-        )
-        
-        accounting_table.add_row(
-            "Forward Pass",
-            f"{forward_avg:.2f}",
-            f"{(forward_avg/total_avg)*100:.1f}%",
-            "Model inference on GPU"
-        )
-        
-        accounting_table.add_row(
-            "Loss Computation",
-            f"{loss_avg:.2f}",
-            f"{(loss_avg/total_avg)*100:.1f}%",
-            "L1 + L2 + Charbonnier + EdgeAware on GPU"
-        )
-        
-        accounting_table.add_row(
-            "Backward Pass",
-            f"{backward_avg:.2f}",
-            f"{(backward_avg/total_avg)*100:.1f}%",
-            "Gradient computation on GPU"
-        )
-        
-        accounting_table.add_row(
-            "Optimizer Step",
-            f"{optimizer_step_avg:.2f}",
-            f"{(optimizer_step_avg/total_avg)*100:.1f}%",
-            "Adam weight update on GPU"
-        )
-        
-        # Overhead components
-        if gpu_sync_avg > 0.1:
-            accounting_table.add_row(
-                "GPU Synchronization",
-                f"{gpu_sync_avg:.2f}",
-                f"{(gpu_sync_avg/total_avg)*100:.1f}%",
-                "torch.cuda.synchronize() calls"
+        # Only print accounting table if profiling is enabled
+        if self.enable_profiling:
+            # Create consolidated time accounting table
+            accounting_table = Table(
+                title=f"[bold cyan]Epoch {self.current_epoch} - Batch Time Breakdown[/bold cyan]",
+                show_header=True,
+                header_style="bold magenta",
+                border_style="cyan",
+                padding=(0, 1),
             )
-        
-        if gpu_transfer_avg > 0.1:
+            accounting_table.add_column("Operation", style="cyan", no_wrap=True)
+            accounting_table.add_column("Time (ms)", justify="right", style="green")
+            accounting_table.add_column("% of Total", justify="right", style="yellow")
+            accounting_table.add_column("Source", style="dim", no_wrap=True)
+            
+            # Primary operations with explanations
             accounting_table.add_row(
-                "GPU Memory Transfer",
-                f"{gpu_transfer_avg:.2f}",
-                f"{(gpu_transfer_avg/total_avg)*100:.1f}%",
-                "PCIe bandwidth + GPU allocation"
+                "Data Loading",
+                f"{data_load_avg:.2f}",
+                f"{(data_load_avg/total_avg)*100:.1f}%",
+                "EXR decode, CDL, ACES, quantization, GPU transfer"
             )
-        
-        if framework_overhead_avg > 0.1:
+            
             accounting_table.add_row(
-                "Framework Overhead",
-                f"{framework_overhead_avg:.2f}",
-                f"{(framework_overhead_avg/total_avg)*100:.1f}%",
-                "PyTorch/Lightning hidden costs"
+                "Forward Pass",
+                f"{forward_avg:.2f}",
+                f"{(forward_avg/total_avg)*100:.1f}%",
+                "Model inference on GPU"
             )
-        
-        # Calculate total accounted for (without double-counting overhead_between_steps)
-        total_accounted = (data_load_avg + forward_avg + loss_avg + backward_avg + optimizer_step_avg + 
-                          gpu_sync_avg + gpu_transfer_avg + framework_overhead_avg)
-        unaccounted_ms = total_avg - total_accounted
-        
-        accounting_table.add_row(
-            "[bold]Total Accounted[/bold]",
-            f"[bold green]{total_accounted:.2f}[/bold green]",
-            f"[bold yellow]{(total_accounted/total_avg)*100:.1f}%[/bold yellow]",
-            ""
-        )
-        
-        if unaccounted_ms > 0.1:
+            
             accounting_table.add_row(
-                "[bold red]UNACCOUNTED[/bold red]",
-                f"[bold red]{unaccounted_ms:.2f}[/bold red]",
-                f"[bold red]{(unaccounted_ms/total_avg)*100:.1f}%[/bold red]",
-                "[bold red]MISSING - needs investigation[/bold red]"
+                "Loss Computation",
+                f"{loss_avg:.2f}",
+                f"{(loss_avg/total_avg)*100:.1f}%",
+                "L1 + L2 + Charbonnier + EdgeAware on GPU"
             )
-        
-        accounting_table.add_row(
-            "[bold cyan]Total Batch[/bold cyan]",
-            f"[bold cyan]{total_avg:.2f}[/bold cyan]",
-            "[bold cyan]100.0%[/bold cyan]",
-            ""
-        )
-        
-        console.print(accounting_table)
+            
+            accounting_table.add_row(
+                "Backward Pass",
+                f"{backward_avg:.2f}",
+                f"{(backward_avg/total_avg)*100:.1f}%",
+                "Gradient computation on GPU"
+            )
+            
+            accounting_table.add_row(
+                "Optimizer Step",
+                f"{optimizer_step_avg:.2f}",
+                f"{(optimizer_step_avg/total_avg)*100:.1f}%",
+                "Adam weight update on GPU"
+            )
+            
+            # Overhead components
+            if gpu_sync_avg > 0.1:
+                accounting_table.add_row(
+                    "GPU Synchronization",
+                    f"{gpu_sync_avg:.2f}",
+                    f"{(gpu_sync_avg/total_avg)*100:.1f}%",
+                    "torch.cuda.synchronize() calls"
+                )
+            
+            if gpu_transfer_avg > 0.1:
+                accounting_table.add_row(
+                    "GPU Memory Transfer",
+                    f"{gpu_transfer_avg:.2f}",
+                    f"{(gpu_transfer_avg/total_avg)*100:.1f}%",
+                    "PCIe bandwidth + GPU allocation"
+                )
+            
+            if framework_overhead_avg > 0.1:
+                accounting_table.add_row(
+                    "Framework Overhead",
+                    f"{framework_overhead_avg:.2f}",
+                    f"{(framework_overhead_avg/total_avg)*100:.1f}%",
+                    "PyTorch/Lightning hidden costs"
+                )
+            
+            # Calculate total accounted for (without double-counting overhead_between_steps)
+            total_accounted = (data_load_avg + forward_avg + loss_avg + backward_avg + optimizer_step_avg + 
+                              gpu_sync_avg + gpu_transfer_avg + framework_overhead_avg)
+            unaccounted_ms = total_avg - total_accounted
+            
+            accounting_table.add_row(
+                "[bold]Total Accounted[/bold]",
+                f"[bold green]{total_accounted:.2f}[/bold green]",
+                f"[bold yellow]{(total_accounted/total_avg)*100:.1f}%[/bold yellow]",
+                ""
+            )
+            
+            if unaccounted_ms > 0.1:
+                accounting_table.add_row(
+                    "[bold red]UNACCOUNTED[/bold red]",
+                    f"[bold red]{unaccounted_ms:.2f}[/bold red]",
+                    f"[bold red]{(unaccounted_ms/total_avg)*100:.1f}%[/bold red]",
+                    "[bold red]MISSING - needs investigation[/bold red]"
+                )
+            
+            accounting_table.add_row(
+                "[bold cyan]Total Batch[/bold cyan]",
+                f"[bold cyan]{total_avg:.2f}[/bold cyan]",
+                "[bold cyan]100.0%[/bold cyan]",
+                ""
+            )
+            
+            console.print(accounting_table)
         
         # Create GPU kernel profiling table (if profiling was enabled)
         if self.gpu_kernel_times and len(self.gpu_kernel_times) > 0:
@@ -728,7 +730,7 @@ class DequantizationTrainer(L.LightningModule):
                 
                 console.print(gpu_kernel_table)
         
-        # Create dataset metrics table
+        # Create dataset metrics table (always shown - no GPU overhead)
         dataset_table = Table(
             title="[bold cyan]Dataset Metrics[/bold cyan]",
             show_header=True,

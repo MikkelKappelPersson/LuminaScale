@@ -44,6 +44,9 @@ loss:
   charbonnier_weight: 0.5  # Charbonnier loss on OUTPUT (edge-preserving smoothness)
   grad_match_weight: 0.0   # Edge-aware smoothing (soft): no artifacts in smooth regions
 
+# Performance tuning
+enable_profiling: false  # Disable CUDA synchronization calls by default (enables profiling when true)
+
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:
   job:

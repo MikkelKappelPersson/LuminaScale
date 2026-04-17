@@ -1,5 +1,6 @@
 defaults:
   - default
+  - _self_
 
 config_name: dev
 

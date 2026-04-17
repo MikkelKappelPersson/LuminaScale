@@ -25,7 +25,7 @@ enable_profiling: false
 
 # torch.compile disabled due to Triton 3.0 compatibility issue
 # Re-enable with: enable_compile=true (after fixing triton.compiler.compiler issues)
-enable_compile: false
+enable_compile: true
 
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:

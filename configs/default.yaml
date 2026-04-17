@@ -47,7 +47,7 @@ loss:
 
 # Performance tuning
 enable_profiling: false  # Disable CUDA synchronization calls by default (enables profiling when true)
-enable_compile: false    # Disable torch.compile by default (requires Triton 3.0+ compatibility). Re-enable after fixing dependencies.
+enable_compile: false    # Disable torch.compile (requires CUDA headers and complex Triton setup). Training optimizations: use mixed precision (16-bit) and gradient checkpointing instead.
 
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:

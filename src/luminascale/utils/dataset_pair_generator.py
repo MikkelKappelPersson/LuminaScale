@@ -234,7 +234,10 @@ class DatasetPairGenerator:
         return srgb_8u_batch, srgb_32f_batch, timing_breakdown
 
     def cleanup(self) -> None:
-        """Release GPU resources."""
+        """Release GPU resources (respects CDL processor's cache_clearing setting).
+        
+        Delegates to CDL processor which only clears cache if explicitly enabled.
+        """
         self.cdl_processor.cleanup()
 
 

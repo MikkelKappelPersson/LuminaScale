@@ -81,7 +81,6 @@ class DequantizationTrainer(L.LightningModule):
         self.enable_profiling = enable_profiling  # Enable CUDA synchronization for profiling (slows down training)
         # Track last batch metrics for progress bar
         self.last_batch_gpu_ms = None
-        self.last_batch_loss = None
         self.estimated_total_batches = None  # Set by training script if metadata available
         self.last_epoch_throughput_samples_per_sec = None  # Store for hparams logging
         
@@ -511,67 +510,7 @@ class DequantizationTrainer(L.LightningModule):
             if torch.cuda.is_available():
                 self.epoch_gpu_memory.append(torch.cuda.memory_allocated() / 1e9)  # GB
             
-            # Log loss composition on first batch of each epoch
-            if batch_idx == 0 and self.current_epoch % 1 == 0:
-                l1_val = l1_loss(y_hat, y).item()
-                l2_val = l2_loss(y_hat, y).item()
-                char_val = charbonnier_loss(y_hat).item()
-                edge_val = edge_aware_smoothing_loss(y_hat, y).item()
-                total_loss = loss.item()
-                
-                # Verify training target differs from input
-                x_mean, x_std = x.mean().item(), x.std().item()
-                y_mean, y_std = y.mean().item(), y.std().item()
-                yhat_mean, yhat_std = y_hat.mean().item(), y_hat.std().item()
-                y_minus_x = (y - x).abs().mean().item()
-                yhat_minus_y = (y_hat - y).abs().mean().item()
-                
-                # Count unique values
-                x_unique = len(np.unique(np.round(x.flatten().detach().cpu().numpy(), decimals=6)))
-                y_unique = len(np.unique(np.round(y.flatten().detach().cpu().numpy(), decimals=6)))
-                yhat_unique = len(np.unique(np.round(y_hat.flatten().detach().cpu().numpy(), decimals=6)))
-                
-                # Create loss components table
-                loss_table = Table(
-                    title=f"[bold cyan]Epoch {self.current_epoch} - Loss Components[/bold cyan]",
-                    show_header=True,
-                    header_style="bold magenta",
-                    border_style="cyan",
-                    padding=(0, 1),
-                )
-                loss_table.add_column("Loss Type", style="cyan", no_wrap=True)
-                loss_table.add_column("Value", justify="right", style="yellow")
-                
-                loss_table.add_row("L1", f"{l1_val:.6f}")
-                loss_table.add_row("L2", f"{l2_val:.6f}")
-                loss_table.add_row("Charbonnier", f"{char_val:.6f}")
-                loss_table.add_row("EdgeAware", f"{edge_val:.6f}")
-                loss_table.add_row("[bold]Total[/bold]", f"[bold green]{total_loss:.6f}[/bold green]")
-                
-                console.print(loss_table)
-                
-                # Create statistics table
-                stats_table = Table(
-                    title="[bold cyan]Input/Target/Output Statistics[/bold cyan]",
-                    show_header=True,
-                    header_style="bold magenta",
-                    border_style="cyan",
-                    padding=(0, 1),
-                )
-                stats_table.add_column("Tensor", style="cyan", no_wrap=True)
-                stats_table.add_column("μ (mean)", justify="right", style="green")
-                stats_table.add_column("σ (std)", justify="right", style="green")
-                stats_table.add_column("Unique Values", justify="right", style="yellow")
-                stats_table.add_column("Δ from Ref", justify="right", style="magenta")
-                
-                stats_table.add_row("Input", f"{x_mean:.5f}", f"{x_std:.5f}", str(x_unique), "—")
-                stats_table.add_row("Target", f"{y_mean:.5f}", f"{y_std:.5f}", str(y_unique), f"{y_minus_x:.6f}")
-                stats_table.add_row("Output", f"{yhat_mean:.5f}", f"{yhat_std:.5f}", str(yhat_unique), f"{yhat_minus_y:.6f}")
-                
-                console.print(stats_table)
-                
-                if y_minus_x < 0.001:
-                    logger.warning(f"Target too similar to input (Δ={y_minus_x:.6f}). Check data pipeline!")
+            # Metrics are logged to TensorBoard via self.log() below (no .item() calls needed)
 
             self.log("loss_L1/train", l1_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_L2/train", l2_loss(y_hat, y), prog_bar=False, sync_dist=True)
@@ -582,8 +521,6 @@ class DequantizationTrainer(L.LightningModule):
             current_lr = self.optimizers().param_groups[0]["lr"]
             self.log("learning_rate", current_lr, prog_bar=False, sync_dist=True)
             
-            # Store metrics for progress bar display
-            self.last_batch_loss = loss.item()
             self.last_batch_gpu_ms = total_batch_ms
             return loss
             

@@ -36,14 +36,18 @@ class GPUCDLProcessor:
     Designed for integration into dataloader pipelines with minimal CPU overhead.
     """
 
-    def __init__(self, device: torch.device | None = None) -> None:
+    def __init__(self, device: torch.device | None = None, enable_cache_clearing: bool = False) -> None:
         """Initialize processor.
         
         Args:
             device: torch device (defaults to CUDA if available).
+            enable_cache_clearing: Enable torch.cuda.empty_cache() in cleanup() (default: False).
+                Set to False during training (GPU cache clearing forces synchronization, blocking pipeline).
+                Only enable for post-processing or cleanup after long-running inference sessions.
         """
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.debug(f"GPU CDL Processor initialized on {self.device}")
+        self.enable_cache_clearing = enable_cache_clearing
+        logger.debug(f"GPU CDL Processor initialized on {self.device}, cache_clearing={'enabled' if enable_cache_clearing else 'disabled'}")
 
     def apply_cdl_gpu(
         self,
@@ -218,7 +222,13 @@ class GPUCDLProcessor:
         return graded_batch, timing
 
     def cleanup(self) -> None:
-        """Clear GPU cache."""
-        if self.device.type == "cuda":
+        """Clear GPU cache (optional, disabled by default to avoid pipeline blocking).
+        
+        Only clears cache if enable_cache_clearing=True was set during initialization.
+        Cache clearing forces GPU-CPU synchronization which blocks the training pipeline.
+        """
+        if self.device.type == "cuda" and self.enable_cache_clearing:
             torch.cuda.empty_cache()
             logger.debug("GPU cache cleared")
+        elif self.device.type == "cuda" and not self.enable_cache_clearing:
+            logger.debug("GPU cache clearing disabled (enable_cache_clearing=False)")

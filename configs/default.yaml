@@ -16,8 +16,9 @@ checkpoint_freq: 10
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 
 # Data loading
-num_workers: 1
-shuffle_buffer: 50
+prefetch_size: 2
+num_workers: 2
+shuffle_buffer: 50  # Buffer size for shuffling individual samples (shardshuffle is automatic based on is_training)
 
 # Hardware
 device: cuda

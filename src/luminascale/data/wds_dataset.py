@@ -190,7 +190,10 @@ class LuminaScaleWebDataset:
         
         
         # Build the WebDataset pipeline
-        dataset = wds.WebDataset(self.shard_path, resampled=False, empty_check=False)
+        # Shuffle shards with buffer during training for distributed randomness; deterministic for validation
+        # shardshuffle expects integer buffer size (not boolean)
+        shardshuffle_buffer = 100 if is_training else False
+        dataset = wds.WebDataset(self.shard_path, resampled=False, empty_check=False, shardshuffle=shardshuffle_buffer)
         
         # Split by worker (instead of .shardselection method)
         dataset = dataset.select(wds.shardlists.split_by_worker)
@@ -238,9 +241,16 @@ class LuminaScaleWebDataset:
         }
         
         # Add prefetch_factor if num_workers > 0 (only meaningful with multiprocessing)
+        # PyTorch requires prefetch_factor >= 1 when num_workers > 0
         if num_workers > 0:
+            effective_prefetch = max(prefetch_factor, 1)
+            if prefetch_factor != effective_prefetch:
+                logger.warning(
+                    f"prefetch_factor={prefetch_factor} invalid with num_workers={num_workers}; "
+                    f"PyTorch requires prefetch_factor >= 1. Using prefetch_factor={effective_prefetch}"
+                )
             try:
-                loader_kwargs["prefetch_factor"] = prefetch_factor
+                loader_kwargs["prefetch_factor"] = effective_prefetch
             except TypeError:
                 # WebLoader might not support prefetch_factor, skip it
                 logger.debug("WebLoader does not support prefetch_factor parameter")

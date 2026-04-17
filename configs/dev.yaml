@@ -7,10 +7,11 @@ config_name: dev
 shard_path: "dataset/temp/shards/train"
 epochs: 1
 
+prefetch_size: 2
 # Optimize throughput without multiple patches strategy
 
 batch_size: 1          # Larger batch for better GPU utilization
-num_workers: 1         # Optimal: minimizes GIL contention while maintaining I/O
+num_workers: 2         # Optimal: minimizes GIL contention while maintaining I/O
  
 
 crop_size: 2048

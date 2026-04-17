@@ -648,7 +648,7 @@ def main(cfg: DictConfig) -> None:
             shard_path=val_shard_path,
             batch_size=cfg.get("batch_size", 32),
             shuffle_buffer=cfg.get("shuffle_buffer", 1000),
-            is_training=False,  # No shuffling or augmentation for validation
+            is_training=False,  # No shuffling for validation
             metadata_parquet=cfg.get("metadata_parquet"),
         )
         print(f"[MAIN] ✓ Validation WebDataset created")

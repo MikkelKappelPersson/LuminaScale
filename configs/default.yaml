@@ -10,9 +10,9 @@ metadata_parquet: "dataset/temp/training_metadata.parquet"
 
 # Training parameters
 batch_size: 1
-epochs: 20  
+epochs: 50  
 learning_rate: 1e-4  
-checkpoint_freq: 10
+checkpoint_freq: 50
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 
 # Data loading

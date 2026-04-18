@@ -94,6 +94,10 @@ class DequantizationNet(nn.Module):
             zip(self.decoder_blocks, skip_connections)
         ):
             feat = self.upsample(feat)
+            # Crop skip connection to match upsampled feature spatial dimensions
+            # This handles off-by-one errors from bilinear upsampling on non-power-of-2 sizes
+            feat_h, feat_w = feat.shape[2:]
+            skip = skip[:, :, :feat_h, :feat_w]
             feat = torch.cat([feat, skip], dim=1)
             feat = decoder_block(feat)
 

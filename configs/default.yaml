@@ -35,8 +35,8 @@ model:
   base_channels: 32
 
 # Image processing
-crop_size: 2028
-val_crop_size: 2028  # Validation crop size (can differ from training for speed)
+crop_size: 2048
+val_crop_size: 1024  # Validation crop size (can differ from training for speed)
 
 # Loss weights (tuned for smooth dequantization with Charbonnier smoothness)
 loss:

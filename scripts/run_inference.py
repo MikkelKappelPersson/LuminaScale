@@ -15,6 +15,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import numpy as np
+from scipy import ndimage
 from PIL import Image
 try:
     import OpenImageIO as oiio
@@ -54,10 +55,13 @@ def align_to_model(tensor: torch.Tensor) -> torch.Tensor:
 def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width: int | None, height: int | None, output_path: Path, gradient_type: str = "combined", contrast_strength: float = 10.0, apply_contrast_to_output: bool = False):
     """Generate and run inference on a synthetic primary gradients image.
     
+    Note on resizing: All processing (quantization, contrast, etc.) happens at native resolution.
+    Resizing only occurs in save_comparison for visualization/display.
+    
     Args:
         gradient_type: "combined", "8x21", "4x21", or "2x21"
-        width: Target width (None = native size)
-        height: Target height (None = native size)
+        width: Ignored (kept for API compatibility)
+        height: Ignored (kept for API compatibility)
         apply_contrast_to_output: If True, apply S-curve contrast to model output before saving EXR
     
     Note:
@@ -67,77 +71,44 @@ def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width:
     """
     print(f"Generating synthetic primary gradients ({gradient_type})...")
     
-    # Generate HDR (8-bit quantized input) version
+    # Generate gradients at native resolution (no resizing during processing)
     if gradient_type == "combined":
-        hdr = combine_primary_gradients(width=128, dtype="float32")  # [3, 192, 128]
-        # Transpose to [H, W, C] for processing
-        hdr = np.transpose(hdr, (1, 2, 0))  # [192, 128, 3]
-        
-        target_w = 128  # Width always stays 128
-        target_h = 192  # Combined is always 192px (3 variants × 64)
-        
-        if height is not None:
-            # Scale height if specified
-            scale = height / 192.0
-            target_h = height
-            from PIL import Image as PILImage
-            hdr_img = PILImage.fromarray((np.clip(hdr, 0, 1) * 255).astype(np.uint8))
-            hdr_img = hdr_img.resize((target_w, target_h), PILImage.Resampling.LANCZOS)
-            hdr = np.array(hdr_img).astype(np.float32) / 255.0
-            print(f"  Scaled to {target_w}×{target_h}")
-        
-        # Reference: full 0-255 gradient for comparison
-        reference = combine_reference_gradients(width=128, dtype="float32")  # [3, 192, 128]
-        reference = np.transpose(reference, (1, 2, 0))  # [192, 128, 3]
-        
-        if height is not None:
-            ref_img = PILImage.fromarray((np.clip(reference, 0, 1) * 255).astype(np.uint8))
-            ref_img = ref_img.resize((target_w, target_h), PILImage.Resampling.LANCZOS)
-            reference = np.array(ref_img).astype(np.float32) / 255.0
-            print(f"  Scaled to {target_w}×{target_h}")
+        hdr_chw = combine_primary_gradients(width=128, dtype="float32")  # [3, 192, 128]
+        reference_chw = combine_reference_gradients(width=128, dtype="float32")  # [3, 192, 128]
+    elif gradient_type == "8x21":
+        hdr_chw = create_primary_gradients(width=128, block_width=8, dtype="float32")
+        reference_chw = create_reference_gradients(width=128, block_width=8, dtype="float32")
+    elif gradient_type == "4x21":
+        hdr_chw = create_primary_gradients(width=128, block_width=4, dtype="float32")
+        reference_chw = create_reference_gradients(width=128, block_width=4, dtype="float32")
+    elif gradient_type == "2x21":
+        hdr_chw = create_primary_gradients(width=128, block_width=2, dtype="float32")
+        reference_chw = create_reference_gradients(width=128, block_width=2, dtype="float32")
     else:
-        # Single variants - always [3, 64, 128]
-        target_w = 128  # Width always 128
-        target_h = 64   # Height always 64 for single variants
-        
-        if gradient_type == "8x21":
-            hdr_tensor = create_primary_gradients(width=128, block_width=8, dtype="float32")
-            ref_tensor = create_reference_gradients(width=128, block_width=8, dtype="float32")
-        elif gradient_type == "4x21":
-            hdr_tensor = create_primary_gradients(width=128, block_width=4, dtype="float32")
-            ref_tensor = create_reference_gradients(width=128, block_width=4, dtype="float32")
-        elif gradient_type == "2x21":
-            hdr_tensor = create_primary_gradients(width=128, block_width=2, dtype="float32")
-            ref_tensor = create_reference_gradients(width=128, block_width=2, dtype="float32")
-        else:
-            raise ValueError(f"Unknown gradient_type: {gradient_type}")
-        
-        # Transpose from [C,H,W] to [H,W,C]
-        hdr = np.transpose(hdr_tensor, (1, 2, 0))
-        reference = np.transpose(ref_tensor, (1, 2, 0))
+        raise ValueError(f"Unknown gradient_type: {gradient_type}")
     
-    hdr_clipped = np.clip(hdr, 0, 1)
-    ldr = quantize_to_8bit(hdr_clipped)
+    # All processing at native resolution
+    hdr_hwc = np.transpose(hdr_chw, (1, 2, 0))  # [H, W, 3]
+    hdr_clipped = np.clip(hdr_hwc, 0, 1)
+    ldr = quantize_to_8bit(hdr_clipped)  # Quantize at native resolution
+    ldr_chw = np.transpose(ldr, (2, 0, 1))  # Back to [C, H, W]
     
-    # Convert back to [C,H,W] for model
-    ldr_chw = np.transpose(ldr, (2, 0, 1))
-    
+    # Run model at native resolution
     input_tensor = torch.from_numpy(ldr_chw).float().to(device).unsqueeze(0)
-    
     with torch.no_grad():
         output_tensor = model(input_tensor).squeeze(0).cpu().numpy()
     
-    # Optionally apply contrast to output before saving
+    # Optionally apply contrast to output before saving (at native resolution)
     output_to_save = output_tensor
     if apply_contrast_to_output:
         output_to_save = apply_s_curve_contrast(output_tensor.transpose(1, 2, 0), strength=contrast_strength).transpose(2, 0, 1)
     
-    # Save as EXR (normalized model output, possibly with contrast)
+    # Save as EXR (native resolution, no resizing)
     write_exr(output_path, output_to_save)
     
-    # Save a comparison: input vs model output vs reference (full range ground truth)
-    reference_clipped = np.clip(reference, 0, 1)
-    save_comparison(ldr_chw, output_tensor, np.transpose(reference_clipped, (2, 0, 1)), output_path.with_suffix('.png'), strength=contrast_strength, synthetic=gradient_type)
+    # Save comparison: resizing for visualization happens only in save_comparison
+    reference_clipped = np.clip(reference_chw, 0, 1)
+    save_comparison(ldr_chw, output_tensor, reference_clipped, output_path.with_suffix('.png'), strength=contrast_strength, synthetic=gradient_type)
     print(f"✓ Synthetic inference complete. Model output: {output_path}")
 
 def run_image_inference(model: torch.nn.Module, device: torch.device, input_path: Path, output_path: Path, contrast_strength: float = 20.0, apply_contrast_to_output: bool = False):

@@ -5,8 +5,8 @@ defaults:
 config_name: dev
 
 # Data paths
-shard_path: "dataset/temp/shards/train"
-epochs: 1
+shard_path: "dataset/temp/shards/val"
+epochs: 6
 
 prefetch_size: 2
 # Optimize throughput without multiple patches strategy
@@ -23,9 +23,9 @@ precision: "16-mixed"
 # Disable profiling CUDA synchronizations for maximum throughput
 enable_profiling: false
 
-# torch.compile disabled due to Triton 3.0 compatibility issue
-# Re-enable with: enable_compile=true (after fixing triton.compiler.compiler issues)
-enable_compile: true
+# torch.compile disabled due to missing CUDA headers in Triton compilation
+# Set to true to enable (requires proper CUDA development headers)
+enable_compile: false
 
 # Hydra configuration to suppress working directory change warning and .hydra/ folder
 hydra:

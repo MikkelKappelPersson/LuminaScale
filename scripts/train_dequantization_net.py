@@ -102,23 +102,30 @@ class SyntheticInferenceVisualizerCallback(Callback):
         """Run inference at the start of training."""
         logger.debug("Running synthetic inference visualization at training start...")
         self._log_synthetic_inference(trainer, pl_module, step=0, epoch_label="start")
-        logger.debug("Running real image inference visualization at training start...")
+        logger.debug("Running real image inference at training start...")
         self._log_real_image_inference(trainer, pl_module, step=0, epoch_label="start")
     
     def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Run inference after each epoch."""
-        epoch = trainer.current_epoch + 1
-        epoch_label = f"epoch_{trainer.current_epoch}"
-        self._log_synthetic_inference(
-            trainer, pl_module, 
-            step=epoch, 
-            epoch_label=epoch_label
-        )
-        self._log_real_image_inference(
-            trainer, pl_module,
-            step=epoch,
-            epoch_label=epoch_label
-        )
+        """Run inference every 5 epochs."""
+        # Run both synthetic and real image inference every 5 epochs (at epochs 4, 9, 14, ...)
+        if trainer.current_epoch % 5 == 4:
+            epoch_label = f"epoch_{trainer.current_epoch}"
+            self._log_synthetic_inference(
+                trainer, pl_module, 
+                step=trainer.current_epoch, 
+                epoch_label=epoch_label
+            )
+            self._log_real_image_inference(
+                trainer, pl_module,
+                step=trainer.current_epoch,
+                epoch_label=epoch_label
+            )
+    
+    def on_train_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Run inference at the end of training to capture final model state."""
+        logger.debug("Running inference at training end...")
+        self._log_synthetic_inference(trainer, pl_module, step=trainer.current_epoch, epoch_label="end")
+        self._log_real_image_inference(trainer, pl_module, step=trainer.current_epoch, epoch_label="end")
     
     def _log_synthetic_inference(
         self, 
@@ -255,7 +262,15 @@ class SyntheticInferenceVisualizerCallback(Callback):
         step: int,
         epoch_label: str
     ) -> None:
-        """Run inference on a real test image and log results to TensorBoard.
+        """Run inference on real test images and log outputs to TensorBoard.
+        
+        Processes three reference images from assets folder and logs only EXR outputs.
+        Run every 5 epochs (plus at training start).
+        
+        Images:
+        - assets/grinder_01.jpg
+        - assets/mountains_01.jpg
+        - assets/woods_1.jpg
         
         Args:
             trainer: PyTorch Lightning trainer
@@ -270,15 +285,15 @@ class SyntheticInferenceVisualizerCallback(Callback):
             logger.error("Trainer log_dir is None, cannot run real image inference")
             return
         
+        test_images = [
+            project_root / "assets" / "grinder_01.jpg",
+            project_root / "assets" / "mountains_01.jpg",
+            project_root / "assets" / "woods_1.jpg",
+        ]
+        
         temp_checkpoint: Path | None = None
         try:
-            # Path to test image
-            test_image = project_root / "dataset" / "test_images" / "woods_1.jpg"
-            if not test_image.exists():
-                logger.warning(f"Test image not found: {test_image}")
-                return
-            
-            # Save temporary checkpoint for run_inference.py
+            # Save temporary checkpoint for run_inference.py (reuse for all images)
             temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_real_{epoch_label}.pt"
             model = cast(nn.Module, pl_module.model)
             
@@ -288,83 +303,62 @@ class SyntheticInferenceVisualizerCallback(Callback):
             
             torch.save(model.state_dict(), temp_checkpoint)
             
-            # Prepare output paths
-            output_exr = Path(trainer.log_dir) / f"real_image_{epoch_label}.exr"
-            output_png = Path(trainer.log_dir) / f"real_image_{epoch_label}.png"
-            
-            # Run run_inference.py on real image
-            cmd = [
-                "python",
-                str(self.run_inference_script),
-                "--checkpoint",
-                str(temp_checkpoint),
-                "--input",
-                str(test_image),
-                "--output",
-                str(output_exr),
-                "--device",
-                str(str(pl_module.device).split(":")[0]),
-                "--contrast-strength=2.0",
-            ]
-            
-            logger.debug(f"Running real image inference: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
-            
-            if result.returncode != 0:
-                logger.error(f"Real image inference failed with return code {result.returncode}")
-                logger.error(f"STDERR: {result.stderr}")
-                return
-            
-            logger.debug(f"Real image inference stdout: {result.stdout}")
-            
             tb = trainer.logger.experiment  # type: ignore
             
-            # Log the comparison PNG if it was generated
-            if output_png.exists():
-                logger.debug(f"Logging real image comparison from {output_png}")
-                try:
-                    from PIL import Image as PILImage
-                    import matplotlib.pyplot as plt
-                    
-                    img = PILImage.open(output_png)
-                    fig = plt.figure(figsize=(14, 12))
-                    ax = fig.add_subplot(111)
-                    ax.imshow(img)
-                    ax.axis('off')
-                    
-                    tb.add_figure("visualization/test", fig, global_step=step)
-                    tb.flush()
-                    plt.close(fig)
-                    logger.debug(f"✓ Logged visualization/test")
-                except Exception as e:
-                    logger.error(f"Failed to log real image comparison PNG: {e}", exc_info=True)
-            else:
-                logger.warning(f"Real image comparison PNG not found: {output_png}")
-            
-            # Read and log the EXR output
-            if output_exr.exists():
-                logger.debug(f"Real image output EXR found at {output_exr}")
-                output_np = read_exr(output_exr)
-                output_tensor = torch.from_numpy(output_np).float()
+            # Process each test image
+            for test_image in test_images:
+                if not test_image.exists():
+                    logger.warning(f"Test image not found: {test_image}")
+                    continue
                 
-                output_clipped = torch.clamp(output_tensor, 0, 1)
-                tb.add_image(f"inference/test", output_clipped, global_step=step)
-                tb.flush()
-                logger.debug(f"✓ Logged inference/test")
-            else:
-                logger.warning(f"Real image output EXR not found: {output_exr}")
-                return
+                # Use image name (without .jpg) as identifier
+                image_name = test_image.stem
+                output_exr = Path(trainer.log_dir) / f"{image_name}_{epoch_label}.exr"
+                
+                # Run run_inference.py (no PNG comparison needed)
+                cmd = [
+                    "python",
+                    str(self.run_inference_script),
+                    "--checkpoint",
+                    str(temp_checkpoint),
+                    "--input",
+                    str(test_image),
+                    "--output",
+                    str(output_exr),
+                    "--device",
+                    str(str(pl_module.device).split(":")[0]),
+                ]
+                
+                logger.debug(f"Running real image inference on {image_name}: {' '.join(cmd)}")
+                result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
+                
+                if result.returncode != 0:
+                    logger.error(f"Real image inference on {image_name} failed with return code {result.returncode}")
+                    logger.error(f"STDERR: {result.stderr}")
+                    continue
+                
+                logger.debug(f"Real image inference on {image_name} stdout: {result.stdout}")
+                
+                # Read and log the EXR output only
+                if output_exr.exists():
+                    logger.debug(f"Output EXR found: {output_exr}")
+                    output_np = read_exr(output_exr)
+                    output_tensor = torch.from_numpy(output_np).float()
+                    
+                    output_clipped = torch.clamp(output_tensor, 0, 1)
+                    tb.add_image(f"inference/{image_name}", output_clipped, global_step=step)
+                    tb.flush()
+                    logger.debug(f"✓ Logged inference/{image_name}")
+                else:
+                    logger.warning(f"Output EXR not found: {output_exr}")
             
-            # Cleanup only temporary checkpoint
+            # Cleanup temporary checkpoint
             if temp_checkpoint and temp_checkpoint.exists():
                 temp_checkpoint.unlink()
-            logger.debug(f"✓ Real image inference visualization logged: {epoch_label}")
-            logger.debug(f"  - Input: {test_image}")
-            logger.debug(f"  - Comparison grid (PNG): {output_png}")
-            logger.debug(f"  - Model output (EXR): {output_exr}")
+            logger.debug(f"✓ Real image inference logged: {epoch_label} (3 images)")
         
         except Exception as e:
-            logger.error(f"Error during real image inference visualization: {e}", exc_info=True)
+            logger.error(f"Error during real image inference: {e}", exc_info=True)
             # Best effort cleanup
             if temp_checkpoint is not None:
                 try:

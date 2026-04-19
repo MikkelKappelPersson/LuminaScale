@@ -25,5 +25,4 @@ echo "Using Shards in: dataset/temp/shards/train/"
 # Overriding shuffle_buffer slightly if needed
 singularity exec --nv $CONTAINER \
     python scripts/train_dequantization_net.py \
-        --config-name=default \
         "$@"

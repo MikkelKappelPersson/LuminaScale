@@ -29,6 +29,7 @@ from ..data.wds_dataset import LuminaScaleWebDataset
 from ..utils.dataset_pair_generator import DatasetPairGenerator
 from ..utils.image_generator import create_primary_gradients, quantize_to_8bit, apply_s_curve_contrast_torch
 from ..utils.metrics import DeltaEACES
+from .losses import l1_loss, l2_loss, charbonnier_loss, edge_aware_smoothing_loss, total_variation_loss
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +68,15 @@ class DequantizationTrainer(L.LightningModule):
                 "l2_weight": 0.0,
                 "charbonnier_weight": 3.0,
                 "grad_match_weight": 2.0,
+                "total_variation_weight": 0.0,
+                "total_variation_variant": "l2",
             }
         self.l1_weight = loss_weights.get("l1_weight", 1.0)
         self.l2_weight = loss_weights.get("l2_weight", 0.0)
         self.charbonnier_weight = loss_weights.get("charbonnier_weight", 3.0)
         self.grad_match_weight = loss_weights.get("grad_match_weight", 2.0)
+        self.total_variation_weight = loss_weights.get("total_variation_weight", 0.0)
+        self.total_variation_variant = loss_weights.get("total_variation_variant", "l2")
         
         # Note: Do NOT call save_hyperparameters() here - full config is logged at training end via HparamsMetricsCallback
         self.pair_generator = None  # Lazy initialization for WebDataset batches
@@ -449,7 +454,8 @@ class DequantizationTrainer(L.LightningModule):
             loss = (l1_loss(y_hat, y) * self.l1_weight + 
                    l2_loss(y_hat, y) * self.l2_weight + 
                    charbonnier_loss(y_hat) * self.charbonnier_weight + 
-                   edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight)
+                   edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight +
+                   total_variation_loss(y_hat, variant=self.total_variation_variant) * self.total_variation_weight)
             loss_ms = (time.perf_counter() - t_loss_start) * 1000
             
             # === CHECKPOINT 2: Before Backward (sync to see actual forward+loss time) ===
@@ -528,6 +534,7 @@ class DequantizationTrainer(L.LightningModule):
             self.log("loss_L2/train", l2_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_Charbonnier/train", charbonnier_loss(y_hat), prog_bar=False, sync_dist=True)
             self.log("loss_EdgeAware/train", edge_aware_smoothing_loss(y_hat, y), prog_bar=False, sync_dist=True)
+            self.log("loss_TV/train", total_variation_loss(y_hat, variant=self.total_variation_variant), prog_bar=False, sync_dist=True)
             self.log("loss_total/train", loss, prog_bar=False, sync_dist=True)
             # Log current learning rate (supports dynamic LR scheduling)
             current_lr = self.optimizers().param_groups[0]["lr"]
@@ -888,102 +895,3 @@ class DequantizationTrainer(L.LightningModule):
                 "frequency": 1,
             },
         }
-
-
-def l1_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Unmasked L1 (MAE) loss - more robust to outliers.
-    
-    L1 loss provides sharper transitions and can be more effective than L2
-    for dequantization tasks where we want to preserve edges and avoid
-    over-smoothing. Less sensitive to outliers compared to L2.
-    """
-    return F.l1_loss(pred.float(), target.float())
-
-
-def l2_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Unmasked L2 (MSE) loss - default loss function.
-    
-    Provides training signal across the full tonal range without masking.
-    This is superior to masked L2 as it trains the model on all pixel values,
-    including the extremes where dequantization is most visible.
-    """
-    return F.mse_loss(pred.float(), target.float())
-
-
-def masked_l2_loss(
-    pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor
-) -> torch.Tensor:
-    """Masked L2 loss to ignore clipped regions (deprecated in favor of l2_loss)."""
-    diff = (pred - target) ** 2
-    masked_diff = diff * mask
-    loss = masked_diff.sum() / (mask.sum() + 1e-8)
-    return loss
-
-
-def charbonnier_loss(img: torch.Tensor, reduction: str = "mean", eps: float = 1e-3) -> torch.Tensor:
-    """Compute Total Variation using Charbonnier (smooth L1) loss.
-    
-    Uses Charbonnier instead of hard L1 abs. This penalizes small gradients 
-    heavily (quantization artifacts) but allows large gradients (real edges) 
-    without over-smoothing.
-    
-    Charbonnier: sqrt(x² + eps²) is smooth everywhere and differentiable,
-    unlike abs(x) which has a sharp corner at x=0.
-    
-    Args:
-        img: Image tensor [B, C, H, W]
-        reduction: 'mean' or 'sum'
-        eps: Smoothing parameter (smaller = more like L1, larger = more like L2)
-    
-    Returns:
-        Charbonnier total variation loss
-    """
-    dy = img[:, :, 1:, :] - img[:, :, :-1, :]
-    dx = img[:, :, :, 1:] - img[:, :, :, :-1]
-    
-    # Charbonnier: sqrt(x² + eps²) - smooth approximation to |x|
-    # Gentler on large values (preserves edges), harsh on small values (removes banding)
-    dy_smooth = torch.sqrt(dy**2 + eps**2)
-    dx_smooth = torch.sqrt(dx**2 + eps**2)
-    
-    if reduction == "mean":
-        return (dy_smooth.mean() + dx_smooth.mean()) / 2.0
-    else:
-        return (dy_smooth.sum() + dx_smooth.sum()) / 2.0
-
-
-def edge_aware_smoothing_loss(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-) -> torch.Tensor:
-    """Penalize inconsistency in edge structure (where gradients exist or don't).
-    
-    Instead of forcing gradients to match exactly, this checks if there are edges
-    where they should be (in target) and no edges where there shouldn't be.
-    
-    This is softer than gradient matching but stronger than plain TV.
-    
-    Args:
-        pred: Model prediction [B, C, H, W]
-        target: Target image [B, C, H, W]
-    
-    Returns:
-        Edge consistency loss
-    """
-    # Compute gradient magnitude (how "edgy" each location is)
-    grad_target_y = torch.abs(target[:, :, 1:, :] - target[:, :, :-1, :])
-    grad_target_x = torch.abs(target[:, :, :, 1:] - target[:, :, :, :-1])
-    
-    grad_pred_y = torch.abs(pred[:, :, 1:, :] - pred[:, :, :-1, :])
-    grad_pred_x = torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])
-    
-    # Where target has NO gradients (smooth regions), penalize pred more heavily
-    # This forces smooth regions to stay smooth without over-constraining edges
-    smooth_mask_y = (grad_target_y < 0.01).float()  # 0 = smooth region in target
-    smooth_mask_x = (grad_target_x < 0.01).float()
-    
-    # In smooth regions, large gradients are bad
-    loss_y = (smooth_mask_y * grad_pred_y).mean()
-    loss_x = (smooth_mask_x * grad_pred_x).mean()
-    
-    return (loss_y + loss_x) / 2.0

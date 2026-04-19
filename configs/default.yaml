@@ -44,8 +44,10 @@ bit_crunch_contrast_max: 20.0   # Max bit-crunching factor (pre=1/factor, post=f
 loss:
   l1_weight: 1.0           # Pixel-wise reconstruction (base)
   l2_weight: 0.0           # L2 loss (MSE)
-  charbonnier_weight: 0.5  # Charbonnier loss on OUTPUT (edge-preserving smoothness)
+  charbonnier_weight: 0.0  # Charbonnier loss on OUTPUT (edge-preserving smoothness)
   grad_match_weight: 0.0   # Edge-aware smoothing (soft): no artifacts in smooth regions
+  total_variation_weight: 0.0  # Total variation loss (gradient smoothing)
+  total_variation_variant: "huber"  # Variant for TV loss: "huber" or "l2"
 
 # Performance tuning
 enable_profiling: false  # Disable CUDA synchronization calls by default (enables profiling when true)

@@ -706,15 +706,19 @@ def main(cfg: DictConfig) -> None:
     l2_weight = loss_cfg.get("l2_weight", 0.0)  # Currently unused, but available for future use
     charbonnier_weight = loss_cfg.get("charbonnier_weight", 0.05)
     grad_match_weight = loss_cfg.get("grad_match_weight", 0.5)
+    total_variation_weight = loss_cfg.get("total_variation_weight", 0.0)
+    total_variation_variant = loss_cfg.get("total_variation_variant", "l2")
     
     # Create dynamic loss_fn string showing the actual formula with weights
+    # Use shorter names and = for clarity: L1=1.0_L2=0.0_CB=0.0_EA=0.0_TV-huber=0.0
     loss_fn_str = (
-        f"L1*{l1_weight} + L2*{l2_weight} + "
-        f"Charbonnier*{charbonnier_weight} + EdgeAware*{grad_match_weight}"
+        f"L1={l1_weight}_L2={l2_weight}_"
+        f"CB={charbonnier_weight}_EA={grad_match_weight}_TV-{total_variation_variant}={total_variation_weight}"
     )
 
     # Append a sanitized version of the loss formula to the TensorBoard/run directory name
-    run_dir_suffix = re.sub(r"[^A-Za-z0-9._-]+", "_", loss_fn_str).strip("_")
+    # Allow = in filenames (safe on all filesystems: Linux, Windows, macOS)
+    run_dir_suffix = re.sub(r"[^A-Za-z0-9._=-]+", "_", loss_fn_str).strip("_")
     run_dir = Path(cfg.output_dir).resolve() / f"{run_id}_{run_dir_suffix}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -759,6 +763,8 @@ def main(cfg: DictConfig) -> None:
         "weight_l2": l2_weight,
         "weight_charbonnier": charbonnier_weight,
         "weight_grad_match": grad_match_weight,
+        "weight_tv": total_variation_weight,
+        "tv_variant": total_variation_variant,
         "model_base_channels": cfg.model.base_channels,
         "crop_size": 512,
         "shuffle_buffer": cfg.get("shuffle_buffer", 10),

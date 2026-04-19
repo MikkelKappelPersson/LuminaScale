@@ -438,34 +438,19 @@ class ACESColorTransformer(nn.Module):
         
         # Initialize LUT interpolator if requested
         if use_lut:
-            try:
-                import sys
-                msg = f"[ACESColorTransformer] Loading ACES LUT on device {self.device}..."
-                logger.debug(msg)
-                sys.stderr.write(msg + "\n")
-                sys.stderr.flush()
-                
-                lut_data = extract_luts_from_ocio(lut_config_path)
-                self.lut_interpolator = LUTInterpolator(lut_data["lut_3d"].to(self.device))
-                
-                msg = f"[ACESColorTransformer] ✓ LUT loaded successfully"
-                logger.debug(msg)
-                sys.stderr.write(msg + "\n")
-                sys.stderr.flush()
-            except TimeoutError as e:
-                msg = f"[ACESColorTransformer] ⚠ LUT extraction timeout: {e}. Using analytical tone curve."
-                logger.warning(msg)
-                sys.stderr.write(msg + "\n")
-                sys.stderr.flush()
-                self.use_lut = False
-                self.lut_interpolator = None
-            except Exception as e:
-                msg = f"[ACESColorTransformer] ⚠ LUT extraction failed: {e}. Using analytical tone curve."
-                logger.warning(msg)
-                sys.stderr.write(msg + "\n")
-                sys.stderr.flush()
-                self.use_lut = False
-                self.lut_interpolator = None
+            import sys
+            msg = f"[ACESColorTransformer] Loading ACES LUT on device {self.device}..."
+            logger.debug(msg)
+            sys.stderr.write(msg + "\n")
+            sys.stderr.flush()
+            
+            lut_data = extract_luts_from_ocio(lut_config_path)
+            self.lut_interpolator = LUTInterpolator(lut_data["lut_3d"].to(self.device))
+            
+            msg = f"[ACESColorTransformer] ✓ LUT loaded successfully"
+            logger.debug(msg)
+            sys.stderr.write(msg + "\n")
+            sys.stderr.flush()
         else:
             self.lut_interpolator = None
         

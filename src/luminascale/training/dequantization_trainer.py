@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -194,9 +195,19 @@ class DequantizationTrainer(L.LightningModule):
         
         if self.pair_generator is None:
             t_init = time.perf_counter()
-            print(f"[_PROCESS_BATCH] Initializing DatasetPairGenerator on {device}...")
+            msg = f"[_PROCESS_BATCH] Initializing DatasetPairGenerator on {device}..."
+            print(msg)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            
             self.pair_generator = DatasetPairGenerator(device)
-            timing["init_pair_generator_ms"] = (time.perf_counter() - t_init) * 1000
+            init_time_ms = (time.perf_counter() - t_init) * 1000
+            timing["init_pair_generator_ms"] = init_time_ms
+            
+            msg = f"[_PROCESS_BATCH] ✓ DatasetPairGenerator initialized in {init_time_ms:.1f}ms"
+            print(msg)
+            sys.stdout.flush()
+            sys.stderr.flush()
         
         exr_bytes_list, metadata_list = batch
         

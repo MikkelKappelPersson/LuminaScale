@@ -317,16 +317,34 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
     
     # Sample the OCIO processor at regular intervals using CPU processor
     import time
+    import sys
     t0 = time.perf_counter()
+    max_wait_time = 300.0  # 5 minute timeout per LUT extraction
+    
     for i in range(lut_size):
         if i % 32 == 0:
             elapsed = time.perf_counter() - t0
             if i > 0:
                 eta_total = elapsed * lut_size / i
                 eta_remaining = eta_total - elapsed
-                logger.debug(f"  Sampling LUT: {i}/{lut_size} ({elapsed:.1f}s elapsed, ~{eta_remaining:.1f}s remaining)")
+                msg = f"  Sampling LUT: {i}/{lut_size} ({elapsed:.1f}s elapsed, ~{eta_remaining:.1f}s remaining)"
+                logger.debug(msg)
+                sys.stderr.write(msg + "\n")
+                sys.stderr.flush()
             else:
-                logger.debug(f"  Sampling LUT: {i}/{lut_size}")
+                msg = f"  Sampling LUT: {i}/{lut_size}"
+                logger.debug(msg)
+                sys.stderr.write(msg + "\n")
+                sys.stderr.flush()
+            
+            # Check for timeout
+            if elapsed > max_wait_time:
+                raise TimeoutError(
+                    f"LUT extraction exceeded {max_wait_time}s timeout at i={i}/{lut_size}. "
+                    f"Falling back to analytical tone curve. "
+                    f"To fix: ensure OCIO/PyOpenColorIO is functional or use cached LUT."
+                )
+        
         for j in range(lut_size):
             for k in range(lut_size):
                 # Normalize coordinates to [0, 1] range
@@ -346,7 +364,10 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
                 lut_3d[i, j, k] = test_img[0, 0, :3]
     
     elapsed = time.perf_counter() - t0
-    logger.debug(f"Created 3D LUT in {elapsed:.1f}s: {lut_3d.shape}")
+    msg = f"Created 3D LUT in {elapsed:.1f}s: {lut_3d.shape}"
+    logger.debug(msg)
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
     
     lut_data = {
         "lut_3d": torch.from_numpy(lut_3d).float(),
@@ -418,10 +439,31 @@ class ACESColorTransformer(nn.Module):
         # Initialize LUT interpolator if requested
         if use_lut:
             try:
+                import sys
+                msg = f"[ACESColorTransformer] Loading ACES LUT on device {self.device}..."
+                logger.debug(msg)
+                sys.stderr.write(msg + "\n")
+                sys.stderr.flush()
+                
                 lut_data = extract_luts_from_ocio(lut_config_path)
                 self.lut_interpolator = LUTInterpolator(lut_data["lut_3d"].to(self.device))
+                
+                msg = f"[ACESColorTransformer] ✓ LUT loaded successfully"
+                logger.debug(msg)
+                sys.stderr.write(msg + "\n")
+                sys.stderr.flush()
+            except TimeoutError as e:
+                msg = f"[ACESColorTransformer] ⚠ LUT extraction timeout: {e}. Using analytical tone curve."
+                logger.warning(msg)
+                sys.stderr.write(msg + "\n")
+                sys.stderr.flush()
+                self.use_lut = False
+                self.lut_interpolator = None
             except Exception as e:
-                logger.warning(f"LUT extraction failed: {e}. Falling back to analytical tone mapping.")
+                msg = f"[ACESColorTransformer] ⚠ LUT extraction failed: {e}. Using analytical tone curve."
+                logger.warning(msg)
+                sys.stderr.write(msg + "\n")
+                sys.stderr.flush()
                 self.use_lut = False
                 self.lut_interpolator = None
         else:

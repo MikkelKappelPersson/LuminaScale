@@ -35,6 +35,10 @@
 			"/^python -c \"from src\\.luminascale\\.utils\\.metrics import compute_ssim, compute_delta_e_aces; print\\('✓ Metrics imported successfully'\\)\"$/": {
 				"approve": true,
 				"matchCommandLine": true
+			},
+			"/^python -m py_compile visualisations/validate_training_pairs\\.py src/luminascale/training/dequantization_trainer\\.py scripts/train_dequantization_net\\.py src/luminascale/utils/dataset_pair_generator\\.py 2>&1 \\| head -50$/": {
+				"approve": true,
+				"matchCommandLine": true
 			}
 		}
 	}

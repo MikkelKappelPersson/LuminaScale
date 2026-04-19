@@ -690,6 +690,8 @@ def main(cfg: DictConfig) -> None:
         num_workers=cfg.get("num_workers", 2),
         precision=cfg.get("precision", "32"),
         enable_profiling=cfg.get("enable_profiling", False),  # Disable CUDA sync by default for speed
+        bit_crunch_contrast_min=cfg.get("bit_crunch_contrast_min", 1.0),
+        bit_crunch_contrast_max=cfg.get("bit_crunch_contrast_max", 1.0),
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore

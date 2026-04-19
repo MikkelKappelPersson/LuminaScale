@@ -92,18 +92,32 @@ def create_visualization(
     pair_generator = DatasetPairGenerator(device=device)
     
     # Process all samples in one batch
-    input_8u_batch, target_32f_batch = pair_generator.generate_batch_from_bytes(
-        exr_bytes_list, crop_size=512
+    input_8u_batch, target_32f_batch, timing_breakdown = pair_generator.generate_batch_from_bytes(
+        exr_bytes_list, 
+        crop_size=1024, 
+        bit_crunch_contrast_min=1.0,
+        bit_crunch_contrast_max=20.0,
     )
     
     logger.info(f"✓ Processed {len(input_8u_batch)} samples")
+    logger.debug(f"Timing breakdown: {timing_breakdown}")
+    
+    # Extract and display per-image crunch factors to validate randomization
+    crunch_factors = timing_breakdown.get("crunch_factors", [])
+    if crunch_factors:
+        logger.info(f"Bit-crunch factors per image: {[f'{f:.2f}' for f in crunch_factors]}")
+        if len(set(f"{f:.2f}" for f in crunch_factors)) == 1:
+            logger.warning("⚠ All images have the SAME crunch factor (randomization may not be working)")
+        else:
+            logger.info(f"✓ Randomization confirmed: factors vary across images")
     
     # Create grid visualization
     num_samples = len(input_8u_batch)
     fig = plt.figure(figsize=(22, 4 * num_samples))
     gs = GridSpec(num_samples, 5, figure=fig, hspace=0.3, wspace=0.15)
     
-    contrast_factor = 25.0
+    contrast_factor = 2.0
+    crunch_factors = timing_breakdown.get("crunch_factors", [1.0] * num_samples)
     
     for sample_idx in range(num_samples):
         # Extract sample
@@ -122,10 +136,13 @@ def create_visualization(
         diff_np = np.abs(input_np - target_np)
         diff_gray = np.mean(diff_np, axis=2)  # Average across channels for grayscale
         
+        # Get crunch factor for this sample (for title display)
+        crunch = crunch_factors[sample_idx] if sample_idx < len(crunch_factors) else 1.0
+        
         # Plot row: input | input contrast | difference | target | target contrast
         ax1 = fig.add_subplot(gs[sample_idx, 0])
         ax1.imshow(input_np, cmap=None)
-        ax1.set_title(f"Sample {sample_idx}: Input (8-bit)")
+        ax1.set_title(f"Sample {sample_idx}: Input (8-bit)\nCrunch={crunch:.2f}")
         ax1.axis("off")
         
         ax2 = fig.add_subplot(gs[sample_idx, 1])

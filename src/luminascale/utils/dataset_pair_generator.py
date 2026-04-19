@@ -53,9 +53,22 @@ class DatasetPairGenerator:
     def generate_batch_from_bytes(
         self, 
         exr_bytes_list: list[bytes], 
-        crop_size: int = 512
+        crop_size: int = 512,
+        bit_crunch_contrast_min: float = 1.0,
+        bit_crunch_contrast_max: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor, dict]:
         """Process a list of raw EXR bytes into graded sRGB 8u/32f pairs on GPU.
+        
+        Args:
+            exr_bytes_list: List of raw EXR bytes to process
+            crop_size: Size of square crop to extract (512 default)
+            bit_crunch_contrast_min: Minimum bit-crunching factor (1.0=no crunch, >1=aggressive)
+            bit_crunch_contrast_max: Maximum bit-crunching factor
+        
+        Bit-crunching: Symmetric contrast reduction and expansion around 8-bit quantization.
+        - Pre-quant: Reduce contrast by 1/bit_crunch_factor (crush data into 8-bit range)
+        - Quantize: Force through 8-bit bottleneck
+        - Post-quant: Expand by bit_crunch_factor (restore original contrast level)
         
         OPTIMIZED: Single-pass decode (eliminates validation pass).
         Pre-allocates output tensors and writes directly.
@@ -76,8 +89,18 @@ class DatasetPairGenerator:
         processed_samples = []
         tensors_8u = []
         tensors_32f = []
+        crunch_factors_used = []  # Track factors per image for validation
         
         for idx, exr_bytes in enumerate(exr_bytes_list):
+            # Randomize bit-crunching factor PER IMAGE for data augmentation
+            if bit_crunch_contrast_min != bit_crunch_contrast_max:
+                bit_crunch_factor = np.random.uniform(bit_crunch_contrast_min, bit_crunch_contrast_max)
+            else:
+                bit_crunch_factor = bit_crunch_contrast_min
+            
+            # Calculate symmetric pre/post contrast (reciprocal relationship)
+            pre_quant_contrast = 1.0 / bit_crunch_factor  # Reduce contrast (crush)
+            post_quant_contrast = bit_crunch_factor  # Expand contrast (restore)
             temp_file = None
             try:
                 t_sample = time.perf_counter()
@@ -170,18 +193,24 @@ class DatasetPairGenerator:
                 t_aces = time.perf_counter()
                 aces_times.append((t_aces - t_aces_start) * 1000)
                 
+                # === PRE-QUANTIZATION BIT CRUNCHING CONTRAST ===
+                srgb_32f = apply_s_curve_contrast_torch(srgb_32f, strength=pre_quant_contrast) # crush data into narrower range
+
                 # === QUANTIZATION ===
-                t_quant_start = time.perf_counter()
-                srgb_8u = ((srgb_32f * 255).round().to(torch.uint8)).float() / 255.0
-                srgb_8u = apply_s_curve_contrast_torch(srgb_8u, strength=2.5)
-                srgb_32f = apply_s_curve_contrast_torch(srgb_32f, strength=2.5)
+                t_quant_start = time.perf_counter()             
+                srgb_8u = ((srgb_32f * 255).round().to(torch.uint8)).float() / 255.0            
                 t_quant = time.perf_counter()
                 quant_times.append((t_quant - t_quant_start) * 1000)
                 
+                # === POST-QUANTIZATION BIT CRUNCHING CONTRAST ===
+                srgb_8u = apply_s_curve_contrast_torch(srgb_8u, strength=post_quant_contrast) # expand/enhance the quantized data
+                srgb_32f = apply_s_curve_contrast_torch(srgb_32f, strength=post_quant_contrast) # also apply to 32f target for consistency
+
                 # === PERMUTE & STORE ===
                 t_permute_start = time.perf_counter()
                 tensors_8u.append(srgb_8u.permute(2, 0, 1))
                 tensors_32f.append(srgb_32f.permute(2, 0, 1))
+                crunch_factors_used.append(bit_crunch_factor)
                 t_permute = time.perf_counter()
                 permute_times.append((t_permute - t_permute_start) * 1000)
                 
@@ -220,7 +249,8 @@ class DatasetPairGenerator:
             "look_gen_ms": np.mean(look_gen_times) if look_gen_times else 0,
             "permute_ms": np.mean(permute_times) if permute_times else 0,
             "stack_batch_ms": stack_time_ms,
-            "total_decode_batch_ms": total_time
+            "total_decode_batch_ms": total_time,
+            "crunch_factors": crunch_factors_used,  # Per-image bit-crunching factors for validation
         }
         
         # Calculate overhead from new granular timings

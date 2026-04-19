@@ -47,6 +47,8 @@ class DequantizationTrainer(L.LightningModule):
         num_workers: int = 2,
         precision: str = "32",
         enable_profiling: bool = False,
+        bit_crunch_contrast_min: float = 1.0,
+        bit_crunch_contrast_max: float = 1.0,
     ) -> None:
         super().__init__()
         print(f"[DequantizationTrainer] Initializing LightningModule...")
@@ -75,6 +77,8 @@ class DequantizationTrainer(L.LightningModule):
         self.pair_generator = None  # Lazy initialization for WebDataset batches
         self.crop_size = crop_size  # Configurable crop size for WebDataset batches (training)
         self.val_crop_size = val_crop_size if val_crop_size is not None else crop_size  # Validation crop size (can differ for speed)
+        self.bit_crunch_contrast_min = bit_crunch_contrast_min  # Min bit-crunching factor
+        self.bit_crunch_contrast_max = bit_crunch_contrast_max  # Max bit-crunching factor
         self.batch_size = batch_size  # Batch size for throughput calculation (samples/sec)
         self.num_workers = num_workers  # Number of data loading workers
         self.precision = precision  # Mixed precision setting (e.g., "16-mixed", "32")
@@ -160,7 +164,7 @@ class DequantizationTrainer(L.LightningModule):
         # Just return the batch as-is for tensors; Lightning will move them
         return batch
 
-    def _process_batch(self, batch: tuple[list[bytes], list[dict]], crop_size: int | None = None) -> tuple[torch.Tensor, torch.Tensor, dict | None]:
+    def _process_batch(self, batch: tuple[list[bytes], list[dict]], crop_size: int | None = None, is_validation: bool = False) -> tuple[torch.Tensor, torch.Tensor, dict | None]:
         """Convert raw WDS batch (bytes) into graded training pairs (LDR, HDR) on GPU.
         
         With WebDataset.repeat(patches_per_image), consecutive items are from the same image.
@@ -170,6 +174,7 @@ class DequantizationTrainer(L.LightningModule):
         Args:
             batch: Tuple of (exr_bytes_list, metadata_list)
             crop_size: Optional crop size override. If None, uses self.crop_size
+            is_validation: If True, disables contrast augmentation (uses min value without randomization)
         
         Returns: (srgb_8u_batch, srgb_32f_batch, timing_dict)
         timing_dict contains component breakdown for cache misses, or cache_hit_ms for cache hits
@@ -230,10 +235,17 @@ class DequantizationTrainer(L.LightningModule):
             logger.debug(f"[PROCESS BATCH] Cache MISS - decoding image '{current_image_id}'")
             t_decode_start = time.perf_counter()
             
+            # For validation, use consistent bit-crunching (min value, no augmentation)
+            # For training, use randomized bit-crunching between min/max
+            bit_crunch_min = self.bit_crunch_contrast_min if is_validation else self.bit_crunch_contrast_min
+            bit_crunch_max = self.bit_crunch_contrast_min if is_validation else self.bit_crunch_contrast_max
+            
             # Decode full image(s) into graded sRGB pairs
             srgb_8u_batch, srgb_32f_batch, batch_timing_breakdown = self.pair_generator.generate_batch_from_bytes(
                 exr_bytes_list, 
-                crop_size=crop_size
+                crop_size=crop_size,
+                bit_crunch_contrast_min=bit_crunch_min,
+                bit_crunch_contrast_max=bit_crunch_max,
             )
             total_decode_ms = (time.perf_counter() - t_decode_start) * 1000
             logger.debug(f"[PROCESS BATCH] Decoded and graded {len(exr_bytes_list)} image(s) in {total_decode_ms:.1f}ms")
@@ -775,7 +787,8 @@ class DequantizationTrainer(L.LightningModule):
                 # WebDataset case: decode batch
                 if isinstance(batch[0], list) and len(batch[0]) > 0 and isinstance(batch[0][0], bytes):
                     # Use val_crop_size for validation crops (can be smaller for speed)
-                    x, y, _ = self._process_batch(batch, crop_size=self.val_crop_size)
+                    # Use is_validation=True to disable contrast augmentation
+                    x, y, _ = self._process_batch(batch, crop_size=self.val_crop_size, is_validation=True)
                 else:
                     # Standard tuple/list format: (x, y)
                     x, y = batch[0], batch[1]

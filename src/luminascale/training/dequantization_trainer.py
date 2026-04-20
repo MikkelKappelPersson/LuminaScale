@@ -480,6 +480,10 @@ class DequantizationTrainer(L.LightningModule):
             self.manual_backward(loss)  # GPU kernel launches (async)
             backward_ms = (time.perf_counter() - t_backward_start) * 1000
             
+            # === GRADIENT CLIPPING ===
+            # Manual clipping required since automatic_optimization = False
+            self.clip_gradients(self.optimizers(), gradient_clip_val=1.0, gradient_clip_algorithm="norm")
+            
             # === OVERHEAD: Between Backward and Optimizer ===
             t_overhead_optim_start = time.perf_counter()
             

@@ -776,7 +776,6 @@ def main(cfg: DictConfig) -> None:
         devices=cfg.devices,
         max_epochs=cfg.epochs,
         num_sanity_val_steps=0,  # Skip sanity check for faster startup
-        gradient_clip_val=1.0,   # Prevents exploding gradients by capping the norm
         logger=logger_tb,
         callbacks=[
             checkpoint_callback,

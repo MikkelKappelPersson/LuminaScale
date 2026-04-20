@@ -5,7 +5,7 @@
 LuminaScale implements neural models for:
 
 -   **Bit-Depth Expansion (BDE)/Dequantization**: Upsampling low-bit-depth imagery (e.g., 8-bit, 10-bit) to higher fidelity using learned super-resolution.
--   **ACES Normalization**: Color space transformation and “blind” normalization to SMPTE Academy Color Encoding System (ACES) without ground-truth targets.
+-   **ACES transformer**: Color space transformation and “blind” normalization to SMPTE Academy Color Encoding System (ACES) without ground-truth targets.
 
 ## Architecture
 

@@ -22,6 +22,11 @@ sbatch scripts/train_dequantization_net.sh config-name=train_01
 sbatch scripts/train_dequantization_net.sh loss.l1_weight=1.0 loss.l2_weight=0.0 loss.charbonnier_weight=2.0 loss.grad_match_weight=0.0
 ```
 
+## Training with srun
+```bash
+srun --cpus-per-task=16 --mem=64G --gres=gpu:l40s:1 --time=1:00:00 singularity exec --nv luminascale.sif python3 scripts/train_dequantization_net.py --config-name=dev
+```
+
 ## Inference
 
 Run inference on a 2K synthetic sky gradient using `srun`:

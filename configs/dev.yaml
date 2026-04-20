@@ -6,7 +6,7 @@ config_name: dev
 
 # Data paths
 shard_path: "dataset/temp/shards/val"
-epochs: 1
+epochs: 2
 
 prefetch_size: 2
 # Optimize throughput without multiple patches strategy
@@ -21,7 +21,7 @@ val_crop_size: 1024  # Faster validation with smaller crops
 precision: "16-mixed"
 
 # Disable profiling CUDA synchronizations for maximum throughput
-enable_profiling: false
+enable_profiling: true
 
 # torch.compile disabled due to missing CUDA headers in Triton compilation
 # Set to true to enable (requires proper CUDA development headers)

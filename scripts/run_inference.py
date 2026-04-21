@@ -211,16 +211,21 @@ def save_comparison(ldr, model_out, gt, save_path: Path, strength: float = 10.0,
     ax12.axis('off')
     
     # Row 3: Difference Maps and Histogram
-    diff_map = np.abs(model_out_np - ldr_np)
+    # Use s-curve enhanced versions for difference maps to reveal quantized steps
+    ldr_enhanced = apply_s_curve_contrast(ldr_np, strength=strength)
+    model_enhanced = apply_s_curve_contrast(model_out_np, strength=strength)
+    gt_enhanced = apply_s_curve_contrast(gt_np, strength=strength)
+    
+    diff_map = np.abs(model_enhanced - ldr_enhanced)
     diff_luma = np.mean(diff_map, axis=2)
     
-    model_to_gt = np.abs(model_out_np - gt_np)
+    model_to_gt = np.abs(model_enhanced - gt_enhanced)
     model_to_gt_luma = np.mean(model_to_gt, axis=2)
     
     # Difference: model vs input
     ax20 = fig.add_subplot(gs[2, 0])
     im0 = ax20.imshow(diff_luma, cmap='hot', interpolation='nearest', aspect='auto')
-    ax20.set_title(f"Output - Input\nMean: {diff_luma.mean():.6f}", fontsize=10, fontweight="bold", pad=8)
+    ax20.set_title(f"Output - Input (S-Curved)\nMean: {diff_luma.mean():.6f}", fontsize=10, fontweight="bold", pad=8)
     ax20.axis('off')
     cbar0 = plt.colorbar(im0, ax=ax20, fraction=0.046, pad=0.04, shrink=0.8)
     cbar0.ax.tick_params(labelsize=8)
@@ -228,7 +233,7 @@ def save_comparison(ldr, model_out, gt, save_path: Path, strength: float = 10.0,
     # Difference: model vs GT (error)
     ax21 = fig.add_subplot(gs[2, 1])
     im1 = ax21.imshow(model_to_gt_luma, cmap='hot', interpolation='nearest', aspect='auto')
-    ax21.set_title(f"Output - Reference\nMean: {model_to_gt_luma.mean():.6f}", fontsize=10, fontweight="bold", pad=8)
+    ax21.set_title(f"Output - Reference (S-Curved)\nMean: {model_to_gt_luma.mean():.6f}", fontsize=10, fontweight="bold", pad=8)
     ax21.axis('off')
     cbar1 = plt.colorbar(im1, ax=ax21, fraction=0.046, pad=0.04, shrink=0.8)
     cbar1.ax.tick_params(labelsize=8)

@@ -12,7 +12,8 @@ metadata_parquet: "dataset/temp/training_metadata.parquet"
 batch_size: 1
 epochs: 50  
 learning_rate: 5e-5  
-checkpoint_freq: 25
+checkpoint_freq: 5        # Checkpoint every 5 epochs
+save_top_k: 3             # Keep best 3 performers (PSNR)
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 
 # Data loading

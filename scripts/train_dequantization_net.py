@@ -741,7 +741,10 @@ def main(cfg: DictConfig) -> None:
         dirpath=str(run_dir / "checkpoints"),
         filename="dequant-{epoch:02d}",
         every_n_epochs=cfg.get("checkpoint_freq", 1),
-        save_top_k=-1,  # Save all checkpoints according to frequency
+        save_top_k=cfg.get("save_top_k", 3),  # Keep track of top performers (PSNR)
+        monitor="metric_psnr/val",
+        mode="max",
+        save_last=True,  # ALWAYS save the latest state as last.ckpt
     )
     
     # Create dynamic optimizer string showing the actual optimizer and learning rate
@@ -835,6 +838,16 @@ def main(cfg: DictConfig) -> None:
     print(f"\n{'='*80}")
     print(f"[MAIN] ✓ Training completed!")
     print(f"{'='*80}\n")
+    
+    # Explicitly save final state_dict as a standard .pt file (easier for inference/redistribution)
+    final_model_path = run_dir / "dequant_net_final.pt"
+    model_to_save = ls_module.model
+    # Unwrap torch.compile if needed
+    if hasattr(model_to_save, '_orig_mod'):
+        model_to_save = model_to_save._orig_mod
+    
+    torch.save(model_to_save.state_dict(), final_model_path)
+    print(f"[MAIN] ✓ Final model weights saved to: {final_model_path}")
 
 if __name__ == "__main__":
     main()

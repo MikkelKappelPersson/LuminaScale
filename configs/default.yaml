@@ -38,7 +38,7 @@ model:
 crop_size: 2048
 val_crop_size: 1024  # Validation crop size (can differ from training for speed)
 bit_crunch_contrast_min: 1.0   # Min bit-crunching factor (1.0 = no crunching, >1 = aggressive)
-bit_crunch_contrast_max: 1.5   # Max bit-crunching factor (pre=1/factor, post=factor for symmetric crush/expand)
+bit_crunch_contrast_max: 2.0   # Max bit-crunching factor (pre=1/factor, post=factor for symmetric crush/expand)
 
 # Loss weights (tuned for smooth dequantization with Charbonnier smoothness)
 loss:
@@ -49,6 +49,11 @@ loss:
   total_variation_weight: 0.0  # Total variation loss (gradient smoothing)
   total_variation_variant: "huber"  # Variant for TV loss: "huber" or "l2"
 
+# Weight scheduling (optional: decay weights during training)
+weight_schedule:
+  charbonnier_weight_min: 0.01
+  decay_schedule: exponential
+  
 # Performance tuning
 enable_profiling: false  # Disable CUDA synchronization calls by default (enables profiling when true)
 enable_compile: false    # Disable torch.compile (requires CUDA headers and complex Triton setup). Training optimizations: use mixed precision (16-bit) and gradient checkpointing instead.

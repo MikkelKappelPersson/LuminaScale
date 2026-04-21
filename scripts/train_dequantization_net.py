@@ -42,7 +42,7 @@ import subprocess
 import numpy as np
 import matplotlib.pyplot as plt
 import pytorch_lightning as L
-from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback, RichModelSummary, RichProgressBar
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback, RichModelSummary, RichProgressBar, LearningRateMonitor
 from pytorch_lightning.profilers import SimpleProfiler
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
@@ -53,6 +53,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightnin
 from luminascale.models import create_dequantization_net
 from luminascale.training.dequantization_trainer import DequantizationTrainer
 from luminascale.training.logger import CustomTensorBoardLogger
+from luminascale.training.weight_scheduler import WeightSchedulerCallback
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 from luminascale.utils.io import read_exr
 
@@ -782,12 +783,19 @@ def main(cfg: DictConfig) -> None:
             RichModelSummary(max_depth=2),
             CustomRichProgressBar(refresh_rate=100, leave=True),
             TensorBoardFlushCallback(),
+            LearningRateMonitor(logging_interval="epoch"),
             HparamsMetricsCallback(hparams_dict),
             SyntheticInferenceVisualizerCallback(
                 width=cfg.get("inference_width", 128),
                 height=cfg.get("inference_height", 64),
                 base_channels=cfg.model.base_channels
-            )
+            ),
+            # Weight scheduler (if configured)
+            *([WeightSchedulerCallback(
+                loss_config=dict(cfg.get("loss", {})),
+                weight_schedule_config=dict(cfg.get("weight_schedule", {})),
+                num_epochs=cfg.epochs,
+            )] if cfg.get("weight_schedule", {}) else []),
         ],
         profiler=SimpleProfiler(
             filename="training_profile.txt",

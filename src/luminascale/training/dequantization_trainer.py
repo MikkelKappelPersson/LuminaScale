@@ -55,9 +55,6 @@ class DequantizationTrainer(L.LightningModule):
         super().__init__()
         print(f"[DequantizationTrainer] Initializing LightningModule...")
         
-        # Disable automatic optimization to use manual_backward() for detailed timing
-        self.automatic_optimization = False
-        
         self.model = model
         self.learning_rate = learning_rate
         self.vis_freq = vis_freq
@@ -469,91 +466,24 @@ class DequantizationTrainer(L.LightningModule):
                    total_variation_loss(y_hat, variant=self.total_variation_variant) * self.total_variation_weight)
             loss_ms = (time.perf_counter() - t_loss_start) * 1000
             
-            # === CHECKPOINT 2: Before Backward (sync to see actual forward+loss time) ===
-            t_gpu_sync_before_backward = time.perf_counter()
-            if torch.cuda.is_available() and self.enable_profiling:
-                torch.cuda.synchronize()  # Wait for forward+loss GPU ops to complete
-            gpu_sync_before_backward_ms = (time.perf_counter() - t_gpu_sync_before_backward) * 1000
-            
-            # === BACKWARD PASS ===
-            t_backward_start = time.perf_counter()
-            self.manual_backward(loss)  # GPU kernel launches (async)
-            backward_ms = (time.perf_counter() - t_backward_start) * 1000
-            
-            # === GRADIENT CLIPPING ===
-            # Manual clipping required since automatic_optimization = False
-            self.clip_gradients(self.optimizers(), gradient_clip_val=1.0, gradient_clip_algorithm="norm")
-            
-            # === OVERHEAD: Between Backward and Optimizer ===
-            t_overhead_optim_start = time.perf_counter()
-            
-            # === OPTIMIZER STEP ===
-            t_optim_start = time.perf_counter()
-            self.optimizers().step()
-            self.optimizers().zero_grad()
-            optimizer_step_ms = (time.perf_counter() - t_optim_start) * 1000
-            
-            overhead_to_optim_ms = (time.perf_counter() - t_overhead_optim_start) * 1000
-            
-            # === CHECKPOINT 3: After Optimizer (sync to ensure all GPU ops complete) ===
-            t_gpu_sync_after_backward = time.perf_counter()
-            if torch.cuda.is_available() and self.enable_profiling:
-                torch.cuda.synchronize()  # Ensure all GPU operations complete
-            gpu_sync_after_backward_ms = (time.perf_counter() - t_gpu_sync_after_backward) * 1000
-            
+            # === TRACK METRICS ===
             total_batch_ms = (time.perf_counter() - t_batch_start) * 1000
-            
-            # Calculate total overhead between major operations
-            overhead_between_steps_ms = overhead_to_forward_ms + overhead_to_optim_ms
-            
-            # Calculate overhead breakdown
-            # Total GPU sync = waiting time at 3 checkpoints
-            total_gpu_sync_ms = gpu_sync_before_forward_ms + gpu_sync_before_backward_ms + gpu_sync_after_backward_ms
-            
-            # Kernel launch overhead = implicit sync + async kernel launches (in forward+loss+backward)
-            # This is the difference between wall-clock time and actual GPU work time
-            measured_compute_ms = forward_ms + loss_ms + backward_ms + optimizer_step_ms
-            
-            # Framework overhead = PyTorch/Lightning overhead + tensor allocation + other hidden costs
-            # This is any remaining time not accounted for by operations or GPU sync
-            framework_overhead_ms = max(0, total_batch_ms - 
-                                       (data_load_ms + measured_compute_ms + total_gpu_sync_ms + 
-                                        gpu_transfer_ms + overhead_between_steps_ms))
-            
-            # Track metrics per batch
             self.epoch_timings["data_load_ms"].append(data_load_ms)
             self.epoch_timings["forward_pass_ms"].append(forward_ms)
             self.epoch_timings["loss_compute_ms"].append(loss_ms)
-            self.epoch_timings["backward_pass_ms"].append(backward_ms)
-            self.epoch_timings["optimizer_step_ms"].append(optimizer_step_ms)
             self.epoch_timings["total_batch_ms"].append(total_batch_ms)
-            self.epoch_timings["gpu_sync_overhead_ms"].append(total_gpu_sync_ms)
-            self.epoch_timings["gpu_transfer_overhead_ms"].append(gpu_transfer_ms)
-            self.epoch_timings["overhead_between_steps_ms"].append(overhead_between_steps_ms)
-            self.epoch_timings["framework_overhead_ms"].append(framework_overhead_ms)
-            self.epoch_timings["kernel_launch_overhead_ms"].append(0.0)  # Not directly measurable
-            self.epoch_timings["other_overhead_ms"].append(max(0, total_batch_ms - 
-                                       (data_load_ms + measured_compute_ms + total_gpu_sync_ms + gpu_transfer_ms)))
-            
-            # Store component timing breakdown if available
-            if batch_timing_breakdown is not None:
-                self.epoch_timings["component_timings"].append(batch_timing_breakdown)
             
             # GPU memory tracking
             if torch.cuda.is_available():
                 self.epoch_gpu_memory.append(torch.cuda.memory_allocated() / 1e9)  # GB
             
             # Metrics are logged to TensorBoard via self.log() below (no .item() calls needed)
-
             self.log("loss_L1/train", l1_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_L2/train", l2_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_Charbonnier/train", charbonnier_loss(y_hat), prog_bar=False, sync_dist=True)
             self.log("loss_EdgeAware/train", edge_aware_smoothing_loss(y_hat, y), prog_bar=False, sync_dist=True)
             self.log("loss_TV/train", total_variation_loss(y_hat, variant=self.total_variation_variant), prog_bar=False, sync_dist=True)
             self.log("loss_total/train", loss, prog_bar=False, sync_dist=True)
-            # Log current learning rate (supports dynamic LR scheduling)
-            current_lr = self.optimizers().param_groups[0]["lr"]
-            self.log("learning_rate", current_lr, prog_bar=False, sync_dist=True)
             
             self.last_batch_gpu_ms = total_batch_ms
             return loss
@@ -589,7 +519,7 @@ class DequantizationTrainer(L.LightningModule):
             logger.debug(f"Warning: Failed to extract GPU kernels: {e}")
 
     def on_train_epoch_end(self) -> None:
-        """Print epoch performance summary with timing breakdown using rich."""
+        """Print epoch performance summary with timing breakdown."""
         if not self.epoch_timings["total_batch_ms"]:
             return  # No batches processed
         
@@ -597,199 +527,38 @@ class DequantizationTrainer(L.LightningModule):
         data_load_avg = np.mean(self.epoch_timings["data_load_ms"])
         forward_avg = np.mean(self.epoch_timings["forward_pass_ms"])
         loss_avg = np.mean(self.epoch_timings["loss_compute_ms"])
-        backward_avg = np.mean(self.epoch_timings["backward_pass_ms"])
-        optimizer_step_avg = np.mean(self.epoch_timings["optimizer_step_ms"]) if self.epoch_timings["optimizer_step_ms"] else 0
         total_avg = np.mean(self.epoch_timings["total_batch_ms"])
         total_epoch = (time.perf_counter() - self.current_epoch_start_time) if self.current_epoch_start_time else 0
         
         gpu_memory_max = max(self.epoch_gpu_memory) if self.epoch_gpu_memory else 0
-        gpu_memory_avg = np.mean(self.epoch_gpu_memory) if self.epoch_gpu_memory else 0
         
         num_batches = len(self.epoch_timings["total_batch_ms"])
-        # Calculate both batches/sec and samples/sec for comparison
-        throughput_batches = num_batches / total_epoch if total_epoch > 0 else 0
         throughput_samples = (num_batches * self.batch_size) / total_epoch if total_epoch > 0 else 0
         
         # Store for hparams logging
         self.last_epoch_throughput_samples_per_sec = throughput_samples
         
-        # Get overhead averages for accounting table
-        gpu_sync_avg = np.mean(self.epoch_timings["gpu_sync_overhead_ms"]) if self.epoch_timings["gpu_sync_overhead_ms"] else 0
-        gpu_transfer_avg = np.mean(self.epoch_timings["gpu_transfer_overhead_ms"]) if self.epoch_timings["gpu_transfer_overhead_ms"] else 0
-        framework_overhead_avg = np.mean(self.epoch_timings["framework_overhead_ms"]) if self.epoch_timings["framework_overhead_ms"] else 0
-        
-        # Only print accounting table if profiling is enabled
-        if self.enable_profiling:
-            # Create consolidated time accounting table
-            accounting_table = Table(
-                title=f"[bold cyan]Epoch {self.current_epoch} - Batch Time Breakdown[/bold cyan]",
-                show_header=True,
-                header_style="bold magenta",
-                border_style="cyan",
-                padding=(0, 1),
-            )
-            accounting_table.add_column("Operation", style="cyan", no_wrap=True)
-            accounting_table.add_column("Time (ms)", justify="right", style="green")
-            accounting_table.add_column("% of Total", justify="right", style="yellow")
-            accounting_table.add_column("Source", style="dim", no_wrap=True)
-            
-            # Primary operations with explanations
-            accounting_table.add_row(
-                "Data Loading",
-                f"{data_load_avg:.2f}",
-                f"{(data_load_avg/total_avg)*100:.1f}%",
-                "EXR decode, CDL, ACES, quantization, GPU transfer"
-            )
-            
-            accounting_table.add_row(
-                "Forward Pass",
-                f"{forward_avg:.2f}",
-                f"{(forward_avg/total_avg)*100:.1f}%",
-                "Model inference on GPU"
-            )
-            
-            accounting_table.add_row(
-                "Loss Computation",
-                f"{loss_avg:.2f}",
-                f"{(loss_avg/total_avg)*100:.1f}%",
-                "L1 + L2 + Charbonnier + EdgeAware on GPU"
-            )
-            
-            accounting_table.add_row(
-                "Backward Pass",
-                f"{backward_avg:.2f}",
-                f"{(backward_avg/total_avg)*100:.1f}%",
-                "Gradient computation on GPU"
-            )
-            
-            accounting_table.add_row(
-                "Optimizer Step",
-                f"{optimizer_step_avg:.2f}",
-                f"{(optimizer_step_avg/total_avg)*100:.1f}%",
-                "Adam weight update on GPU"
-            )
-            
-            # Overhead components
-            if gpu_sync_avg > 0.1:
-                accounting_table.add_row(
-                    "GPU Synchronization",
-                    f"{gpu_sync_avg:.2f}",
-                    f"{(gpu_sync_avg/total_avg)*100:.1f}%",
-                    "torch.cuda.synchronize() calls"
-                )
-            
-            if gpu_transfer_avg > 0.1:
-                accounting_table.add_row(
-                    "GPU Memory Transfer",
-                    f"{gpu_transfer_avg:.2f}",
-                    f"{(gpu_transfer_avg/total_avg)*100:.1f}%",
-                    "PCIe bandwidth + GPU allocation"
-                )
-            
-            if framework_overhead_avg > 0.1:
-                accounting_table.add_row(
-                    "Framework Overhead",
-                    f"{framework_overhead_avg:.2f}",
-                    f"{(framework_overhead_avg/total_avg)*100:.1f}%",
-                    "PyTorch/Lightning hidden costs"
-                )
-            
-            # Calculate total accounted for (without double-counting overhead_between_steps)
-            total_accounted = (data_load_avg + forward_avg + loss_avg + backward_avg + optimizer_step_avg + 
-                              gpu_sync_avg + gpu_transfer_avg + framework_overhead_avg)
-            unaccounted_ms = total_avg - total_accounted
-            
-            accounting_table.add_row(
-                "[bold]Total Accounted[/bold]",
-                f"[bold green]{total_accounted:.2f}[/bold green]",
-                f"[bold yellow]{(total_accounted/total_avg)*100:.1f}%[/bold yellow]",
-                ""
-            )
-            
-            if unaccounted_ms > 0.1:
-                accounting_table.add_row(
-                    "[bold red]UNACCOUNTED[/bold red]",
-                    f"[bold red]{unaccounted_ms:.2f}[/bold red]",
-                    f"[bold red]{(unaccounted_ms/total_avg)*100:.1f}%[/bold red]",
-                    "[bold red]MISSING - needs investigation[/bold red]"
-                )
-            
-            accounting_table.add_row(
-                "[bold cyan]Total Batch[/bold cyan]",
-                f"[bold cyan]{total_avg:.2f}[/bold cyan]",
-                "[bold cyan]100.0%[/bold cyan]",
-                ""
-            )
-            
-            console.print(accounting_table)
-        
-        # Create GPU kernel profiling table (if profiling was enabled)
-        if self.gpu_kernel_times and len(self.gpu_kernel_times) > 0:
-            # Sort kernels by total time and get top 10
-            kernel_totals = {}
-            for kernel_name, times in self.gpu_kernel_times.items():
-                kernel_totals[kernel_name] = sum(times)
-            
-            top_kernels = sorted(kernel_totals.items(), key=lambda x: x[1], reverse=True)[:10]
-            
-            if top_kernels and top_kernels[0][1] > 0.1:  # Only show if significant
-                gpu_kernel_table = Table(
-                    title="[bold cyan]Top GPU Kernels (GPU 🎯)[/bold cyan]",
-                    show_header=True,
-                    header_style="bold magenta",
-                    border_style="cyan",
-                    padding=(0, 1),
-                )
-                gpu_kernel_table.add_column("GPU Kernel / Operation", style="cyan", no_wrap=False)
-                gpu_kernel_table.add_column("Time (ms)", justify="right", style="green")
-                gpu_kernel_table.add_column("% of Batch", justify="right", style="yellow")
-                
-                total_kernel_time = sum(tc for _, tc in top_kernels)
-                for kernel_name, kernel_time_ms in top_kernels:
-                    # Clean up kernel name for display
-                    display_name = kernel_name.replace("cudnn::", "").replace("cuda::", "").strip()
-                    kernel_pct = (kernel_time_ms / total_avg) * 100
-                    gpu_kernel_table.add_row(
-                        display_name[:60],  # Truncate long kernel names
-                        f"{kernel_time_ms:.2f}",
-                        f"{kernel_pct:.1f}%"
-                    )
-                
-                total_kernel_pct = (total_kernel_time / total_avg) * 100
-                gpu_kernel_table.add_row(
-                    "[bold]Total (Top Kernels)[/bold]",
-                    f"[bold green]{total_kernel_time:.2f}[/bold green]",
-                    f"[bold yellow]{total_kernel_pct:.1f}%[/bold yellow]"
-                )
-                
-                console.print(gpu_kernel_table)
-        
-        # Create dataset metrics table (always shown - no GPU overhead)
-        dataset_table = Table(
-            title="[bold cyan]Dataset Metrics[/bold cyan]",
+        # Create timing summary table
+        timing_table = Table(
+            title=f"[bold cyan]Epoch {self.current_epoch} - Performance Summary[/bold cyan]",
             show_header=True,
             header_style="bold magenta",
-            border_style="cyan",
-            padding=(0, 1),
         )
-        dataset_table.add_column("Metric", style="cyan", no_wrap=True)
-        dataset_table.add_column("Value", justify="right", style="green")
+        timing_table.add_column("Metric", style="cyan")
+        timing_table.add_column("Value", justify="right", style="green")
         
-        dataset_table.add_row("Total Epoch Time", f"{total_epoch:.2f}s")
-        dataset_table.add_row("Batches Processed", str(num_batches))
-        dataset_table.add_row("Throughput (batches/s)", f"{throughput_batches:.2f}")
-        dataset_table.add_row("Throughput (samples/s)", f"{throughput_samples:.2f}")
-        dataset_table.add_row("GPU Memory (Current)", f"{gpu_memory_avg:.2f} GB")
-        dataset_table.add_row("GPU Memory (Peak)", f"{gpu_memory_max:.2f} GB")
+        timing_table.add_row("Data Load (avg)", f"{data_load_avg:.2f} ms")
+        timing_table.add_row("Forward (avg)", f"{forward_avg:.2f} ms")
+        timing_table.add_row("Loss (avg)", f"{loss_avg:.2f} ms")
+        timing_table.add_row("Total Batch (avg)", f"{total_avg:.2f} ms")
+        timing_table.add_row("Throughput", f"{throughput_samples:.2f} samples/sec")
+        timing_table.add_row("Peak GPU Memory", f"{gpu_memory_max:.2f} GB")
         
-        # Add performance hyperparameters
-        dataset_table.add_row("[bold]─ Configuration ─[/bold]", "")
-        dataset_table.add_row("Batch Size", str(self.batch_size))
-        dataset_table.add_row("Num Workers", str(self.num_workers))
-        dataset_table.add_row("Crop Size", f"{self.crop_size}×{self.crop_size}")
-        dataset_table.add_row("Precision", self.precision)
+        console.print(timing_table)
         
-        console.print(dataset_table)
+        # Log to TensorBoard
+        self.log("throughput/samples_per_sec", throughput_samples, on_epoch=True, prog_bar=True)
+        self.log("memory/gpu_peak_gb", gpu_memory_max, on_epoch=True)
 
     def validation_step(self, batch: dict | tuple | list, batch_idx: int) -> dict:
         """Validation: forward pass + compute all quality metrics.

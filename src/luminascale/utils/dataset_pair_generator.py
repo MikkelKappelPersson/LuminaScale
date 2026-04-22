@@ -56,6 +56,7 @@ class DatasetPairGenerator:
         crop_size: int = 512,
         bit_crunch_contrast_min: float = 1.0,
         bit_crunch_contrast_max: float = 1.0,
+        target_blur_sigma: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, dict]:
         """Process a list of raw EXR bytes into graded sRGB 8u/32f pairs on GPU.
         
@@ -64,6 +65,7 @@ class DatasetPairGenerator:
             crop_size: Size of square crop to extract (512 default)
             bit_crunch_contrast_min: Minimum bit-crunching factor (1.0=no crunch, >1=aggressive)
             bit_crunch_contrast_max: Maximum bit-crunching factor
+            target_blur_sigma: Gaussian blur sigma to apply to HBD target (0.0 = no blur)
         
         Bit-crunching: Symmetric contrast reduction and expansion around 8-bit quantization.
         - Pre-quant: Reduce contrast by 1/bit_crunch_factor (crush data into 8-bit range)
@@ -206,10 +208,28 @@ class DatasetPairGenerator:
                 srgb_8u = apply_s_curve_contrast_torch(srgb_8u, strength=post_quant_contrast) # expand/enhance the quantized data
                 srgb_32f = apply_s_curve_contrast_torch(srgb_32f, strength=post_quant_contrast) # also apply to 32f target for consistency
 
+                # === OPTIONAL TARGET BLURRING (CLEAN GRADIENTS) ===
+                if target_blur_sigma > 0:
+                    from torchvision.transforms.functional import gaussian_blur
+                    # Gaussian blur expects [C, H, W] - we have [H, W, C]
+                    # We'll permute for blur then permute back or just blur after permute
+                    # Let's blur after permute below for efficiency
+                    pass
+
                 # === PERMUTE & STORE ===
                 t_permute_start = time.perf_counter()
-                tensors_8u.append(srgb_8u.permute(2, 0, 1))
-                tensors_32f.append(srgb_32f.permute(2, 0, 1))
+                srgb_8u_p = srgb_8u.permute(2, 0, 1)
+                srgb_32f_p = srgb_32f.permute(2, 0, 1)
+                
+                if target_blur_sigma > 0:
+                    from torchvision.transforms.functional import gaussian_blur
+                    # kernel_size must be odd. 2 * ceil(2 * sigma) + 1 is a good heuristic.
+                    kernel_size = int(2 * np.ceil(2 * target_blur_sigma) + 1)
+                    if kernel_size % 2 == 0: kernel_size += 1
+                    srgb_32f_p = gaussian_blur(srgb_32f_p, kernel_size=[kernel_size, kernel_size], sigma=[target_blur_sigma, target_blur_sigma])
+
+                tensors_8u.append(srgb_8u_p)
+                tensors_32f.append(srgb_32f_p)
                 crunch_factors_used.append(bit_crunch_factor)
                 t_permute = time.perf_counter()
                 permute_times.append((t_permute - t_permute_start) * 1000)

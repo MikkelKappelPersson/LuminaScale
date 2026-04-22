@@ -41,6 +41,16 @@ from luminascale.utils.image_generator import (
     apply_s_curve_contrast,
 )
 
+def blur_image(image: np.ndarray, sigma: float) -> np.ndarray:
+    """Apply Gaussian blur to a numpy image [H, W, C]."""
+    if sigma <= 0:
+        return image
+    # Apply blur to each channel
+    blurred = np.zeros_like(image)
+    for c in range(image.shape[2]):
+        blurred[:, :, c] = ndimage.gaussian_filter(image[:, :, c], sigma=sigma)
+    return blurred
+
 def align_to_model(tensor: torch.Tensor) -> torch.Tensor:
     """Align input tensor to be divisible by 64 (for 6-level U-Net)."""
     h, w = tensor.shape[2], tensor.shape[3]
@@ -52,7 +62,7 @@ def align_to_model(tensor: torch.Tensor) -> torch.Tensor:
         return F.interpolate(tensor, size=(new_h, new_w), mode='bilinear', align_corners=False)
     return tensor
 
-def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width: int | None, height: int | None, output_path: Path, gradient_type: str = "combined", contrast_strength: float = 10.0, apply_contrast_to_output: bool = False):
+def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width: int | None, height: int | None, output_path: Path, gradient_type: str = "combined", contrast_strength: float = 10.0, apply_contrast_to_output: bool = False, target_blur_sigma: float = 0.0):
     """Generate and run inference on a synthetic primary gradients image.
     
     Note on resizing: All processing (quantization, contrast, etc.) happens at native resolution.
@@ -63,6 +73,7 @@ def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width:
         width: Ignored (kept for API compatibility)
         height: Ignored (kept for API compatibility)
         apply_contrast_to_output: If True, apply S-curve contrast to model output before saving EXR
+        target_blur_sigma: Gaussian blur sigma to apply to reference (GT) for comparison
     
     Note:
         - Each gradient variant contains all three colors (Red, Green, Blue) + white separator
@@ -98,20 +109,31 @@ def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width:
     with torch.no_grad():
         output_tensor = model(input_tensor).squeeze(0).cpu().numpy()
     
-    # Optionally apply contrast to output before saving (at native resolution)
-    output_to_save = output_tensor
+    # Clip model output to [0, 1] for visualization and saving consistency
+    output_clipped = np.clip(output_tensor, 0, 1)
+    
+    # Optionally apply contrast to output before saving
+    output_to_save = output_clipped
     if apply_contrast_to_output:
-        output_to_save = apply_s_curve_contrast(output_tensor.transpose(1, 2, 0), strength=contrast_strength).transpose(2, 0, 1)
+        output_to_save = apply_s_curve_contrast(output_clipped.transpose(1, 2, 0), strength=contrast_strength).transpose(2, 0, 1)
     
     # Save as EXR (native resolution, no resizing)
     write_exr(output_path, output_to_save)
     
     # Save comparison: resizing for visualization happens only in save_comparison
     reference_clipped = np.clip(reference_chw, 0, 1)
-    save_comparison(ldr_chw, output_tensor, reference_clipped, output_path.with_suffix('.png'), strength=contrast_strength, synthetic=gradient_type)
+    reference_hwc = reference_clipped.transpose(1, 2, 0)
+    
+    if target_blur_sigma > 0:
+        print(f"Applying reference blur for comparison: sigma={target_blur_sigma}")
+        reference_hwc = blur_image(reference_hwc, sigma=target_blur_sigma)
+        
+    reference_final = reference_hwc.transpose(2, 0, 1)
+    
+    save_comparison(ldr_chw, output_clipped, reference_final, output_path.with_suffix('.png'), strength=contrast_strength, synthetic=gradient_type)
     print(f"✓ Synthetic inference complete. Model output: {output_path}")
 
-def run_image_inference(model: torch.nn.Module, device: torch.device, input_path: Path, output_path: Path, contrast_strength: float = 20.0, apply_contrast_to_output: bool = False):
+def run_image_inference(model: torch.nn.Module, device: torch.device, input_path: Path, output_path: Path, contrast_strength: float = 20.0, apply_contrast_to_output: bool = False, target_blur_sigma: float = 0.0):
     """Run inference on a local image file."""
     print(f"Processing image: {input_path}")
     
@@ -130,20 +152,21 @@ def run_image_inference(model: torch.nn.Module, device: torch.device, input_path
     with torch.no_grad():
         output_tensor = model(input_tensor_aligned).squeeze(0).cpu().numpy()
     
+    # Clip model output to [0, 1] for visualization and saving consistency
+    output_clipped = np.clip(output_tensor, 0, 1)
+    
     # Optionally apply contrast to output before saving
-    output_to_save = output_tensor
+    output_to_save = output_clipped
     if apply_contrast_to_output:
-        output_to_save = apply_s_curve_contrast(output_tensor.transpose(1, 2, 0), strength=contrast_strength).transpose(2, 0, 1)
+        output_to_save = apply_s_curve_contrast(output_clipped.transpose(1, 2, 0), strength=contrast_strength).transpose(2, 0, 1)
     
     if output_path.suffix.lower() == '.exr':
         write_exr(output_path, output_to_save)
     else:
-        out_img = Image.fromarray((np.clip(output_to_save.transpose(1, 2, 0), 0, 1) * 255).astype(np.uint8))
+        out_img = Image.fromarray((output_to_save.transpose(1, 2, 0) * 255).astype(np.uint8))
         out_img.save(output_path)
     
     # Save comparison visualization (resize input to match output dimensions for shape compatibility)
-    output_clipped = np.clip(output_tensor, 0, 1)
-    
     # If input was resized by align_to_model, resize back for comparison visualization
     if (original_h != aligned_h or original_w != aligned_w):
         # Convert CHW back to HWC for PIL resizing
@@ -155,8 +178,16 @@ def run_image_inference(model: torch.nn.Module, device: torch.device, input_path
         input_chw = np.array(input_pil_resized).astype(np.float32).transpose(2, 0, 1) / 255.0
     else:
         input_chw = input_np
+        
+    # Apply reference blur for comparison visualization
+    reference_for_comparison = input_chw
+    if target_blur_sigma > 0:
+        print(f"Applying reference blur for comparison: sigma={target_blur_sigma}")
+        reference_hwc = input_chw.transpose(1, 2, 0)
+        reference_hwc = blur_image(reference_hwc, sigma=target_blur_sigma)
+        reference_for_comparison = reference_hwc.transpose(2, 0, 1)
     
-    save_comparison(input_chw, output_clipped, input_chw, output_path.with_suffix('.png'), strength=contrast_strength)
+    save_comparison(input_chw, output_clipped, reference_for_comparison, output_path.with_suffix('.png'), strength=contrast_strength)
     
     print(f"✓ Inference complete. Saved to: {output_path}")
 
@@ -210,7 +241,7 @@ def save_comparison(ldr, model_out, gt, save_path: Path, strength: float = 10.0,
     ax12.set_title(f"Reference S-Curve ({strength})\n{gt_unique:,} unique", fontsize=10, fontweight="bold", pad=8)
     ax12.axis('off')
     
-    # Row 3: Difference Maps and Histogram
+    # Row 3: Difference Maps and Gradient Ramp Comparison
     # Use s-curve enhanced versions for difference maps to reveal quantized steps
     ldr_enhanced = apply_s_curve_contrast(ldr_np, strength=strength)
     model_enhanced = apply_s_curve_contrast(model_out_np, strength=strength)
@@ -238,30 +269,31 @@ def save_comparison(ldr, model_out, gt, save_path: Path, strength: float = 10.0,
     cbar1 = plt.colorbar(im1, ax=ax21, fraction=0.046, pad=0.04, shrink=0.8)
     cbar1.ax.tick_params(labelsize=8)
     
-    # Histogram
+    # Gradient Ramp Comparison (replacing Histogram)
     ax22 = fig.add_subplot(gs[2, 2])
     
-    # Prepare histogram data - omit high values if synthetic is provided
-    ldr_hist = ldr_np.flatten()
-    model_hist = model_out_np.flatten()
-    gt_hist = gt_np.flatten()
+    # Pick a representative horizontal slice (avoiding white separators)
+    # For synthetic combined, rows 10, 74, 138 are good (middle of R/G/B blocks)
+    slice_y = 10 if ldr_np.shape[0] > 10 else ldr_np.shape[0] // 2
     
-    if synthetic is not None:
-        # Filter out values > 0.9 to better space out lower values for synthetic data
-        ldr_hist = ldr_hist[ldr_hist <= 0.9]
-        model_hist = model_hist[model_hist <= 0.9]
-        gt_hist = gt_hist[gt_hist <= 0.9]
+    # Use Green channel (usually highest precision/importance) or mean luma
+    ldr_slice = ldr_np[slice_y, :, 1]
+    model_slice = model_out_np[slice_y, :, 1]
+    gt_slice = gt_np[slice_y, :, 1]
     
-    # Compute shared bins across all three datasets
-    all_values = np.concatenate([ldr_hist, model_hist, gt_hist])
-    bins = np.linspace(all_values.min(), all_values.max(), 51)
+    ax22.plot(ldr_slice, 'r--', label='8-bit Input', alpha=0.8, linewidth=1)
+    ax22.plot(gt_slice, 'g-', label='32-bit Reference', alpha=0.6, linewidth=1.5)
+    ax22.plot(model_slice, 'b-', label='Model Output', alpha=0.9, linewidth=1)
     
-    ax22.hist(ldr_hist, bins=bins, alpha=0.5, label=f"Input ({ldr_unique})", color='red', density=True)
-    ax22.hist(model_hist, bins=bins, alpha=0.5, label=f"Output ({model_unique})", color='blue', density=True)
-    ax22.hist(gt_hist, bins=bins, alpha=0.5, label=f"Reference ({gt_unique})", color='green', density=True)
-    ax22.set_xlabel("Pixel Value", fontsize=9)
-    ax22.set_ylabel("Frequency (density)", fontsize=9)
-    ax22.set_title("Value Distribution", fontsize=10, fontweight="bold", pad=8)
+    ax22.set_title("Gradient Ramp Comparison", fontsize=10, fontweight="bold", pad=8)
+    ax22.set_xlabel("Pixel Index (Horizontal)", fontsize=9)
+    ax22.set_ylabel("Pixel Value (Green)", fontsize=9)
+    ax22.legend(fontsize=8, loc='upper left')
+    ax22.grid(True, alpha=0.3, linestyle='--')
+    
+    # Set y-axis limits to focus on the active range
+    padding = (gt_slice.max() - gt_slice.min()) * 0.1
+    ax22.set_ylim(gt_slice.min() - padding, gt_slice.max() + padding)
     ax22.legend(fontsize=8, loc='upper right')
     ax22.set_yscale('log')
     ax22.tick_params(labelsize=8)
@@ -281,8 +313,9 @@ def main():
     parser.add_argument("--gradient-type", type=str, default="combined", choices=["combined", "8x21", "4x21", "2x21"], help="Type of primary gradient to generate (default: combined)")
     parser.add_argument("--width", type=int, default=None, help="Width for synthetic gradient (default: native size)")
     parser.add_argument("--height", type=int, default=None, help="Height for synthetic gradient (default: native size)")
-    parser.add_argument("--contrast-strength", type=float, default=20.0, help="S-curve contrast strength for visualization (default: 20.0)")
+    parser.add_argument("--contrast-strength", type=float, default=100.0, help="S-curve contrast strength for visualization (default: 100.0)")
     parser.add_argument("--apply-contrast-to-output", action="store_true", help="Apply S-curve contrast to model output before saving EXR (default: False)")
+    parser.add_argument("--target-blur-sigma", type=float, default=0.0, help="Gaussian blur sigma for reference (GT) comparison (default: 0.0)")
     parser.add_argument("--channels", type=int, default=32, help="Model base channels (default: 32)")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda/cpu)")
 
@@ -308,9 +341,27 @@ def main():
 
     # 2. Run Inference
     if args.synthetic:
-        run_synthetic_inference(model, device, args.width, args.height, output_path, gradient_type=args.gradient_type, contrast_strength=args.contrast_strength, apply_contrast_to_output=args.apply_contrast_to_output)
+        run_synthetic_inference(
+            model, 
+            device, 
+            args.width, 
+            args.height, 
+            output_path, 
+            gradient_type=args.gradient_type, 
+            contrast_strength=args.contrast_strength, 
+            apply_contrast_to_output=args.apply_contrast_to_output,
+            target_blur_sigma=args.target_blur_sigma
+        )
     elif args.input:
-        run_image_inference(model, device, Path(args.input), output_path, contrast_strength=args.contrast_strength, apply_contrast_to_output=args.apply_contrast_to_output)
+        run_image_inference(
+            model, 
+            device, 
+            Path(args.input), 
+            output_path, 
+            contrast_strength=args.contrast_strength, 
+            apply_contrast_to_output=args.apply_contrast_to_output,
+            target_blur_sigma=args.target_blur_sigma
+        )
     else:
         print("Error: You must provide either --input or --synthetic")
         sys.exit(1)

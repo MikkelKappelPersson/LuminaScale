@@ -10,8 +10,8 @@ metadata_parquet: "dataset/temp/training_metadata.parquet"
 
 # Training parameters
 batch_size: 1
-epochs: 50  
-learning_rate: 5e-5  
+epochs: 20  
+learning_rate: 1e-4  
 checkpoint_freq: 5        # Checkpoint every 5 epochs
 save_top_k: 3             # Keep best 3 performers (PSNR)
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
@@ -35,18 +35,24 @@ output_dir: ./outputs/training
 model:
   base_channels: 32
 
+# Target blurring for clean gradient learning
+target_blur:
+  start_sigma: 0.0      # Start with blur to focus on core gradients
+  end_sigma: 0.0        # End on real images
+  anneal_epochs: ${epochs}    # Gradually reduce blur over the full training duration
+
 # Image processing
 crop_size: 2048
 val_crop_size: 1024  # Validation crop size (can differ from training for speed)
 bit_crunch_contrast_min: 1.0   # Min bit-crunching factor (1.0 = no crunching, >1 = aggressive)
-bit_crunch_contrast_max: 2.0   # Max bit-crunching factor (pre=1/factor, post=factor for symmetric crush/expand)
+bit_crunch_contrast_max: 1.0   # Max bit-crunching factor (pre=1/factor, post=factor for symmetric crush/expand)
 
 # Loss weights (tuned for smooth dequantization with Charbonnier smoothness)
 loss:
-  l1_weight: 1.0           # Pixel-wise reconstruction (base)
+  l1_weight: 0.1           # Pixel-wise reconstruction (base)
   l2_weight: 0.0           # L2 loss (MSE)
   charbonnier_weight: 0.0  # Charbonnier loss on OUTPUT (edge-preserving smoothness)
-  grad_match_weight: 0.0   # Edge-aware smoothing (soft): no artifacts in smooth regions
+  grad_match_weight: 100.0   # Edge-aware smoothing (soft): no artifacts in smooth regions
   total_variation_weight: 0.0  # Total variation loss (gradient smoothing)
   total_variation_variant: "huber"  # Variant for TV loss: "huber" or "l2"
 

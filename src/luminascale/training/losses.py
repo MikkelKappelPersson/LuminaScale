@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+from math import ceil
 
 
 def l1_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -127,7 +128,10 @@ def total_variation_loss(
 def edge_aware_smoothing_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
-) -> torch.Tensor:
+    return_mask: bool = False,
+    alpha: float = 500.0,
+    mask_blur_sigma: float = 2.0,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Penalize inconsistency in edge structure (where gradients exist or don't).
     
     Instead of forcing gradients to match exactly, this checks if there are edges
@@ -138,24 +142,55 @@ def edge_aware_smoothing_loss(
     Args:
         pred: Model prediction [B, C, H, W]
         target: Target image [B, C, H, W]
+        return_mask: If True, returns (loss, mask) tuple for visualization
+        alpha: Sensitivity of the mask. Higher = more selective for smooth areas.
+        mask_blur_sigma: Gaussian sigma to smooth the mask (removes noise/grain).
     
     Returns:
-        Edge consistency loss
+        Edge consistency loss (or tuple with mask)
     """
-    # Compute gradient magnitude (how "edgy" each location is)
+    # 1. Compute target gradient magnitudes (only from Target/GT)
     grad_target_y = torch.abs(target[:, :, 1:, :] - target[:, :, :-1, :])
     grad_target_x = torch.abs(target[:, :, :, 1:] - target[:, :, :, :-1])
     
+    # 2. Smooth the target gradients BEFORE masking to remove grain/noise
+    # This prevents the mask from being "grainy" due to floating point jitter
+    if mask_blur_sigma > 0:
+        kernel_size = int(2 * ceil(2 * mask_blur_sigma) + 1)
+        padding = kernel_size // 2
+        # Simple box blur weight for stability
+        blur_weight = torch.ones((1, 1, kernel_size, kernel_size), device=target.device) / (kernel_size**2)
+        
+        B, C, H, W = grad_target_y.shape
+        grad_target_y = F.conv2d(grad_target_y.view(-1, 1, H, W), blur_weight, padding=padding).view(B, C, H, W)
+        
+        B, C, H, W = grad_target_x.shape
+        grad_target_x = F.conv2d(grad_target_x.view(-1, 1, H, W), blur_weight, padding=padding).view(B, C, H, W)
+
+    # 3. Soft Continuous Mask: exp(-grad * alpha)
+    # This creates a weight between 0.0 (sharp edge) and 1.0 (perfectly smooth).
+    smooth_mask_y = torch.exp(-grad_target_y * alpha)
+    smooth_mask_x = torch.exp(-grad_target_x * alpha)
+    
+    # 4. Compute gradients for prediction
     grad_pred_y = torch.abs(pred[:, :, 1:, :] - pred[:, :, :-1, :])
     grad_pred_x = torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])
     
-    # Where target has NO gradients (smooth regions), penalize pred more heavily
-    # This forces smooth regions to stay smooth without over-constraining edges
-    smooth_mask_y = (grad_target_y < 0.01).float()  # 0 = smooth region in target
-    smooth_mask_x = (grad_target_x < 0.01).float()
+    # 5. Penalize gradients only in smooth regions (where smooth_mask is high)
+    # EXPERIMENT: Penalize the existence of gradients in smooth zones (Zero-Target mode)
+    # Instead of abs(grad_pred - grad_target), we use just abs(grad_pred) weighted by mask.
+    # This forces the model to actively flatten the output in these areas.
+    # ADDITION: Use Squared L2 to penalize small gradients much harder than L1 does.
+    loss_y = (smooth_mask_y * (grad_pred_y**2)).mean()
+    loss_x = (smooth_mask_x * (grad_pred_x**2)).mean()
     
-    # In smooth regions, large gradients are bad
-    loss_y = (smooth_mask_y * grad_pred_y).mean()
-    loss_x = (smooth_mask_x * grad_pred_x).mean()
+    loss = (loss_y + loss_x) / 2.0
     
-    return (loss_y + loss_x) / 2.0
+    if return_mask:
+        # Pad masks back to original size for visualization
+        mask_y = F.pad(smooth_mask_y, (0, 0, 0, 1))
+        mask_x = F.pad(smooth_mask_x, (0, 1, 0, 0))
+        combined_mask = (mask_y + mask_x) / 2.0
+        return loss, combined_mask
+        
+    return loss

@@ -40,12 +40,17 @@ import torch
 import warnings
 import subprocess
 import numpy as np
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
+from PIL import Image
 import pytorch_lightning as L
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, Callback, RichModelSummary, RichProgressBar, LearningRateMonitor
 from pytorch_lightning.profilers import SimpleProfiler
 from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
+
+# Register 'eval' resolver for OmegaConf to support math in configs
+OmegaConf.register_new_resolver("eval", eval)
 
 # Suppress non-critical warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning")
@@ -204,6 +209,10 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 "--apply-contrast-to-output",
             ]
             
+            # If target blurring is enabled, pass current sigma to run_inference
+            if hasattr(pl_module, "current_target_blur_sigma") and pl_module.current_target_blur_sigma > 0:
+                cmd.extend(["--target-blur-sigma", str(pl_module.current_target_blur_sigma)])
+            
             logger.debug(f"Running inference: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
             
@@ -345,6 +354,10 @@ class SyntheticInferenceVisualizerCallback(Callback):
                     str(str(pl_module.device).split(":")[0]),
                 ]
                 
+                # If target blurring is enabled, pass current sigma to run_inference
+                if hasattr(pl_module, "current_target_blur_sigma") and pl_module.current_target_blur_sigma > 0:
+                    cmd.extend(["--target-blur-sigma", str(pl_module.current_target_blur_sigma)])
+                
                 logger.debug(f"Running real image inference on {image_name}: {' '.join(cmd)}")
                 result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
                 
@@ -391,6 +404,14 @@ class TensorBoardFlushCallback(Callback):
         outputs: Any, batch: Any, batch_idx: int
     ) -> None:
         """Flush logger after each batch to ensure events are written."""
+        # Capture mask and save as file on first batch of training
+        if batch_idx == 0 and trainer.current_epoch == 0:
+            if hasattr(pl_module, "last_mask") and pl_module.last_mask is not None:
+                mask_np = pl_module.last_mask[0].mean(dim=0).detach().cpu().numpy()
+                mask_path = Path(trainer.log_dir) / "loss_mask_debug.png"
+                plt.imsave(mask_path, mask_np, cmap='gray')
+                logger.info(f"✓ Saved debug loss mask to {mask_path}")
+
         if trainer.logger and hasattr(trainer.logger, "experiment"):
             trainer.logger.experiment.flush()  # type: ignore
     
@@ -708,6 +729,9 @@ def main(cfg: DictConfig) -> None:
         enable_profiling=cfg.get("enable_profiling", False),  # Disable CUDA sync by default for speed
         bit_crunch_contrast_min=cfg.get("bit_crunch_contrast_min", 1.0),
         bit_crunch_contrast_max=cfg.get("bit_crunch_contrast_max", 1.0),
+        target_blur_start_sigma=cfg.get("target_blur", {}).get("start_sigma", 0.0),
+        target_blur_end_sigma=cfg.get("target_blur", {}).get("end_sigma", 0.0),
+        target_blur_anneal_epochs=cfg.get("target_blur", {}).get("anneal_epochs", 0),
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore

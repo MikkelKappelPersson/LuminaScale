@@ -51,6 +51,9 @@ class DequantizationTrainer(L.LightningModule):
         enable_profiling: bool = False,
         bit_crunch_contrast_min: float = 1.0,
         bit_crunch_contrast_max: float = 1.0,
+        target_blur_start_sigma: float = 0.0,
+        target_blur_end_sigma: float = 0.0,
+        target_blur_anneal_epochs: int = 0,
     ) -> None:
         super().__init__()
         print(f"[DequantizationTrainer] Initializing LightningModule...")
@@ -58,6 +61,12 @@ class DequantizationTrainer(L.LightningModule):
         self.model = model
         self.learning_rate = learning_rate
         self.vis_freq = vis_freq
+        
+        # Annealing parameters for Target Blur
+        self.target_blur_start_sigma = target_blur_start_sigma
+        self.target_blur_end_sigma = target_blur_end_sigma
+        self.target_blur_anneal_epochs = target_blur_anneal_epochs
+        self.current_target_blur_sigma = target_blur_start_sigma
         
         # Loss weights for three-term loss
         if loss_weights is None:
@@ -253,13 +262,38 @@ class DequantizationTrainer(L.LightningModule):
             bit_crunch_min = self.bit_crunch_contrast_min if is_validation else self.bit_crunch_contrast_min
             bit_crunch_max = self.bit_crunch_contrast_min if is_validation else self.bit_crunch_contrast_max
             
+            # Target Blur annealing logic (Cosine Decay)
+            if self.target_blur_anneal_epochs > 0:
+                if self.current_epoch < self.target_blur_anneal_epochs:
+                    # Calculate cosine annealing factor
+                    progress = self.current_epoch / self.target_blur_anneal_epochs
+                    cosine_factor = 0.5 * (1 + np.cos(np.pi * progress))
+                    
+                    # Apply it to the range
+                    self.current_target_blur_sigma = self.target_blur_end_sigma + \
+                                                   (self.target_blur_start_sigma - self.target_blur_end_sigma) * cosine_factor
+                else:
+                    self.current_target_blur_sigma = self.target_blur_end_sigma
+            else:
+                self.current_target_blur_sigma = self.target_blur_start_sigma
+
+            # Validation uses end sigma or no blur if not specified.
+            # Usually we want no blur for validation to see "real" metrics.
+            batch_target_blur = 0.0 if (is_validation or self.target_blur_start_sigma == 0) else self.current_target_blur_sigma
+
             # Decode full image(s) into graded sRGB pairs
             srgb_8u_batch, srgb_32f_batch, batch_timing_breakdown = self.pair_generator.generate_batch_from_bytes(
                 exr_bytes_list, 
                 crop_size=crop_size,
                 bit_crunch_contrast_min=bit_crunch_min,
                 bit_crunch_contrast_max=bit_crunch_max,
+                target_blur_sigma=batch_target_blur,
             )
+            
+            # Log current sigma to training logs periodically
+            if not is_validation and self.global_step % 100 == 0:
+                self.log("target_blur_sigma/train", self.current_target_blur_sigma, on_step=True, on_epoch=False)
+
             total_decode_ms = (time.perf_counter() - t_decode_start) * 1000
             logger.debug(f"[PROCESS BATCH] Decoded and graded {len(exr_bytes_list)} image(s) in {total_decode_ms:.1f}ms")
             
@@ -459,11 +493,20 @@ class DequantizationTrainer(L.LightningModule):
             
             # === LOSS COMPUTATION ===
             t_loss_start = time.perf_counter()
-            loss = (l1_loss(y_hat, y) * self.l1_weight + 
-                   l2_loss(y_hat, y) * self.l2_weight + 
-                   charbonnier_loss(y_hat) * self.charbonnier_weight + 
-                   edge_aware_smoothing_loss(y_hat, y) * self.grad_match_weight +
-                   total_variation_loss(y_hat, variant=self.total_variation_variant) * self.total_variation_weight)
+            
+            # Compute individual components for logging
+            l1 = l1_loss(y_hat, y)
+            l2 = l2_loss(y_hat, y)
+            charb = charbonnier_loss(y_hat)
+            edge_loss, edge_mask = edge_aware_smoothing_loss(y_hat, y, return_mask=True)
+            self.last_mask = edge_mask # Store for callback to save as file
+            tv = total_variation_loss(y_hat, variant=self.total_variation_variant)
+            
+            loss = (l1 * self.l1_weight + 
+                   l2 * self.l2_weight + 
+                   charb * self.charbonnier_weight + 
+                   edge_loss * self.grad_match_weight +
+                   tv * self.total_variation_weight)
             loss_ms = (time.perf_counter() - t_loss_start) * 1000
             
             # === TRACK METRICS ===
@@ -478,12 +521,16 @@ class DequantizationTrainer(L.LightningModule):
                 self.epoch_gpu_memory.append(torch.cuda.memory_allocated() / 1e9)  # GB
             
             # Metrics are logged to TensorBoard via self.log() below (no .item() calls needed)
-            self.log("loss_L1/train", l1_loss(y_hat, y), prog_bar=False, sync_dist=True)
-            self.log("loss_L2/train", l2_loss(y_hat, y), prog_bar=False, sync_dist=True)
-            self.log("loss_Charbonnier/train", charbonnier_loss(y_hat), prog_bar=False, sync_dist=True)
-            self.log("loss_EdgeAware/train", edge_aware_smoothing_loss(y_hat, y), prog_bar=False, sync_dist=True)
-            self.log("loss_TV/train", total_variation_loss(y_hat, variant=self.total_variation_variant), prog_bar=False, sync_dist=True)
+            self.log("loss_L1/train", l1, prog_bar=False, sync_dist=True)
+            self.log("loss_L2/train", l2, prog_bar=False, sync_dist=True)
+            self.log("loss_Charbonnier/train", charb, prog_bar=False, sync_dist=True)
+            self.log("loss_EdgeAware/train", edge_loss, prog_bar=False, sync_dist=True)
+            self.log("loss_TV/train", tv, prog_bar=False, sync_dist=True)
             self.log("loss_total/train", loss, prog_bar=False, sync_dist=True)
+            
+            # Log the mask periodically for debugging (first batch of every epoch)
+            if batch_idx == 0:
+                self.logger.experiment.add_image("masks/edge_aware", edge_mask[0].mean(dim=0, keepdim=True), global_step=self.global_step)
             
             self.last_batch_gpu_ms = total_batch_ms
             return loss

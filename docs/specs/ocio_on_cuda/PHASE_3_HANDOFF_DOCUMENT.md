@@ -90,7 +90,7 @@ Generates visualizations: `outputs/benchmark_visualizations/comparison_*.png`
 
 ### Task 1: Audit Existing Training Code
 
-**Location**: `scripts/train_dequantization_net.py` and `scripts/train_dequantization_net.sh`
+**Location**: `scripts/train_dequant_net.py` and `scripts/train_dequant_net.sh`
 
 **Questions to Answer**:
 1. Where is OCIO currently used in the training loop?
@@ -206,7 +206,7 @@ Should still show:
 #### C. End-to-End Test
 ```bash
 # Run full training pipeline with new code
-pixi run python scripts/train_dequantization_net.py \
+pixi run python scripts/train_dequant_net.py \
   --config configs/default.yaml \
   --use_pytorch_aces true  # New flag
 ```

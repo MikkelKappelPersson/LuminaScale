@@ -163,7 +163,7 @@ For quantized input / target:
 ### Why Synthetic Test Reveals the Problem
 
 ```python
-# From run_inference.py:
+# From run_dequant_inference.py:
 hdr = create_primary_gradients(width=target_w, height=target_h, dtype="float32")
 hdr_clipped = np.clip(hdr, 0, 1)
 ldr = quantize_to_8bit(hdr_clipped)
@@ -214,7 +214,7 @@ After gradient descent: update = 1e-4 * 1.2e-5 ≈ 1.2e-9 (no change!)
 
 ### How to Verify This
 
-You can check by modifying `run_inference.py`:
+You can check by modifying `run_dequant_inference.py`:
 
 ```python
 # Add this diagnostic

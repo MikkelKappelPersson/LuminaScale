@@ -44,7 +44,7 @@ The training pipeline automatically loads WebDataset shards and applies:
 
 Run training with:
 ```bash
-pixi run python scripts/train_dequantization_net.py
+pixi run python scripts/train_dequant_net.py
 ```
 
 Configure shard path in `configs/default.yaml`:

@@ -34,8 +34,8 @@ from .losses import l1_loss, l2_loss, charbonnier_loss, edge_aware_smoothing_los
 
 logger = logging.getLogger(__name__)
 
-class DequantizationTrainer(L.LightningModule):
-    """LightningModule for training Dequantization-Net."""
+class DequantTrainer(L.LightningModule):
+    """LightningModule for training Dequant-Net."""
 
     def __init__(
         self,
@@ -56,7 +56,7 @@ class DequantizationTrainer(L.LightningModule):
         target_blur_anneal_epochs: int = 0,
     ) -> None:
         super().__init__()
-        print(f"[DequantizationTrainer] Initializing LightningModule...")
+        print(f"[DequantTrainer] Initializing LightningModule...")
         
         self.model = model
         self.learning_rate = learning_rate
@@ -139,7 +139,7 @@ class DequantizationTrainer(L.LightningModule):
         self.val_ssim_db = None  # For hparams logging
         self.val_delta_e_mean = None
         
-        print(f"[DequantizationTrainer] ✓ Initialization complete")
+        print(f"[DequantTrainer] ✓ Initialization complete")
 
     def setup(self, stage: str) -> None:
         """Lightning setup hook called before training/validation starts.

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from .dequantization_net import DequantizationNet, create_dequantization_net
+from .dequant_net import DequantNet, create_dequant_net
 
 __all__ = [
-    "DequantizationNet",
-    "create_dequantization_net",
+    "DequantNet",
+    "create_dequant_net",
 ]

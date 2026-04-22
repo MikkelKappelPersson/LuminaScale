@@ -15,16 +15,16 @@ srun --mem=16G singularity exec luminascale.sif tensorboard --logdir=outputs/tra
 ```
 ## Training with config file
 ```bash
-sbatch scripts/train_dequantization_net.sh config-name=train_01
+sbatch scripts/train_dequant_net.sh config-name=train_01
 ```
 ## Training with params
 ```bash
-sbatch scripts/train_dequantization_net.sh loss.l1_weight=1.0 loss.l2_weight=0.0 loss.charbonnier_weight=2.0 loss.grad_match_weight=0.0
+sbatch scripts/train_dequant_net.sh loss.l1_weight=1.0 loss.l2_weight=0.0 loss.charbonnier_weight=2.0 loss.grad_match_weight=0.0
 ```
 
 ## Training with srun
 ```bash
-srun --cpus-per-task=16 --mem=64G --gres=gpu:l40s:1 --time=1:00:00 singularity exec --nv luminascale.sif python3 scripts/train_dequantization_net.py --config-name=dev
+srun --cpus-per-task=16 --mem=64G --gres=gpu:l40s:1 --time=1:00:00 singularity exec --nv luminascale.sif python3 scripts/train_dequant_net.py --config-name=dev
 ```
 
 ## Inference
@@ -32,5 +32,5 @@ srun --cpus-per-task=16 --mem=64G --gres=gpu:l40s:1 --time=1:00:00 singularity e
 Run inference on a 2K synthetic sky gradient using `srun`:
 
 ```bash
-srun --gres=gpu:1 --mem=16G singularity exec --nv luminascale.sif python3 scripts/run_inference.py --checkpoint dataset/temp/test_run/20260331_164330_dequant_net_epoch_1.pt --synthetic --width 2048 --height 1024 --output outputs/inference/sky_2k.exr
+srun --gres=gpu:1 --mem=16G singularity exec --nv luminascale.sif python3 scripts/run_dequant_inference.py --checkpoint dataset/temp/test_run/20260331_164330_dequant_net_epoch_1.pt --synthetic --width 2048 --height 1024 --output outputs/inference/sky_2k.exr
 ```

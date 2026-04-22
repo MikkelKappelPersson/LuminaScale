@@ -1,13 +1,13 @@
-"""Hydra-based training script for Dequantization-Net (WebDataset).
+"""Hydra-based training script for Dequant-Net (WebDataset).
 
 Usage (local development):
-    python scripts/train_dequantization_net.py --config-name=default
+    python scripts/train_dequant_net.py --config-name=default
 
 Usage (HPC via Slurm):
     sbatch scripts/train_wds.sh
 
 Override config on CLI:
-    python scripts/train_dequantization_net.py \
+    python scripts/train_dequant_net.py \
         batch_size=32 \
         epochs=50
 """
@@ -55,8 +55,8 @@ OmegaConf.register_new_resolver("eval", eval)
 # Suppress non-critical warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pytorch_lightning")
 
-from luminascale.models import create_dequantization_net
-from luminascale.training.dequantization_trainer import DequantizationTrainer
+from luminascale.models import create_dequant_net
+from luminascale.training.dequant_trainer import DequantTrainer
 from luminascale.training.logger import CustomTensorBoardLogger
 from luminascale.training.weight_scheduler import WeightSchedulerCallback
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
@@ -103,7 +103,7 @@ from pytorch_lightning.callbacks import TQDMProgressBar, Callback
 
 
 class SyntheticInferenceVisualizerCallback(Callback):
-    """Runs synthetic inference visualization after each epoch using run_inference.py."""
+    """Runs synthetic inference visualization after each epoch using run_dequant_inference.py."""
     
     def __init__(self, width: int = 1024, height: int = 512, base_channels: int = 32):
         """Initialize the visualization callback.
@@ -117,7 +117,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
         self.width = width
         self.height = height
         self.base_channels = base_channels
-        self.run_inference_script = project_root / "scripts" / "run_inference.py"
+        self.run_dequant_inference_script = project_root / "scripts" / "run_dequant_inference.py"
     
     def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
         """Run inference at the start of training."""
@@ -155,7 +155,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
         step: int, 
         epoch_label: str
     ) -> None:
-        """Run synthetic inference via run_inference.py and log results to TensorBoard.
+        """Run synthetic inference via run_dequant_inference.py and log results to TensorBoard.
         
         Args:
             trainer: PyTorch Lightning trainer
@@ -173,7 +173,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
         
         temp_checkpoint: Path | None = None
         try:
-            # Save temporary checkpoint for run_inference.py
+            # Save temporary checkpoint for run_dequant_inference.py
             temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_{epoch_label}.pt"
             # Cast model as nn.Module to access state_dict
             model = cast(nn.Module, pl_module.model)
@@ -189,10 +189,10 @@ class SyntheticInferenceVisualizerCallback(Callback):
             output_exr = Path(trainer.log_dir) / f"synthetic_{epoch_label}.exr"
             output_png = Path(trainer.log_dir) / f"synthetic_{epoch_label}.png"
             
-            # Run run_inference.py
+            # Run run_dequant_inference.py
             cmd = [
                 "python",
-                str(self.run_inference_script),
+                str(self.run_dequant_inference_script),
                 "--checkpoint",
                 str(temp_checkpoint),
                 "--synthetic",
@@ -209,7 +209,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 "--apply-contrast-to-output",
             ]
             
-            # If target blurring is enabled, pass current sigma to run_inference
+            # If target blurring is enabled, pass current sigma to run_dequant_inference
             if hasattr(pl_module, "current_target_blur_sigma") and pl_module.current_target_blur_sigma > 0:
                 cmd.extend(["--target-blur-sigma", str(pl_module.current_target_blur_sigma)])
             
@@ -226,7 +226,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
             
             tb = trainer.logger.experiment  # type: ignore
             
-            # Log the comparison PNG directly from run_inference.py (3x3 grid with all analysis)
+            # Log the comparison PNG directly from run_dequant_inference.py (3x3 grid with all analysis)
             if output_png.exists():
                 logger.debug(f"Logging comparison grid from {output_png}")
                 try:
@@ -318,7 +318,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
         
         temp_checkpoint: Path | None = None
         try:
-            # Save temporary checkpoint for run_inference.py (reuse for all images)
+            # Save temporary checkpoint for run_dequant_inference.py (reuse for all images)
             temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_real_{epoch_label}.pt"
             model = cast(nn.Module, pl_module.model)
             
@@ -340,10 +340,10 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 image_name = test_image.stem
                 output_exr = Path(trainer.log_dir) / f"{image_name}_{epoch_label}.exr"
                 
-                # Run run_inference.py (no PNG comparison needed)
+                # Run run_dequant_inference.py (no PNG comparison needed)
                 cmd = [
                     "python",
-                    str(self.run_inference_script),
+                    str(self.run_dequant_inference_script),
                     "--checkpoint",
                     str(temp_checkpoint),
                     "--input",
@@ -354,7 +354,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
                     str(str(pl_module.device).split(":")[0]),
                 ]
                 
-                # If target blurring is enabled, pass current sigma to run_inference
+                # If target blurring is enabled, pass current sigma to run_dequant_inference
                 if hasattr(pl_module, "current_target_blur_sigma") and pl_module.current_target_blur_sigma > 0:
                     cmd.extend(["--target-blur-sigma", str(pl_module.current_target_blur_sigma)])
                 
@@ -695,7 +695,7 @@ def main(cfg: DictConfig) -> None:
     
     # 2. Setup Lightning Module
     print(f"[MAIN] Creating model...")
-    model = create_dequantization_net(in_channels=3, base_channels=cfg.model.base_channels)  # type: ignore
+    model = create_dequant_net(in_channels=3, base_channels=cfg.model.base_channels)  # type: ignore
     print(f"[MAIN] ✓ Model created")
     
     # Move model to CUDA (we always train on GPUs)
@@ -716,8 +716,8 @@ def main(cfg: DictConfig) -> None:
     else:
         print(f"[MAIN] Model compilation disabled (enable_compile=False)")
     
-    print(f"[MAIN] Creating DequantizationTrainer...")
-    ls_module = DequantizationTrainer(
+    print(f"[MAIN] Creating DequantTrainer...")
+    ls_module = DequantTrainer(
         model=model,
         learning_rate=cfg.learning_rate,
         loss_weights=dict(cfg.get("loss", {})),
@@ -735,7 +735,7 @@ def main(cfg: DictConfig) -> None:
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
-    print(f"[MAIN] ✓ DequantizationTrainer created")
+    print(f"[MAIN] ✓ DequantTrainer created")
     
     # Prepare hparams dict for logging at training end
     config_name = cfg.get("config_name", "default")

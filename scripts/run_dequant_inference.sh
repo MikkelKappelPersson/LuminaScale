@@ -31,13 +31,13 @@ mkdir -p "$OUTPUT_DIR" outputs/logs
 singularity exec --nv \
     --bind /home/student.aau.dk/fs62fb/projects/LuminaScale:/app \
     /home/student.aau.dk/fs62fb/singularity/luminascale.sif \
-    python scripts/run_inference.py \
+    python scripts/run_dequant_inference.py \
     --checkpoint "$CHECKPOINT" \
     --input "$INPUT" \
     --output "$OUTPUT_FILE"
     --bind /mnt/MKP01:/mnt/MKP01 \
     /home/student.aau.dk/fs62fb/projects/LuminaScale/singularity/luminascale.sif \
-    python3 /app/scripts/run_inference.py \
+    python3 /app/scripts/run_dequant_inference.py \
     --checkpoint "$CHECKPOINT" \
     --input "$INPUT" \
     --output "$OUTPUT" \

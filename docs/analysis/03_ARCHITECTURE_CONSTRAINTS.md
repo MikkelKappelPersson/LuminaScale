@@ -3,7 +3,7 @@
 ## Current Architecture
 
 ```python
-class DequantizationNet(nn.Module):
+class DequantNet(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,

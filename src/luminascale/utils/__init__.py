@@ -8,9 +8,9 @@ from .dequant_utils import (
     compare_with_baseline,
     print_metrics_summary,
 )
-from .dequantization_inference import (
-    run_inference_on_batch,
-    run_inference_on_single_image,
+from .dequant_inference import (
+    run_dequant_inference_on_batch,
+    run_dequant_inference_on_single_image,
     infer_dataset_with_comparison,
     save_inference_results,
 )

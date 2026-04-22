@@ -17,7 +17,7 @@ from .dequant_utils import (
 )
 
 
-def run_inference_on_batch(
+def run_dequant_inference_on_batch(
     model: torch.nn.Module,
     batch: torch.Tensor,
     device: torch.device,
@@ -40,7 +40,7 @@ def run_inference_on_batch(
     return output
 
 
-def run_inference_on_single_image(
+def run_dequant_inference_on_single_image(
     model: torch.nn.Module,
     image: torch.Tensor,
     device: torch.device,
@@ -103,7 +103,7 @@ def infer_dataset_with_comparison(
             hdr = hdr.unsqueeze(0)
         
         # Run model inference
-        model_output = run_inference_on_batch(model, ldr, device)
+        model_output = run_dequant_inference_on_batch(model, ldr, device)
         model_output = model_output.squeeze(0)
         
         # Apply baseline blur

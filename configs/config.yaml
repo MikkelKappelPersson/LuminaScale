@@ -1,5 +1,5 @@
 # WebDataset training configuration (baseline)
-# Usage: python scripts/train_dequantization_net.py --config-name=default
+# Usage: python scripts/train_dequant_net.py --config-name=default
 
 config_name: default
 

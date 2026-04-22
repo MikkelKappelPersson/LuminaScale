@@ -1,3 +1,3 @@
-from .dequantization_trainer import DequantizationTrainer
+from .dequant_trainer import DequantTrainer
 
-__all__ = ["DequantizationTrainer"]
+__all__ = ["DequantTrainer"]

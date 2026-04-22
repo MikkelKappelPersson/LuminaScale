@@ -1,4 +1,4 @@
-"""Dequantization-Net: 6-level U-Net for structural quantization removal.
+"""Dequant-Net: 6-level U-Net for structural quantization removal.
 
 Implements the architecture from "Single-Image HDR Reconstruction by Learning
 to Reverse the Camera Pipeline" (Liu et al., CVPR 2020). The network learns
@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class DequantizationNet(nn.Module):
+class DequantNet(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,
@@ -108,11 +108,11 @@ class DequantizationNet(nn.Module):
         return output
 
 
-def create_dequantization_net(
+def create_dequant_net(
     device: torch.device | str = "cpu",
     base_channels: int = 16,
     **kwargs: dict,
-) -> DequantizationNet:
-    model = DequantizationNet(base_channels=base_channels, **kwargs)
+) -> DequantNet:
+    model = DequantNet(base_channels=base_channels, **kwargs)
     model = model.to(device)
     return model

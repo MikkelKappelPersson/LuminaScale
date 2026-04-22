@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=train_dequantization_net
+#SBATCH --job-name=train_dequant_net
 #SBATCH --output=outputs/logs/train_%j.out
 #SBATCH --error=outputs/logs/train_%j.err
 #SBATCH --cpus-per-task=16
@@ -18,11 +18,11 @@ CONTAINER=luminascale.sif
 # Run directory cleanup
 mkdir -p outputs/training
 
-echo "🚀 Starting Dequantization Training (WebDataset Pipeline)"
+echo "🚀 Starting Dequant Training (WebDataset Pipeline)"
 echo "Using Shards in: dataset/temp/shards/train/"
 
 # Run the training script via Singularity
 # Overriding shuffle_buffer slightly if needed
 singularity exec --nv $CONTAINER \
-    python scripts/train_dequantization_net.py \
+    python scripts/train_dequant_net.py \
         "$@"

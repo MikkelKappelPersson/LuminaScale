@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 from luminascale.utils.dataset_pair_generator import DatasetPairGenerator
-from luminascale.training.dequantization_trainer import exposure_mask
+from luminascale.training.dequant_trainer import exposure_mask
 
 # Load config
 import hydra

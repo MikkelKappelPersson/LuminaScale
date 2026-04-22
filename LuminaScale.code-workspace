@@ -8,7 +8,7 @@
 		"chat.tools.terminal.autoApprove": {
 			"pixi": true,
 			"timeout": true,
-			"/^python -m py_compile scripts/train_dequantization_net\\.py$/": {
+			"/^python -m py_compile scripts/train_dequant_net\\.py$/": {
 				"approve": true,
 				"matchCommandLine": true
 			},
@@ -24,7 +24,7 @@
 				"approve": true,
 				"matchCommandLine": true
 			},
-			"/^python -m py_compile /run/media/mikkelkp/MKP01/med8_project/LuminaScale/scripts/train_dequantization_net\\.py 2>&1$/": {
+			"/^python -m py_compile /run/media/mikkelkp/MKP01/med8_project/LuminaScale/scripts/train_dequant_net\\.py 2>&1$/": {
 				"approve": true,
 				"matchCommandLine": true
 			},
@@ -36,7 +36,7 @@
 				"approve": true,
 				"matchCommandLine": true
 			},
-			"/^python -m py_compile visualisations/validate_training_pairs\\.py src/luminascale/training/dequantization_trainer\\.py scripts/train_dequantization_net\\.py src/luminascale/utils/dataset_pair_generator\\.py 2>&1 \\| head -50$/": {
+			"/^python -m py_compile visualisations/validate_training_pairs\\.py src/luminascale/training/dequantization_trainer\\.py scripts/train_dequant_net\\.py src/luminascale/utils/dataset_pair_generator\\.py 2>&1 \\| head -50$/": {
 				"approve": true,
 				"matchCommandLine": true
 			}

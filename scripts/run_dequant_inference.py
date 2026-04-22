@@ -30,7 +30,7 @@ sys.path.insert(0, str(project_root / "src"))
 import matplotlib
 matplotlib.use('Agg')
 
-from luminascale.models import create_dequantization_net
+from luminascale.models import create_dequant_net
 from luminascale.utils.io import read_exr, write_exr, oiio_aces_to_display
 from luminascale.utils.image_generator import (
     combine_primary_gradients,
@@ -326,7 +326,7 @@ def main():
 
     # 1. Load Model
     print(f"Loading model on {device}...")
-    model = create_dequantization_net(device=device, base_channels=args.channels)
+    model = create_dequant_net(device=device, base_channels=args.channels)
     checkpoint = torch.load(args.checkpoint, map_location=device)
     # Handle both Lightning checkpoints and raw state dicts
     if isinstance(checkpoint, dict) and "state_dict" in checkpoint:

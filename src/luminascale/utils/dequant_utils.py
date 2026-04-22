@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from skimage.metrics import structural_similarity as ssim
 
-from ..models import DequantizationNet
+from ..models import DequantNet
 
 
 def load_dequant_model(
@@ -18,7 +18,7 @@ def load_dequant_model(
     device: torch.device,
     base_channels: int = 32,
     num_levels: int = 6,
-) -> DequantizationNet:
+) -> DequantNet:
     """Load a pretrained dequantization model from checkpoint.
     
     Args:
@@ -30,7 +30,7 @@ def load_dequant_model(
     Returns:
         Loaded model in eval mode
     """
-    model = DequantizationNet(
+    model = DequantNet(
         in_channels=3,
         base_channels=base_channels,
         num_levels=num_levels,

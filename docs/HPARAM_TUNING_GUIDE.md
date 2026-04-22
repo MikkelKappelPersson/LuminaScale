@@ -43,7 +43,7 @@ psnr_val = compute_psnr(y_hat, y)
 self.log("metric_psnr/train", psnr_val, prog_bar=False, sync_dist=True)
 ```
 
-### 2. HparamsMetricsCallback (`scripts/train_dequantization_net.py`)
+### 2. HparamsMetricsCallback (`scripts/train_dequant_net.py`)
 
 Updated `_get_metrics_dict()` to prefer PSNR over loss:
 
@@ -73,7 +73,7 @@ You'll see:
 
 ### Step 1: Baseline Run
 ```bash
-python scripts/train_dequantization_net.py \
+python scripts/train_dequant_net.py \
   --config-name=default \
   epochs=10
 ```
@@ -82,7 +82,7 @@ python scripts/train_dequantization_net.py \
 ### Step 2: Tune Loss Weights
 ```bash
 # Try different charbonnier_weight
-python scripts/train_dequantization_net.py \
+python scripts/train_dequant_net.py \
   --config-name=default \
   loss.charbonnier_weight=0.10 \
   epochs=10

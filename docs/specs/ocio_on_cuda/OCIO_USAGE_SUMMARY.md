@@ -16,10 +16,10 @@
 ### Usage in Scripts & Notebooks
 | Location | Role |
 |----------|------|
-| `scripts/train_dequantization_net.py` | Sets `OCIO` env var before training; Dataset uses OCIO transforms |
+| `scripts/train_dequant_net.py` | Sets `OCIO` env var before training; Dataset uses OCIO transforms |
 | `scripts/generate_on_the_fly_dataset.py` | On-the-fly dataset generation with OCIO transforms |
 | `scripts/bake_dataset.py` | Batch ACES→sRGB conversion; imports `ocio_aces_to_display` + `ocio_aces_to_srgb_with_look` |
-| `scripts/run_inference.py` | Post-processing via `oiio_aces_to_display` |
+| `scripts/run_dequant_inference.py` | Post-processing via `oiio_aces_to_display` |
 | `test_aces_render_comparison.py` | Comparison of OIIO vs GPU rendering implementations |
 | **Notebooks** | `verify_gpu_renderer_orientation.ipynb`, `on_the_fly_data_test.ipynb`, `dequantization_inference.ipynb`, `aces_degradation_testing.ipynb` |
 
@@ -236,7 +236,7 @@ if ocio_config_path.exists():
 ```
 
 **Scripts using this pattern**:
-- `train_dequantization_net.py` (line 62-63)
+- `train_dequant_net.py` (line 62-63)
 - `bake_dataset.py` (line 33)
 - `generate_on_the_fly_dataset.py` (line 36)
 

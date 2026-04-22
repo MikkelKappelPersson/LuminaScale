@@ -1,0 +1,39 @@
+# @package _global_
+defaults:
+  - dequant  # Inherit everything from the base dequant task
+
+config_name: dequant_dev
+
+# Data paths
+shard_path: "dataset/temp/shards/val"
+epochs: 10
+
+prefetch_size: 2
+# Optimize throughput without multiple patches strategy
+
+batch_size: 1          # Larger batch for better GPU utilization
+num_workers: 2         # Optimal: minimizes GIL contention while maintaining I/O
+
+
+# Final output resolution config
+crop_size: 2048
+val_crop_size: 1024  # Faster validation with smaller crops
+
+# Loss weights (tuned for smooth dequantization with Charbonnier smoothness)
+loss:
+  l1_weight: 0.1           # Pixel-wise reconstruction (base)
+  l2_weight: 0.0           # L2 loss (MSE)
+  charbonnier_weight: 0.0  # Charbonnier loss on OUTPUT (edge-preserving smoothness)
+  grad_match_weight: 100.0   # Edge-aware smoothing (soft): no artifacts in smooth regions
+  total_variation_weight: 0.0  # Total variation loss (gradient smoothing)
+  total_variation_variant: "huber"  # Variant for TV loss: "huber" or "l2"
+
+# Mixed precision (FP16 with automatic loss scaling) for faster GPU compute
+precision: "32"
+
+# Disable profiling CUDA synchronizations for maximum throughput
+enable_profiling: true
+
+# torch.compile disabled due to missing CUDA headers in Triton compilation
+# Set to true to enable (requires proper CUDA development headers)
+enable_compile: false

@@ -619,7 +619,7 @@ class CustomRichProgressBar(RichProgressBar):
 
 
 
-@hydra.main(config_path="../configs", config_name="default", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="config", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     """Main training entry point for WebDataset pipeline."""
     
@@ -640,7 +640,8 @@ def main(cfg: DictConfig) -> None:
     
     # Run directory setup
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    print(f"[MAIN] Run ID: {run_id}")
+    task_name = cfg.get("task_name", "unknown")
+    print(f"[MAIN] Run ID: {run_id} (Task: {task_name})")
 
     # 1. Create WebDataset Loaders
     # WebDataset streams unique images from shards, generating random crops on-the-fly
@@ -757,9 +758,11 @@ def main(cfg: DictConfig) -> None:
     )
 
     # Append a sanitized version of the loss formula to the TensorBoard/run directory name
-    # Allow = in filenames (safe on all filesystems: Linux, Windows, macOS)
     run_dir_suffix = re.sub(r"[^A-Za-z0-9._=-]+", "_", loss_fn_str).strip("_")
-    run_dir = Path(cfg.output_dir).resolve() / f"{run_id}_{run_dir_suffix}"
+    
+    # Task-specific output scoping from config (e.g., outputs/dequant_runs/training)
+    base_output_dir = Path(cfg.get("output_dir", "./outputs/training")).resolve()
+    run_dir = base_output_dir / f"{run_id}_{run_dir_suffix}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[MAIN] Run directory: {run_dir}")
@@ -770,15 +773,20 @@ def main(cfg: DictConfig) -> None:
 
     # 3. Setup Trainer
     print(f"[MAIN] Creating Lightning Trainer...")
+    
+    # Task-isolated logging: Use run_dir as save_dir with name="" and version=""
+    # This prevents Hydra or Lightning from adding redundant subfolders
     logger_tb = CustomTensorBoardLogger(
         save_dir=str(run_dir),
         name="",
         version="",
     )
     
+    # Task-specific checkpoint naming
+    task_label = cfg.get("task_name", "model")
     checkpoint_callback = ModelCheckpoint(
         dirpath=str(run_dir / "checkpoints"),
-        filename="dequant-{epoch:02d}",
+        filename=f"{task_label}-{{epoch:02d}}",
         every_n_epochs=cfg.get("checkpoint_freq", 1),
         save_top_k=cfg.get("save_top_k", 3),  # Keep track of top performers (PSNR)
         monitor="metric_psnr/val",

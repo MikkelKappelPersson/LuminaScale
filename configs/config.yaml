@@ -1,7 +1,12 @@
 # WebDataset training configuration (baseline)
-# Usage: python scripts/train_dequant_net.py --config-name=default
+# Usage: python scripts/train_dequant_net.py --config-name=default task=dequant
 
-config_name: default
+defaults:
+  - _self_
+  - task: dequant
+
+config_name: config
+task_name: null # Provided by task/ module
 
 # Data paths
 shard_path: "dataset/temp/shards/train"
@@ -28,33 +33,8 @@ devices: auto
 strategy: auto
 precision: 16-mixed
 
-# Output
+# Output (Handled by task configs, fallback here)
 output_dir: ./outputs/training
-
-# Model
-model:
-  base_channels: 32
-
-# Target blurring for clean gradient learning
-target_blur:
-  start_sigma: 0.0      # Start with blur to focus on core gradients
-  end_sigma: 0.0        # End on real images
-  anneal_epochs: ${epochs}    # Gradually reduce blur over the full training duration
-
-# Image processing
-crop_size: 2048
-val_crop_size: 1024  # Validation crop size (can differ from training for speed)
-bit_crunch_contrast_min: 1.0   # Min bit-crunching factor (1.0 = no crunching, >1 = aggressive)
-bit_crunch_contrast_max: 1.0   # Max bit-crunching factor (pre=1/factor, post=factor for symmetric crush/expand)
-
-# Loss weights (tuned for smooth dequantization with Charbonnier smoothness)
-loss:
-  l1_weight: 0.1           # Pixel-wise reconstruction (base)
-  l2_weight: 0.0           # L2 loss (MSE)
-  charbonnier_weight: 0.0  # Charbonnier loss on OUTPUT (edge-preserving smoothness)
-  grad_match_weight: 100.0   # Edge-aware smoothing (soft): no artifacts in smooth regions
-  total_variation_weight: 0.0  # Total variation loss (gradient smoothing)
-  total_variation_variant: "huber"  # Variant for TV loss: "huber" or "l2"
 
 # Weight scheduling (optional: decay weights during training)
 weight_schedule:

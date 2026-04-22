@@ -30,11 +30,12 @@ from ..data.wds_dataset import LuminaScaleWebDataset
 from ..utils.dataset_pair_generator import DatasetPairGenerator
 from ..utils.image_generator import create_primary_gradients, quantize_to_8bit, apply_s_curve_contrast_torch
 from ..utils.metrics import DeltaEACES
+from .base_trainer import BaseLuminaScaleTrainer
 from .losses import l1_loss, l2_loss, charbonnier_loss, edge_aware_smoothing_loss, total_variation_loss
 
 logger = logging.getLogger(__name__)
 
-class DequantTrainer(L.LightningModule):
+class DequantTrainer(BaseLuminaScaleTrainer):
     """LightningModule for training Dequant-Net."""
 
     def __init__(

@@ -1,0 +1,18 @@
+# @package _global_
+task_name: joint
+
+# Data for joint training
+shard_path: "dataset/temp/shards/train"
+val_shard_path: "dataset/temp/shards/val"
+
+# Joint Composition
+# Checkpoints for initialization
+dequant_pretrained_path: null
+mapper_pretrained_path: null
+
+# Learning rates for fine-tuning
+learning_rate_dequant: 1e-5
+learning_rate_mapper: 1e-4
+
+# Output scoping
+output_dir: ./outputs/joint/training

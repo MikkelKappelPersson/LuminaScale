@@ -1,0 +1,18 @@
+# @package _global_
+task_name: mapper
+
+# Data specific to ACES mapping
+shard_path: "dataset/temp/shards/train"
+val_shard_path: "dataset/temp/shards/val"
+
+# Mapper specific parameters
+model:
+  mapper_type: "base"
+
+# Loss weights (Color focus)
+loss:
+  color_weight: 1.0
+  perceptual_weight: 0.5
+
+# Output scoping
+output_dir: ./outputs/mapper/training

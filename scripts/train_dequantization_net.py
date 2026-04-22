@@ -66,6 +66,21 @@ logging.basicConfig(
     stream=sys.stderr,
     force=True
 )
+
+# List of hyperparameters to keep at the top of the TensorBoard/HParams list for visibility
+DEFAULT_LOGGED_HPARAMS = [
+    "config_name",
+    "learning_rate",
+    "loss_fn",
+    "weight_l1",
+    "weight_l2",
+    "weight_charbonnier",
+    "weight_grad_match",
+    "weight_tv",
+    "bit_crunch_min",
+    "bit_crunch_max",
+]
+
 # Configure all luminascale loggers to use minimal format
 for logger_name in logging.Logger.manager.loggerDict:
     if isinstance(logging.Logger.manager.loggerDict[logger_name], logging.Logger):
@@ -755,6 +770,7 @@ def main(cfg: DictConfig) -> None:
     eta_min = 1e-6
     scheduler_str = f"CosineAnnealingLR(T_max={num_epochs}, eta_min={eta_min})"
     
+    # Create full hparams dict for logging
     hparams_dict = {
         "config_name": config_name,
         "learning_rate": cfg.learning_rate,
@@ -769,11 +785,20 @@ def main(cfg: DictConfig) -> None:
         "weight_grad_match": grad_match_weight,
         "weight_tv": total_variation_weight,
         "tv_variant": total_variation_variant,
+        "bit_crunch_min": cfg.get("bit_crunch_contrast_min", 1.0),
+        "bit_crunch_max": cfg.get("bit_crunch_contrast_max", 1.0),
         "model_base_channels": cfg.model.base_channels,
         "crop_size": 512,
         "shuffle_buffer": cfg.get("shuffle_buffer", 10),
         "precision": cfg.precision,
     }
+    
+    # Reorder hparams to put default/important ones first
+    ordered_hparams = {k: hparams_dict[k] for k in DEFAULT_LOGGED_HPARAMS if k in hparams_dict}
+    for k, v in hparams_dict.items():
+        if k not in ordered_hparams:
+            ordered_hparams[k] = v
+    hparams_dict = ordered_hparams
 
     trainer = L.Trainer(
         accelerator=cfg.accelerator,

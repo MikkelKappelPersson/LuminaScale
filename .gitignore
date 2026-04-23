@@ -14,6 +14,9 @@ dataset/
 !/outputs/training/*/config.yaml
 !/outputs/training/*/tensorboard/
 
+# aim
+.aim/
+
 # Distribution / packaging
 .Python
 build/

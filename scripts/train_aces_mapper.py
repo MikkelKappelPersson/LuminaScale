@@ -107,8 +107,7 @@ def main(cfg: DictConfig) -> None:
     # 4. Logger & Callbacks
     aim_logger = AimLogger(
         experiment=cfg.task_name,
-        train_metric_prefix="train/",
-        val_metric_prefix="val/",
+        context_prefixes=dict(subset={'train': 'train_', 'val': 'val_', 'test': 'test_'}),
     )
 
     callbacks = [

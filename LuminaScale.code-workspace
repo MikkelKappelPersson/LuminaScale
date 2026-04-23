@@ -2,6 +2,9 @@
 	"folders": [
 		{
 			"path": "./"
+		},
+		{
+			"path": "/run/media/mikkelkp/MKP01/med8_project/refs/LLF-LUT"
 		}
 	],
 	"settings": {

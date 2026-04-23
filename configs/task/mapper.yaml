@@ -1,18 +1,36 @@
 # @package _global_
 task_name: mapper
 
+# Model Configuration (SOTA-inspired Hybrid Mapper)
+model:
+  target: luminascale.models.aces_mapper.ACESMapper
+  params:
+    num_luts: 3
+    lut_dim: 33
+    num_lap: 3
+    num_residual_blocks: 5
+    sft_embed_dim: 64
+    sft_depths: [1, 1, 1, 1, 1, 1, 1, 1]
+    sft_num_heads: [2, 4, 8, 16, 16, 8, 4, 2]
+
+# Lightning Trainer/Module params
+trainer:
+  module: luminascale.training.aces_trainer.ACESMapperTrainer
+  params:
+    lr: 1e-4
+    weight_decay: 1e-4
+
 # Data specific to ACES mapping
 shard_path: "dataset/temp/shards/train"
 val_shard_path: "dataset/temp/shards/val"
 
-# Mapper specific parameters
-model:
-  mapper_type: "base"
-
-# Loss weights (Color focus)
-loss:
-  color_weight: 1.0
-  perceptual_weight: 0.5
-
 # Output scoping
 output_dir: ./outputs/mapper/training
+
+# Dataset configuration
+batch_size: 1
+crop_size: 1024
+precision: "32"
+num_workers: 1
+shuffle_buffer: 50
+prefetch_size: 2

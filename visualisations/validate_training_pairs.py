@@ -92,7 +92,7 @@ def create_visualization(
     pair_generator = DatasetPairGenerator(device=device)
     
     # Process all samples in one batch
-    input_8u_batch, target_32f_batch, timing_breakdown = pair_generator.generate_batch_from_bytes(
+    input_8u_batch, target_32f_batch, timing_breakdown = pair_generator.generate_srgb_8u_32f_from_bytes(
         exr_bytes_list, 
         crop_size=1024, 
         bit_crunch_contrast_min=1.0,

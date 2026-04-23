@@ -283,7 +283,7 @@ class DequantTrainer(BaseLuminaScaleTrainer):
             batch_target_blur = 0.0 if (is_validation or self.target_blur_start_sigma == 0) else self.current_target_blur_sigma
 
             # Decode full image(s) into graded sRGB pairs
-            srgb_8u_batch, srgb_32f_batch, batch_timing_breakdown = self.pair_generator.generate_batch_from_bytes(
+            srgb_8u_batch, srgb_32f_batch, batch_timing_breakdown = self.pair_generator.generate_srgb_8u_32f_from_bytes(
                 exr_bytes_list, 
                 crop_size=crop_size,
                 bit_crunch_contrast_min=bit_crunch_min,

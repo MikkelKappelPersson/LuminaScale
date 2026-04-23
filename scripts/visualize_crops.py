@@ -47,7 +47,7 @@ def visualize(cfg: DictConfig):
         exr_bytes = batch[0]
         
         print(f"Decoding {len(exr_bytes)} EXR files...")
-        x_full, y_full = decoder.generate_batch_from_bytes(exr_bytes)
+        x_full, y_full = decoder.generate_srgb_8u_32f_from_bytes(exr_bytes)
         
         print(f"Full image shapes: x={x_full.shape}, y={y_full.shape}")
         print(f"Full image dtypes: x={x_full.dtype}, y={y_full.dtype}")

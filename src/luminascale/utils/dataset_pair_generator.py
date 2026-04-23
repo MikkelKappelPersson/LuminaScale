@@ -50,7 +50,7 @@ class DatasetPairGenerator:
         
         self.cdl_processor = GPUCDLProcessor(device=device)
 
-    def generate_batch_from_bytes(
+    def generate_srgb_8u_32f_from_bytes(
         self, 
         exr_bytes_list: list[bytes], 
         crop_size: int = 512,
@@ -292,3 +292,89 @@ class DatasetPairGenerator:
 
 
 
+
+    def generate_aces_mapper_batch_from_bytes(
+        self, 
+        exr_bytes_list: list[bytes], 
+        crop_size: int = 512,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict]:
+        """Process a list of raw EXR bytes into (LDR_Input, ACES_Target) pairs for ACES Mapper.
+        
+        Input: sRGB 8-bit (graded via random look)
+        Target: ACES2065-1 Linear (original data)
+        """
+        import OpenImageIO as oiio
+        import tempfile
+        import os
+        
+        tensors_ldr = []
+        tensors_aces = []
+        
+        for idx, exr_bytes in enumerate(exr_bytes_list):
+            temp_file = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.exr', delete=False) as tmp:
+                    tmp.write(exr_bytes)
+                    temp_file = tmp.name
+                
+                buf_input = oiio.ImageInput.open(temp_file)
+                if not buf_input: continue
+                
+                spec = buf_input.spec()
+                h, w, c = spec.height, spec.width, spec.nchannels
+                
+                # ROI Decode
+                if crop_size > 0 and (h >= crop_size and w >= crop_size):
+                    top = (h - crop_size) // 2
+                    left = (w - crop_size) // 2
+                    # The correct signature for read_region is often:
+                    # read_region(subimage, miplevel, xbegin, xend, ybegin, yend, zbegin, zend, chans)
+                    # and sometimes takes a type hint like "float" as first arg
+                    # To be safe and handle API variations, we'll try read_image with manual crop first 
+                    # as it's more universal across OIIO versions if read_region fails
+                    pixels = buf_input.read_image("float")
+                    if pixels is not None:
+                        pixels = pixels.reshape((h, w, c))
+                        pixels = pixels[top:top+crop_size, left:left+crop_size, :]
+                else:
+                    pixels = buf_input.read_image("float")
+                    if pixels is not None:
+                        pixels = pixels.reshape((h, w, c))
+                
+                buf_input.close()
+                
+                if pixels is None:
+                    continue
+
+                # 1. Target: Original ACES Linear
+                aces_target = torch.from_numpy(pixels.copy()).to(self.device).to(torch.float32) # [H, W, 3]
+                
+                # Ensure 3 channels
+                if aces_target.shape[-1] > 3:
+                    aces_target = aces_target[..., :3]
+                
+                # 2. Input: Applied Look -> sRGB -> quantized
+                from .look_generator import get_single_random_look
+                look = get_single_random_look()
+                aces_graded = self.cdl_processor.apply_cdl_gpu(aces_target, look)
+                
+                # Transform to sRGB (Keeping 32-bit float precision)
+                srgb_input = self.pytorch_transformer.aces_to_srgb_32f(aces_graded.unsqueeze(0)).squeeze(0)
+                
+                # Store [3, H, W]
+                tensors_ldr.append(srgb_input.permute(2, 0, 1))
+                tensors_aces.append(aces_target.permute(2, 0, 1))
+                
+            except Exception as e:
+                logger.error(f"Error in ACES Mapper generator: {e}")
+                continue
+            finally:
+                if temp_file and os.path.exists(temp_file):
+                    os.remove(temp_file)
+        
+        if not tensors_ldr:
+            # Return empty tensors with correct batch dimension (0) but still 4D for the model
+            return torch.zeros((0, 3, crop_size, crop_size), device=self.device), \
+                   torch.zeros((0, 3, crop_size, crop_size), device=self.device), {}
+            
+        return torch.stack(tensors_ldr), torch.stack(tensors_aces), {}

@@ -1,9 +1,8 @@
 # WebDataset training configuration (baseline)
-# Usage: python scripts/train_dequant_net.py --config-name=default task=dequant
+# Usage: python scripts/train_dequant_net.py --config-name=dequant_run task=task_dequant
 
 defaults:
   - _self_
-  - task: dequant
 
 config_name: config
 task_name: null # Provided by task/ module
@@ -13,34 +12,18 @@ shard_path: "dataset/temp/shards/train"
 val_shard_path: "dataset/temp/shards/val"
 metadata_parquet: "dataset/temp/training_metadata.parquet"
 
-# Training parameters
-batch_size: 1
-epochs: 20  
-learning_rate: 1e-4  
-checkpoint_freq: 5        # Checkpoint every 5 epochs
-save_top_k: 3             # Keep best 3 performers (PSNR)
-resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
-
 # Data loading
 prefetch_size: 2
-num_workers: 2
-shuffle_buffer: 20  # Buffer size for shuffling individual samples (shardshuffle is automatic based on is_training)
+num_workers: 1
+shuffle_buffer: 50  # Buffer size for shuffling individual samples (shardshuffle is automatic based on is_training)
 
 # Hardware
 device: cuda
 accelerator: gpu
 devices: auto
 strategy: auto
-precision: 16-mixed
+precision: "32"
 
-# Output (Handled by task configs, fallback here)
-output_dir: ./outputs/training
-
-# Weight scheduling (optional: decay weights during training)
-weight_schedule:
-  charbonnier_weight_min: 0.01
-  decay_schedule: exponential
-  
 # Performance tuning
 enable_profiling: false  # Disable CUDA synchronization calls by default (enables profiling when true)
 enable_compile: false    # Disable torch.compile (requires CUDA headers and complex Triton setup). Training optimizations: use mixed precision (16-bit) and gradient checkpointing instead.

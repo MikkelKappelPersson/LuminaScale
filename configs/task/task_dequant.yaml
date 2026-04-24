@@ -1,10 +1,6 @@
 # @package _global_
 task_name: dequant
 
-# Data specific to dequantization
-shard_path: "dataset/temp/shards/train"
-val_shard_path: "dataset/temp/shards/val"
-
 # Dequantization specific parameters
 model:
   base_channels: 32
@@ -14,7 +10,7 @@ loss:
   l1_weight: 0.1
   l2_weight: 0.0
   charbonnier_weight: 0.0
-  grad_match_weight: 100.0
+  grad_match_weight: 0.0
   total_variation_weight: 0.0
   total_variation_variant: "huber"
 

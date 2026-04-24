@@ -1,7 +1,7 @@
 """Hydra-based training script for ACESMapper (WebDataset).
 
 Usage (local development):
-    python scripts/train_aces_mapper.py --config-name=mapper
+    python scripts/train_aces_mapper.py --config-name=mapper_run
 
 Usage (HPC via Slurm):
     sbatch scripts/train_aces_mapper.sh
@@ -24,8 +24,8 @@ from pytorch_lightning.callbacks import (
     RichModelSummary,
     RichProgressBar,
     LearningRateMonitor,
+    Callback,
 )
-from aim.pytorch_lightning import AimLogger
 from omegaconf import DictConfig, OmegaConf
 import hydra
 
@@ -38,6 +38,7 @@ if src_path not in sys.path:
 
 from luminascale.training.aces_trainer import ACESMapperTrainer
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
+from luminascale.training.logger import CustomTensorBoardLogger
 
 # Register resolvers for OmegaConf
 if not OmegaConf.has_resolver("eval"):
@@ -53,7 +54,39 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-@hydra.main(config_path="../configs/task", config_name="mapper", version_base="1.1")
+class HparamsMetricsCallback(Callback):
+    """Explicitly log hparams + metrics with CustomTensorBoardLogger.
+
+    CustomTensorBoardLogger disables early automatic hparams logging. This callback
+    logs hparams at fit start and updates them with validation metrics during training.
+    """
+
+    def __init__(self, hparams_dict: dict[str, Any]) -> None:
+        super().__init__()
+        self.hparams_dict = hparams_dict
+
+    def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        if trainer.logger is not None and hasattr(trainer.logger, "log_hyperparams_metrics"):
+            trainer.logger.log_hyperparams_metrics(self.hparams_dict, {})
+
+    def on_validation_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        if trainer.logger is None or not hasattr(trainer.logger, "log_hyperparams_metrics"):
+            return
+
+        val_loss = trainer.callback_metrics.get("val_loss")
+        val_psnr = trainer.callback_metrics.get("val_psnr")
+
+        metrics_dict: dict[str, float] = {}
+        if val_loss is not None:
+            metrics_dict["val_loss"] = float(val_loss.detach().cpu().item())
+        if val_psnr is not None:
+            metrics_dict["val_psnr"] = float(val_psnr.detach().cpu().item())
+
+        if metrics_dict:
+            trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
+
+
+@hydra.main(config_path="../configs", config_name="mapper_run", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     # 1. Performance Optimizations
     torch.set_float32_matmul_precision('high')
@@ -105,10 +138,26 @@ def main(cfg: DictConfig) -> None:
     )
 
     # 4. Logger & Callbacks
-    aim_logger = AimLogger(
-        experiment=cfg.task_name,
-        context_prefixes=dict(subset={'train': 'train_', 'val': 'val_', 'test': 'test_'}),
+    logger_tb = CustomTensorBoardLogger(
+        save_dir=cfg.output_dir,
+        name=cfg.task_name,
+        version=datetime.now().strftime("%Y%m%d_%H%M%S"),
     )
+
+    hparams_dict = {
+        "task_name": cfg.get("task_name", "mapper"),
+        "batch_size": int(cfg.get("batch_size", 4)),
+        "crop_size": int(cfg.get("crop_size", 512)),
+        "precision": str(precision),
+        "epochs": int(cfg.get("epochs", 100)),
+        "lr": float(cfg.trainer.params.lr),
+        "weight_decay": float(cfg.trainer.params.weight_decay),
+        "num_luts": int(cfg.model.params.num_luts),
+        "lut_dim": int(cfg.model.params.lut_dim),
+        "num_lap": int(cfg.model.params.num_lap),
+        "num_residual_blocks": int(cfg.model.params.num_residual_blocks),
+        "num_workers": int(cfg.get("num_workers", 4)),
+    }
 
     callbacks = [
         ModelCheckpoint(
@@ -121,6 +170,7 @@ def main(cfg: DictConfig) -> None:
         LearningRateMonitor(logging_interval="step"),
         RichModelSummary(max_depth=2),
         RichProgressBar(),
+        HparamsMetricsCallback(hparams_dict),
     ]
 
     # 5. Trainer setup
@@ -128,7 +178,7 @@ def main(cfg: DictConfig) -> None:
         max_epochs=cfg.get("epochs", 100),
         accelerator="gpu",
         devices=1,  # Adjust for multi-GPU if needed
-        logger=aim_logger,
+        logger=logger_tb,
         callbacks=callbacks,
         precision=precision, 
         gradient_clip_val=1.0,

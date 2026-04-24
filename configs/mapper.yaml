@@ -1,0 +1,38 @@
+# Entry config for ACES Mapper training.
+# Inherits global system defaults from config.yaml and applies mapper task params.
+
+defaults:
+  - config
+  - task: task_mapper
+  - _self_
+
+# Training parameters
+batch_size: 1
+epochs: 20  
+learning_rate: 1e-4  
+checkpoint_freq: 5        # Checkpoint every 5 epochs
+save_top_k: 3             # Keep best 3 performers (PSNR)
+resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
+precision: "32"
+
+# Model Configuration (SOTA-inspired Hybrid Mapper)
+model:
+  target: luminascale.models.aces_mapper.ACESMapper
+  params:
+    num_luts: 3
+    lut_dim: 33
+    num_lap: 3
+    num_residual_blocks: 5
+    sft_embed_dim: 64
+    sft_depths: [1, 1, 1, 1, 1, 1, 1, 1]
+    sft_num_heads: [2, 4, 8, 16, 16, 8, 4, 2]
+
+# Lightning Trainer/Module params
+trainer:
+  module: luminascale.training.aces_trainer.ACESMapperTrainer
+  params:
+    lr: 1e-4
+    weight_decay: 1e-4
+
+# Image processing
+crop_size: 1024

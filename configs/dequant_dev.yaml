@@ -1,0 +1,7 @@
+# Entry config for Dequant training.
+# Inherits global system defaults from config.yaml and applies dequant task params.
+
+defaults:
+  - dequant
+  - task: task_dequant
+  - _self_

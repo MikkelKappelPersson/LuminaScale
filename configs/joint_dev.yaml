@@ -1,0 +1,7 @@
+# Entry config for Joint training.
+# Inherits global system defaults from config.yaml and applies joint task params.
+
+defaults:
+  - joint
+  - task: task_joint
+  - _self_

@@ -1,7 +1,7 @@
 """ACESMapper Training Module for LuminaScale.
 
 Implements PyTorch Lightning training for color space mapping to ACES2065-1.
-Uses Aim for logging and Charbonnier Loss + Color difference as training objectives.
+Uses TensorBoard for logging and Charbonnier Loss + Color difference as training objectives.
 
 Mandatory Attribution: Based on LLF-LUT (Zeng et al./Wang et al.)
 """

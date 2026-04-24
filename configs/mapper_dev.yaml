@@ -1,0 +1,9 @@
+# Entry config for ACES Mapper training.
+# Inherits global system defaults from config.yaml and applies mapper task params.
+
+defaults:
+  - mapper
+  - task: task_mapper
+  - _self_
+
+

@@ -1,7 +1,7 @@
 """Hydra-based training script for Dequant-Net (WebDataset).
 
 Usage (local development):
-    python scripts/train_dequant_net.py --config-name=default
+    python scripts/train_dequant_net.py --config-name=dequant_run
 
 Usage (HPC via Slurm):
     sbatch scripts/train_wds.sh
@@ -619,7 +619,7 @@ class CustomRichProgressBar(RichProgressBar):
 
 
 
-@hydra.main(config_path="../configs", config_name="config", version_base="1.1")
+@hydra.main(config_path="../configs", config_name="dequant_run", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     """Main training entry point for WebDataset pipeline."""
     

@@ -101,8 +101,7 @@ class ACESMapperTrainer(L.LightningModule):
         loss_recon = self.criterion_reconstruction(pred_img, target_img)
         
         # Log metrics
-        self.log("train/loss_recon", loss_recon, prog_bar=True, batch_size=input_img.shape[0])
-        self.log("train/loss_total", loss_recon, prog_bar=True, batch_size=input_img.shape[0])
+        self.log("train_loss", loss_recon, prog_bar=True, batch_size=input_img.shape[0])
         
         return loss_recon
         
@@ -124,8 +123,8 @@ class ACESMapperTrainer(L.LightningModule):
         mse = F.mse_loss(pred_img, target_img)
         psnr = 10 * torch.log10(1.0 / (mse + 1e-8))
         
-        self.log("val/loss", loss_val, batch_size=input_img.shape[0])
-        self.log("val/psnr", psnr, prog_bar=True, batch_size=input_img.shape[0])
+        self.log("val_loss", loss_val, batch_size=input_img.shape[0])
+        self.log("val_psnr", psnr, prog_bar=True, batch_size=input_img.shape[0])
         
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(

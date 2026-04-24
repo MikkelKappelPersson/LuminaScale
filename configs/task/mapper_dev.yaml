@@ -4,7 +4,7 @@ defaults:
   - _self_
 
 config_name: mapper_dev
-
+task_name: mapper_dev
 
 # Data specific to ACES mapping
 shard_path: "dataset/temp/shards/val"

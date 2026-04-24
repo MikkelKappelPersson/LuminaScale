@@ -34,3 +34,5 @@ precision: "32"
 num_workers: 1
 shuffle_buffer: 50
 prefetch_size: 2
+
+epochs: 2

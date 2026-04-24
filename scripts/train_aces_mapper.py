@@ -114,7 +114,7 @@ def main(cfg: DictConfig) -> None:
         ModelCheckpoint(
             dirpath=os.path.join(cfg.output_dir, "checkpoints"),
             filename="aces-mapper-{epoch:02d}-{val_loss:.4f}",
-            monitor="val/loss" if val_loader else "train/loss_total",
+            monitor="val_loss" if val_loader else "train_loss",
             mode="min",
             save_top_k=3,
         ),

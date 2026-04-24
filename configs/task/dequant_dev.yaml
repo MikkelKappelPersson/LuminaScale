@@ -3,6 +3,7 @@ defaults:
   - dequant  # Inherit everything from the base dequant task
 
 config_name: dequant_dev
+task_name: dequant_dev
 
 # Data paths
 shard_path: "dataset/temp/shards/val"

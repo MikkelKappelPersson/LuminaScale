@@ -3,7 +3,6 @@
 
 defaults:
   - config
-  - task: task_mapper
   - _self_
 
 # Training parameters
@@ -36,3 +35,6 @@ trainer:
 
 # Image processing
 crop_size: 1024
+
+# Output scoping
+output_dir: ./outputs/training

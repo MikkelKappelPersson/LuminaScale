@@ -3,8 +3,11 @@
 
 defaults:
   - config
-  - task: task_dequant
   - _self_
+
+# Dequantization specific parameters
+model:
+  base_channels: 32
 
 # Training parameters
 batch_size: 1
@@ -35,3 +38,6 @@ crop_size: 2048
 val_crop_size: 1024  # Validation crop size
 bit_crunch_contrast_min: 1.0
 bit_crunch_contrast_max: 1.0
+
+# Output scoping
+output_dir: ./outputs/training

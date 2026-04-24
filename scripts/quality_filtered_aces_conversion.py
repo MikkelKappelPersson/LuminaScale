@@ -142,6 +142,7 @@ def main() -> int:
     skipped_count = 0
     quality_failed_count = 0
     conversion_failed_count = 0
+    excluded_no_spectral_count = 0
     failed_clip_count = 0
     failed_noise_count = 0
     failed_both_count = 0
@@ -173,9 +174,13 @@ def main() -> int:
             
             # Convert to ACES
             print("→ Converting...", end=" ", flush=True)
-            if _convert_to_aces(image_path, aces_dir, args.dataset_prefix):
+            conversion_status = _convert_to_aces(image_path, aces_dir, args.dataset_prefix)
+            if conversion_status == "ok":
                 print("✓ Done")
                 converted_count += 1
+            elif conversion_status == "excluded_no_spectral":
+                print("⊘ Excluded (no spectral data)")
+                excluded_no_spectral_count += 1
             else:
                 print("✗ Failed")
                 conversion_failed_count += 1
@@ -205,6 +210,7 @@ def main() -> int:
     print(f"    • Noise only:            {failed_noise_count}")
     print(f"    • Both clip+noise:       {failed_both_count}")
     print(f"  ✓ Successfully converted:  {converted_count}/{passed_count}")
+    print(f"  ⊘ Excluded (no spectral): {excluded_no_spectral_count}/{passed_count}")
     print(f"  ✗ Conversion failed:       {conversion_failed_count}/{passed_count}")
     print(f"  📝 Summary log:            {summary_log}")
     print(f"\n📁 Output directory: {aces_dir}")
@@ -227,6 +233,7 @@ def main() -> int:
         failed_noise_count=failed_noise_count,
         failed_both_count=failed_both_count,
         converted_count=converted_count,
+        excluded_no_spectral_count=excluded_no_spectral_count,
         conversion_failed_count=conversion_failed_count,
     )
 
@@ -251,6 +258,7 @@ def _append_summary_log(
     failed_noise_count: int,
     failed_both_count: int,
     converted_count: int,
+    excluded_no_spectral_count: int,
     conversion_failed_count: int,
 ) -> None:
     """Append one run summary block to a .log file."""
@@ -273,11 +281,12 @@ def _append_summary_log(
         f.write(f"  - Failed due to noise only: {failed_noise_count}\n")
         f.write(f"  - Failed due to both: {failed_both_count}\n")
         f.write(f"Successfully converted: {converted_count}\n")
+        f.write(f"Excluded (no spectral data): {excluded_no_spectral_count}\\n")
         f.write(f"Conversion failures: {conversion_failed_count}\n")
         f.write("=" * 80 + "\n")
 
 
-def _convert_to_aces(image_path: Path, output_dir: Path, prefix: str = "") -> bool:
+def _convert_to_aces(image_path: Path, output_dir: Path, prefix: str = "") -> str:
     """Convert a single RAW image to ACES format using rawtoaces.
     
     Args:
@@ -286,7 +295,8 @@ def _convert_to_aces(image_path: Path, output_dir: Path, prefix: str = "") -> bo
         prefix: Optional prefix for the output filename
         
     Returns:
-        True if conversion succeeded, False otherwise
+        "ok" on success, "excluded_no_spectral" when conversion is skipped due to
+        missing spectral camera data, and "failed" for other conversion failures.
     """
     try:
         image_path = image_path.resolve()
@@ -313,23 +323,27 @@ def _convert_to_aces(image_path: Path, output_dir: Path, prefix: str = "") -> bo
             aces_file_clean = output_dir / f"{prefix}{image_path.stem}.exr"
             if aces_file_with_suffix.exists():
                 aces_file_with_suffix.rename(aces_file_clean)
-            return True
+            return "ok"
         else:
+            stderr_text = result.stderr or ""
+            stderr_lower = stderr_text.lower()
+            if "no spectral data was found" in stderr_lower:
+                return "excluded_no_spectral"
             # Print error details for debugging
-            if result.stderr:
+            if stderr_text:
                 import sys
-                print(f"\n❌ rawtoaces error: {result.stderr[:200]}", file=sys.stderr)
-            return False
+                print(f"\n❌ rawtoaces error: {stderr_text[:200]}", file=sys.stderr)
+            return "failed"
     except subprocess.TimeoutExpired:
-        return False
+        return "failed"
     except FileNotFoundError:
         import sys
         print(f"\n❌ rawtoaces not found in PATH", file=sys.stderr)
-        return False
+        return "failed"
     except Exception as e:
         import sys
         print(f"\n❌ Conversion error: {str(e)[:200]}", file=sys.stderr)
-        return False
+        return "failed"
 
 
 if __name__ == "__main__":

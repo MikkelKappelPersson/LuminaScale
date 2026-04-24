@@ -3,5 +3,4 @@
 
 defaults:
   - joint
-  - task: task_joint
   - _self_

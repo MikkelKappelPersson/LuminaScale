@@ -3,7 +3,8 @@
 
 defaults:
   - mapper
-  - task: task_mapper
   - _self_
 
+epochs: 2  
 
+shard_path: "dataset/temp/shards/test"  # Use test shards for quick dev runs

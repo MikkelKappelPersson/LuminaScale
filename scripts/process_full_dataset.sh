@@ -183,6 +183,7 @@ MIT_CLIP=$(extract_metric_from_log "$MIT_LOG" "  - Failed due to clipping only")
 MIT_NOISE=$(extract_metric_from_log "$MIT_LOG" "  - Failed due to noise only")
 MIT_BOTH=$(extract_metric_from_log "$MIT_LOG" "  - Failed due to both")
 MIT_CONVERTED=$(extract_metric_from_log "$MIT_LOG" "Successfully converted")
+MIT_EXCLUDED=$(extract_metric_from_log "$MIT_LOG" "Excluded (no spectral data)")
 MIT_CFAILED=$(extract_metric_from_log "$MIT_LOG" "Conversion failures")
 
 PPR_PASSED=$(extract_metric_from_log "$PPR_LOG" "Passed quality check")
@@ -191,6 +192,7 @@ PPR_CLIP=$(extract_metric_from_log "$PPR_LOG" "  - Failed due to clipping only")
 PPR_NOISE=$(extract_metric_from_log "$PPR_LOG" "  - Failed due to noise only")
 PPR_BOTH=$(extract_metric_from_log "$PPR_LOG" "  - Failed due to both")
 PPR_CONVERTED=$(extract_metric_from_log "$PPR_LOG" "Successfully converted")
+PPR_EXCLUDED=$(extract_metric_from_log "$PPR_LOG" "Excluded (no spectral data)")
 PPR_CFAILED=$(extract_metric_from_log "$PPR_LOG" "Conversion failures")
 
 TOTAL_PASSED=$((MIT_PASSED + PPR_PASSED))
@@ -199,6 +201,7 @@ TOTAL_CLIP=$((MIT_CLIP + PPR_CLIP))
 TOTAL_NOISE=$((MIT_NOISE + PPR_NOISE))
 TOTAL_BOTH=$((MIT_BOTH + PPR_BOTH))
 TOTAL_CONVERTED=$((MIT_CONVERTED + PPR_CONVERTED))
+TOTAL_EXCLUDED=$((MIT_EXCLUDED + PPR_EXCLUDED))
 TOTAL_CFAILED=$((MIT_CFAILED + PPR_CFAILED))
 
 cat >> "$COMBINED_LOG" << EOF
@@ -216,6 +219,7 @@ MIT-Adobe_5K:
         - Failed due to noise only: $MIT_NOISE
         - Failed due to both: $MIT_BOTH
     Successfully converted: $MIT_CONVERTED
+    Excluded (no spectral data): $MIT_EXCLUDED
     Conversion failures: $MIT_CFAILED
 
 PPR10K:
@@ -225,6 +229,7 @@ PPR10K:
         - Failed due to noise only: $PPR_NOISE
         - Failed due to both: $PPR_BOTH
     Successfully converted: $PPR_CONVERTED
+    Excluded (no spectral data): $PPR_EXCLUDED
     Conversion failures: $PPR_CFAILED
 
 TOTAL:
@@ -235,6 +240,7 @@ TOTAL:
         - Failed due to noise only: $TOTAL_NOISE
         - Failed due to both: $TOTAL_BOTH
     Successfully converted: $TOTAL_CONVERTED
+    Excluded (no spectral data): $TOTAL_EXCLUDED
     Conversion failures: $TOTAL_CFAILED
     Train shards: $TRAIN_SHARDS
     Val shards: $VAL_SHARDS

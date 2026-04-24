@@ -3,14 +3,24 @@
 
 defaults:
   - config
-  - task: task_joint
   - _self_
 
 # Training parameters
 batch_size: 1
-epochs: 20  
-learning_rate: 1e-4  
+epochs: 20   
 checkpoint_freq: 5        # Checkpoint every 5 epochs
 save_top_k: 3             # Keep best 3 performers (PSNR)
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 precision: "32"
+
+# Joint Composition
+# Checkpoints for initialization
+dequant_pretrained_path: null
+mapper_pretrained_path: null
+
+# Learning rates for fine-tuning
+learning_rate_dequant: 1e-5
+learning_rate_mapper: 1e-4
+
+# Output scoping
+output_dir: ./outputs/training

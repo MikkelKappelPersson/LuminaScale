@@ -3,5 +3,6 @@
 
 defaults:
   - dequant
-  - task: task_dequant
   - _self_
+
+epochs: 20  

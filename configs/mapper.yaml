@@ -32,7 +32,7 @@ trainer:
   params:
     lr: 1e-4
     weight_decay: 1e-4
-    lambda_recon: 1.0
+    lambda_l1: 1.0
     lambda_lpips: 0.1
     lambda_smooth: 1e-4
     lambda_mono: 1e-4

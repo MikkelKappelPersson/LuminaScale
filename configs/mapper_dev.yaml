@@ -5,7 +5,7 @@ defaults:
   - mapper
   - _self_
 
-epochs: 1  
+epochs: 3  
 
 shard_path: "dataset/temp/shards/test"  # Use test shards for quick dev runs
 

@@ -73,18 +73,16 @@ class HparamsMetricsCallback(Callback):
         if trainer.logger is None or not hasattr(trainer.logger, "log_hyperparams_metrics"):
             return
 
-        validation_total_loss = trainer.callback_metrics.get("loss/total/val")
-        validation_loss = trainer.callback_metrics.get("loss/recon/val")
+        validation_total_loss = trainer.callback_metrics.get("loss_total/val")
+        validation_loss = trainer.callback_metrics.get("loss_l1/val")
         validation_psnr = trainer.callback_metrics.get("psnr/val")
 
         metrics_dict: dict[str, float] = {}
-        if validation_total_loss is not None:
-            metrics_dict["loss/total/val"] = float(validation_total_loss.detach().cpu().item())
-        elif validation_loss is not None:
-            metrics_dict["loss/recon/val"] = float(validation_loss.detach().cpu().item())
+        # Keep hparams metrics under separate keys so they don't interfere with scalar curves.
         if validation_psnr is not None:
-            metrics_dict["psnr/val"] = float(validation_psnr.detach().cpu().item())
-
+            metrics_dict["metric/psnr"] = float(validation_psnr.detach().cpu().item())
+        if validation_total_loss is not None:
+            metrics_dict["metric/loss_total_val"] = float(validation_total_loss.detach().cpu().item())
         if metrics_dict:
             trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
 
@@ -137,7 +135,7 @@ def main(cfg: DictConfig) -> None:
         num_residual_blocks=cfg.model.params.num_residual_blocks,
         lr=cfg.trainer.params.lr,
         weight_decay=cfg.trainer.params.weight_decay,
-        lambda_recon=cfg.trainer.params.get("lambda_recon", 1.0),
+        lambda_l1=cfg.trainer.params.get("lambda_l1", 1.0),
         lambda_lpips=cfg.trainer.params.get("lambda_lpips", 0.1),
         lambda_smooth=cfg.trainer.params.get("lambda_smooth", 1e-4),
         lambda_mono=cfg.trainer.params.get("lambda_mono", 1e-4),
@@ -145,10 +143,13 @@ def main(cfg: DictConfig) -> None:
     )
 
     # 4. Logger & Callbacks
+    run_version = datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_name_prefix = str(cfg.get("task_name") or "aces-mapper")
+
     logger_tb = CustomTensorBoardLogger(
         save_dir=cfg.output_dir,
         name=cfg.task_name,
-        version=datetime.now().strftime("%Y%m%d_%H%M%S"),
+        version=run_version,
     )
 
     hparams_dict = {
@@ -159,7 +160,7 @@ def main(cfg: DictConfig) -> None:
         "epochs": int(cfg.get("epochs", 100)),
         "lr": float(cfg.trainer.params.lr),
         "weight_decay": float(cfg.trainer.params.weight_decay),
-        "lambda_recon": float(cfg.trainer.params.get("lambda_recon", 1.0)),
+        "lambda_l1": float(cfg.trainer.params.get("lambda_l1", 1.0)),
         "lambda_lpips": float(cfg.trainer.params.get("lambda_lpips", 0.1)),
         "lambda_smooth": float(cfg.trainer.params.get("lambda_smooth", 1e-4)),
         "lambda_mono": float(cfg.trainer.params.get("lambda_mono", 1e-4)),
@@ -170,11 +171,13 @@ def main(cfg: DictConfig) -> None:
         "num_workers": int(cfg.get("num_workers", 4)),
     }
 
+    checkpoint_dir = os.path.join(logger_tb.log_dir, "checkpoints")
+
     callbacks = [
         ModelCheckpoint(
-            dirpath=os.path.join(cfg.output_dir, "checkpoints"),
-            filename="aces-mapper-{epoch:02d}",
-            monitor="loss/total/val" if val_loader else "loss/total/train",
+            dirpath=checkpoint_dir,
+            filename=f"{checkpoint_name_prefix}-{run_version}-{{epoch:02d}}",
+            monitor="loss_total/val" if val_loader else "loss_total/train",
             mode="min",
             save_top_k=3,
         ),

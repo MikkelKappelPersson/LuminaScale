@@ -32,7 +32,7 @@ class ACESMapperTrainer(L.LightningModule):
         num_residual_blocks: int = 5,
         lr: float = 1e-4,
         weight_decay: float = 1e-4,
-        lambda_recon: float = 1.0,
+        lambda_l1: float = 1.0,
         lambda_lpips: float = 0.1,
         lambda_smooth: float = 1e-4,
         lambda_mono: float = 1e-4,
@@ -54,7 +54,7 @@ class ACESMapperTrainer(L.LightningModule):
         )
         
         # 2. Loss Functions
-        self.recon_loss = nn.L1Loss()
+        self.loss_l1 = nn.L1Loss()
         self.lpips_loss = lpips.LPIPS(net="vgg")
         for parameter in self.lpips_loss.parameters():
             parameter.requires_grad = False
@@ -87,15 +87,15 @@ class ACESMapperTrainer(L.LightningModule):
         return x, y
 
     def _compute_losses(self, pred_img: torch.Tensor, target_img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        recon_loss = self.recon_loss(pred_img, target_img)
+        loss_l1 = self.loss_l1(pred_img, target_img)
         perceptual_loss = self.lpips_loss(pred_img, target_img, normalize=True).mean()
         lut_loss = self._compute_lut_regularization(pred_img)
         total_loss = (
-            self.hparams.lambda_recon * recon_loss
+            self.hparams.lambda_l1 * loss_l1
             + self.hparams.lambda_lpips * perceptual_loss
             + lut_loss
         )
-        return recon_loss, perceptual_loss, lut_loss, total_loss
+        return loss_l1, perceptual_loss, lut_loss, total_loss
 
     def _lut_tv_and_mono(self, lut: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         dif_r = lut[:, :, :, :-1] - lut[:, :, :, 1:]
@@ -159,13 +159,13 @@ class ACESMapperTrainer(L.LightningModule):
         # Forward pass
         pred_img = self(input_img)
         
-        recon_loss, perceptual_loss, lut_loss, total_loss = self._compute_losses(pred_img, target_img)
+        loss_l1, perceptual_loss, lut_loss, total_loss = self._compute_losses(pred_img, target_img)
         
         # Log metrics
-        self.log("loss/recon/train", recon_loss, batch_size=input_img.shape[0])
-        self.log("loss/lpips/train", perceptual_loss, batch_size=input_img.shape[0])
-        self.log("loss/lut/train", lut_loss, batch_size=input_img.shape[0])
-        self.log("loss/total/train", total_loss, prog_bar=True, batch_size=input_img.shape[0])
+        self.log("loss_l1/train", loss_l1, batch_size=input_img.shape[0])
+        self.log("loss_lpips/train", perceptual_loss, batch_size=input_img.shape[0])
+        self.log("loss_lut/train", lut_loss, batch_size=input_img.shape[0])
+        self.log("loss_total/train", total_loss, prog_bar=True, batch_size=input_img.shape[0])
         
         return total_loss
         
@@ -184,17 +184,17 @@ class ACESMapperTrainer(L.LightningModule):
 
         pred_img = self(input_img)
         
-        recon_loss, perceptual_loss, lut_loss, total_loss = self._compute_losses(pred_img, target_img)
+        loss_l1, perceptual_loss, lut_loss, total_loss = self._compute_losses(pred_img, target_img)
         
         # PSNR & MSE for evaluation
         mse = F.mse_loss(pred_img, target_img)
         psnr = 10 * torch.log10(1.0 / (mse + 1e-8))
         
-        self.log("loss/recon/val", recon_loss, batch_size=input_img.shape[0])
-        self.log("loss/lpips/val", perceptual_loss, batch_size=input_img.shape[0])
-        self.log("loss/lut/val", lut_loss, batch_size=input_img.shape[0])
-        self.log("loss/total/val", total_loss, batch_size=input_img.shape[0])
-        self.log("psnr/val", psnr, prog_bar=True, batch_size=input_img.shape[0])
+        self.log("loss_l1/val", loss_l1, on_step=False, on_epoch=True, batch_size=input_img.shape[0])
+        self.log("loss_lpips/val", perceptual_loss, on_step=False, on_epoch=True, batch_size=input_img.shape[0])
+        self.log("loss_lut/val", lut_loss, on_step=False, on_epoch=True, batch_size=input_img.shape[0])
+        self.log("loss_total/val", total_loss, on_step=False, on_epoch=True, batch_size=input_img.shape[0])
+        self.log("psnr/val", psnr, on_step=False, on_epoch=True, prog_bar=True, batch_size=input_img.shape[0])
         
     def configure_optimizers(self):
         trainable_parameters = [parameter for parameter in self.parameters() if parameter.requires_grad]

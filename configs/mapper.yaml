@@ -7,7 +7,7 @@ defaults:
 
 # Training parameters
 batch_size: 1
-epochs: 20  
+epochs: 50  
 learning_rate: 1e-4  
 checkpoint_freq: 5        # Checkpoint every 5 epochs
 save_top_k: 3             # Keep best 3 performers (PSNR)
@@ -32,9 +32,13 @@ trainer:
   params:
     lr: 1e-4
     weight_decay: 1e-4
+    lambda_recon: 1.0
+    lambda_lpips: 0.1
+    lambda_smooth: 1e-4
+    lambda_mono: 1e-4
 
 # Image processing
 crop_size: 1024
 
 # Output scoping
-output_dir: ./outputs/training
+output_dir: ./outputs/training/mapper

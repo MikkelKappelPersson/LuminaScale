@@ -5,6 +5,9 @@ defaults:
   - mapper
   - _self_
 
-epochs: 2  
+epochs: 1  
 
 shard_path: "dataset/temp/shards/test"  # Use test shards for quick dev runs
+
+# Output scoping
+output_dir: ./outputs/training/mapper

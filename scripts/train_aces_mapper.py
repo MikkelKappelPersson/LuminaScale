@@ -73,14 +73,17 @@ class HparamsMetricsCallback(Callback):
         if trainer.logger is None or not hasattr(trainer.logger, "log_hyperparams_metrics"):
             return
 
-        val_loss = trainer.callback_metrics.get("val_loss")
-        val_psnr = trainer.callback_metrics.get("val_psnr")
+        validation_total_loss = trainer.callback_metrics.get("loss/total/val")
+        validation_loss = trainer.callback_metrics.get("loss/recon/val")
+        validation_psnr = trainer.callback_metrics.get("psnr/val")
 
         metrics_dict: dict[str, float] = {}
-        if val_loss is not None:
-            metrics_dict["val_loss"] = float(val_loss.detach().cpu().item())
-        if val_psnr is not None:
-            metrics_dict["val_psnr"] = float(val_psnr.detach().cpu().item())
+        if validation_total_loss is not None:
+            metrics_dict["loss/total/val"] = float(validation_total_loss.detach().cpu().item())
+        elif validation_loss is not None:
+            metrics_dict["loss/recon/val"] = float(validation_loss.detach().cpu().item())
+        if validation_psnr is not None:
+            metrics_dict["psnr/val"] = float(validation_psnr.detach().cpu().item())
 
         if metrics_dict:
             trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
@@ -134,6 +137,10 @@ def main(cfg: DictConfig) -> None:
         num_residual_blocks=cfg.model.params.num_residual_blocks,
         lr=cfg.trainer.params.lr,
         weight_decay=cfg.trainer.params.weight_decay,
+        lambda_recon=cfg.trainer.params.get("lambda_recon", 1.0),
+        lambda_lpips=cfg.trainer.params.get("lambda_lpips", 0.1),
+        lambda_smooth=cfg.trainer.params.get("lambda_smooth", 1e-4),
+        lambda_mono=cfg.trainer.params.get("lambda_mono", 1e-4),
         crop_size=cfg.get("crop_size", 512)
     )
 
@@ -152,6 +159,10 @@ def main(cfg: DictConfig) -> None:
         "epochs": int(cfg.get("epochs", 100)),
         "lr": float(cfg.trainer.params.lr),
         "weight_decay": float(cfg.trainer.params.weight_decay),
+        "lambda_recon": float(cfg.trainer.params.get("lambda_recon", 1.0)),
+        "lambda_lpips": float(cfg.trainer.params.get("lambda_lpips", 0.1)),
+        "lambda_smooth": float(cfg.trainer.params.get("lambda_smooth", 1e-4)),
+        "lambda_mono": float(cfg.trainer.params.get("lambda_mono", 1e-4)),
         "num_luts": int(cfg.model.params.num_luts),
         "lut_dim": int(cfg.model.params.lut_dim),
         "num_lap": int(cfg.model.params.num_lap),
@@ -162,8 +173,8 @@ def main(cfg: DictConfig) -> None:
     callbacks = [
         ModelCheckpoint(
             dirpath=os.path.join(cfg.output_dir, "checkpoints"),
-            filename="aces-mapper-{epoch:02d}-{val_loss:.4f}",
-            monitor="val_loss" if val_loader else "train_loss",
+            filename="aces-mapper-{epoch:02d}",
+            monitor="loss/total/val" if val_loader else "loss/total/train",
             mode="min",
             save_top_k=3,
         ),

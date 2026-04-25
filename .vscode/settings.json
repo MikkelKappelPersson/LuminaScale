@@ -3,5 +3,12 @@
         "timeout": true,
         "pixi": true,
         "tee": true
+    },
+    "remote.autoForwardPorts": false,
+    "remote.restoreForwardedPorts": false,
+    "remote.portsAttributes": {
+        "6006": {
+            "label": "TensorBoard"
+        }
     }
 }

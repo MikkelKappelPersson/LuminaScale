@@ -46,5 +46,6 @@ webdataset = ">=0.2.118"
 pyarrow = ">=15.0.0"
 fastparquet = ">=2024.2.0"
 aim = ">=3.29.1, <4"
+lpips = ">=0.1.4, <0.2"
 
 

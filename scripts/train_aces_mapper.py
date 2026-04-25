@@ -1,7 +1,7 @@
 """Hydra-based training script for ACESMapper (WebDataset).
 
 Usage (local development):
-    python scripts/train_aces_mapper.py --config-name=mapper_run
+    python scripts/train_aces_mapper.py --config-name=mapper
 
 Usage (HPC via Slurm):
     sbatch scripts/train_aces_mapper.sh
@@ -39,6 +39,8 @@ if src_path not in sys.path:
 from luminascale.training.aces_trainer import ACESMapperTrainer
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 from luminascale.training.logger import CustomTensorBoardLogger
+from luminascale.utils.aces_mapper_inference import build_look
+from luminascale.utils.aces_mapper_inference import close_figure, run_aces_mapper_inference
 
 # Register resolvers for OmegaConf
 if not OmegaConf.has_resolver("eval"):
@@ -87,13 +89,71 @@ class HparamsMetricsCallback(Callback):
             trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
 
 
-@hydra.main(config_path="../configs", config_name="mapper_run", version_base="1.1")
+class PeriodicACESMapperInferenceCallback(Callback):
+    """Save and log ACES mapper comparison dashboards every N epochs."""
+
+    def __init__(
+        self,
+        *,
+        every_n_epochs: int = 1,
+        aces_input_path: Path,
+        output_dir: Path,
+    ) -> None:
+        super().__init__()
+        self.every_n_epochs = max(1, int(every_n_epochs))
+        self.aces_input_path = aces_input_path
+        self.output_dir = output_dir
+        self.look = build_look()
+
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        if trainer.sanity_checking or not trainer.is_global_zero:
+            return
+
+        epoch_number = trainer.current_epoch + 1
+        if epoch_number % self.every_n_epochs != 0:
+            return
+
+        if trainer.logger is None or not hasattr(trainer.logger, "experiment"):
+            return
+
+        was_training = pl_module.training
+        pl_module.eval()
+        figure = None
+
+        try:
+            save_path = self.output_dir / f"epoch_{epoch_number:04d}.png"
+            figure = run_aces_mapper_inference(
+                model=pl_module,
+                aces_input=self.aces_input_path,
+                output_path=save_path,
+                look=self.look,
+                device=trainer.strategy.root_device,
+            )
+            trainer.logger.experiment.add_figure(
+                "inference/comparison",
+                figure,
+                global_step=epoch_number,
+            )
+        finally:
+            close_figure(figure)
+            if was_training:
+                pl_module.train()
+
+
+@hydra.main(config_path="../configs", config_name="mapper", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     # 1. Performance Optimizations
     torch.set_float32_matmul_precision('high')
     
     # 2. Precision handling
     precision = cfg.get("precision", "16-mixed")
+    task_name = str(cfg.get("task_name") or "mapper")
+    inference_vis_input_path = Path(
+        cfg.get(
+            "inference_vis_input_path",
+            "dataset/full/aces/MIT-Adobe_5K_a0001-jmac_DSC1459.exr",
+        )
+    )
     
     # Set OCIO environment if needed
     ocio_config = project_root / "config" / "aces" / "studio-config.ocio"
@@ -148,12 +208,12 @@ def main(cfg: DictConfig) -> None:
 
     logger_tb = CustomTensorBoardLogger(
         save_dir=cfg.output_dir,
-        name=cfg.task_name,
+        name="",
         version=run_version,
     )
 
     hparams_dict = {
-        "task_name": cfg.get("task_name", "mapper"),
+        "task_name": task_name,
         "batch_size": int(cfg.get("batch_size", 4)),
         "crop_size": int(cfg.get("crop_size", 512)),
         "precision": str(precision),
@@ -169,10 +229,11 @@ def main(cfg: DictConfig) -> None:
         "num_lap": int(cfg.model.params.num_lap),
         "num_residual_blocks": int(cfg.model.params.num_residual_blocks),
         "num_workers": int(cfg.get("num_workers", 4)),
+        "inference_vis_every_n_epochs": int(cfg.get("inference_vis_every_n_epochs", 1)),
     }
 
+    inference_output_dir = Path(logger_tb.log_dir)
     checkpoint_dir = os.path.join(logger_tb.log_dir, "checkpoints")
-
     callbacks = [
         ModelCheckpoint(
             dirpath=checkpoint_dir,
@@ -185,6 +246,11 @@ def main(cfg: DictConfig) -> None:
         RichModelSummary(max_depth=2),
         RichProgressBar(),
         HparamsMetricsCallback(hparams_dict),
+        PeriodicACESMapperInferenceCallback(
+            aces_input_path=inference_vis_input_path,
+            output_dir=inference_output_dir,
+            every_n_epochs=int(cfg.get("inference_vis_every_n_epochs", 1)),
+        ),
     ]
 
     # 5. Trainer setup
@@ -204,4 +270,4 @@ def main(cfg: DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main()  # type: ignore[call-arg]

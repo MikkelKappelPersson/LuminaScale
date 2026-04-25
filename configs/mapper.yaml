@@ -7,12 +7,13 @@ defaults:
 
 # Training parameters
 batch_size: 1
-epochs: 50  
+epochs: 10  
 learning_rate: 1e-4  
 checkpoint_freq: 5        # Checkpoint every 5 epochs
 save_top_k: 3             # Keep best 3 performers (PSNR)
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 precision: "32"
+inference_vis_input_path: dataset/full/aces/MIT-Adobe_5K_a0001-jmac_DSC1459.exr
 
 # Model Configuration (SOTA-inspired Hybrid Mapper)
 model:
@@ -39,6 +40,12 @@ trainer:
 
 # Image processing
 crop_size: 1024
+
+# dataset
+shard_path: "dataset/full/shards/train"  # Use test shards for quick dev runs
+val_shard_path: "dataset/full/shards/val"
+metadata_parquet: "dataset/full/training_metadata.parquet"
+
 
 # Output scoping
 output_dir: ./outputs/training/mapper

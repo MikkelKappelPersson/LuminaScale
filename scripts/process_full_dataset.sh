@@ -43,17 +43,77 @@ extract_metric_from_log() {
     echo "$value"
 }
 
+build_webdataset_dataset() {
+    local dataset_name="$1"
+    local input_dir="$2"
+    local output_dir="$3"
+    local sample_limit="${4:-}"
+    local manifest="$output_dir/training_metadata.parquet"
+    local shards_dir="$output_dir/shards"
+
+    mkdir -p "$output_dir"
+    mkdir -p "$shards_dir"/{train,val,test}
+
+    log_step "[$dataset_name] Generating Parquet manifest..."
+    echo "      Input:  $input_dir"
+    echo "      Output: $manifest"
+    if [ -n "$sample_limit" ]; then
+        echo "      Limit:  first $sample_limit images"
+    fi
+    echo ""
+
+    local manifest_cmd=(
+        pixi run python scripts/generate_wds_shards.py --mode manifest
+        --input_dir "$input_dir"
+        --output_parquet "$manifest"
+    )
+    if [ -n "$sample_limit" ]; then
+        manifest_cmd+=(--max_samples "$sample_limit")
+    fi
+
+    "${manifest_cmd[@]}" || {
+        log_error "$dataset_name manifest generation failed. Run the command again to resume."
+        exit 1
+    }
+
+    echo ""
+    log_step "[$dataset_name] Baking WebDataset shards..."
+    echo "      Manifest: $manifest"
+    echo "      Output:   $shards_dir"
+    echo "      Max shard size: 3.0 GB"
+    echo "      Random crop: 2048x2048 (seed=42)"
+    echo ""
+
+    pixi run python scripts/generate_wds_shards.py --mode bake \
+      --manifest "$manifest" \
+      --output_dir "$shards_dir" \
+        --max_shard_size 3.0 \
+        --crop_size 2048 \
+        --crop_seed 42 || {
+        log_error "$dataset_name shard baking failed. Run the command again to resume from where it stopped."
+        echo ""
+        echo "Partial shards saved in: $shards_dir"
+        echo "Re-run this script to continue from the last checkpoint."
+        exit 1
+    }
+
+    echo ""
+    log_step "✓ $dataset_name dataset complete!"
+}
+
 log_step "🚀 LuminaScale Full Dataset Pipeline (Resumable)"
 log_step "Project root: $PROJECT_ROOT"
 echo ""
 
 # Setup directories
 OUTPUT_FULL="$PROJECT_ROOT/dataset/full"
+OUTPUT_DEV="$PROJECT_ROOT/dataset/dev"
 ACES_DIR="$OUTPUT_FULL/aces"
 SHARDS_DIR="$OUTPUT_FULL/shards"
 MIT_LOG="$OUTPUT_FULL/quality_summary_MIT-Adobe_5K.log"
 PPR_LOG="$OUTPUT_FULL/quality_summary_PPR10K.log"
 COMBINED_LOG="$OUTPUT_FULL/quality_summary_combined.log"
+DEV_SAMPLE_COUNT=50
 
 mkdir -p "$ACES_DIR"
 mkdir -p "$SHARDS_DIR"/{train,val,test}
@@ -120,6 +180,11 @@ TOTAL_ACES=$(find "$ACES_DIR" -name "*.exr" | wc -l)
 echo "📊 Total ACES files: $TOTAL_ACES"
 echo ""
 
+if [ "$TOTAL_ACES" -lt "$DEV_SAMPLE_COUNT" ]; then
+    log_error "Cannot build dev dataset: found only $TOTAL_ACES ACES files, need at least $DEV_SAMPLE_COUNT"
+    exit 1
+fi
+
 # =============================================================================
 # Phase 2: Generate Manifest & Bake WebDataset Shards
 # =============================================================================
@@ -128,54 +193,10 @@ log_step "Phase 2: WebDataset Manifest & Sharding"
 log_step "=================================================="
 echo ""
 
-MANIFEST="$OUTPUT_FULL/training_metadata.parquet"
-
-log_step "[1/2] Generating Parquet manifest..."
-echo "      Input:  $ACES_DIR"
-echo "      Output: $MANIFEST"
-echo ""
-
-pixi run python scripts/generate_wds_shards.py --mode manifest \
-  --input_dir "$ACES_DIR" \
-  --output_parquet "$MANIFEST" || {
-    log_error "Manifest generation failed. Run the command again to resume."
-    exit 1
-}
-
-echo ""
-log_step "[2/2] Baking WebDataset shards..."
-echo "      Manifest: $MANIFEST"
-echo "      Output:   $SHARDS_DIR"
-echo "      Max shard size: 3.0 GB"
-echo "      Random crop: 2048x2048 (seed=42)"
-echo ""
-
-pixi run python scripts/generate_wds_shards.py --mode bake \
-  --manifest "$MANIFEST" \
-  --output_dir "$SHARDS_DIR" \
-    --max_shard_size 3.0 \
-    --crop_size 2048 \
-    --crop_seed 42 || {
-    log_error "Shard baking failed. Run the command again to resume from where it stopped."
-    echo ""
-    echo "Partial shards saved in: $SHARDS_DIR"
-    echo "Re-run this script to continue from the last checkpoint."
-    exit 1
-}
-
-echo ""
-log_step "=================================================="
-log_step "✅ Full Dataset Pipeline Complete!"
-log_step "=================================================="
-echo ""
-echo "📊 Summary:"
-echo "   ACES files:            $TOTAL_ACES"
+build_webdataset_dataset "full" "$ACES_DIR" "$OUTPUT_FULL"
 TRAIN_SHARDS=$(ls "$SHARDS_DIR"/train/*.tar 2>/dev/null | wc -l)
 VAL_SHARDS=$(ls "$SHARDS_DIR"/val/*.tar 2>/dev/null | wc -l)
 TEST_SHARDS=$(ls "$SHARDS_DIR"/test/*.tar 2>/dev/null | wc -l)
-echo "   Train shards:          $TRAIN_SHARDS files"
-echo "   Val shards:            $VAL_SHARDS files"
-echo "   Test shards:           $TEST_SHARDS files"
 
 MIT_PASSED=$(extract_metric_from_log "$MIT_LOG" "Passed quality check")
 MIT_QFAILED=$(extract_metric_from_log "$MIT_LOG" "Failed quality check")
@@ -250,11 +271,45 @@ EOF
 
 echo "   Combined log:          $COMBINED_LOG"
 echo ""
-echo "📁 Output structure:"
+log_step "=================================================="
+log_step "Phase 3: Dev Dataset (50 images)"
+log_step "=================================================="
+echo ""
+
+build_webdataset_dataset "dev" "$ACES_DIR" "$OUTPUT_DEV" "$DEV_SAMPLE_COUNT"
+
+DEV_SHARDS_DIR="$OUTPUT_DEV/shards"
+DEV_TRAIN_SHARDS=$(ls "$DEV_SHARDS_DIR"/train/*.tar 2>/dev/null | wc -l)
+DEV_VAL_SHARDS=$(ls "$DEV_SHARDS_DIR"/val/*.tar 2>/dev/null | wc -l)
+DEV_TEST_SHARDS=$(ls "$DEV_SHARDS_DIR"/test/*.tar 2>/dev/null | wc -l)
+
+echo ""
+log_step "=================================================="
+log_step "✅ Dataset Builds Complete!"
+log_step "=================================================="
+echo ""
+echo "📊 Full dataset:"
+echo "   ACES files:            $TOTAL_ACES"
+echo "   Train shards:          $TRAIN_SHARDS files"
+echo "   Val shards:            $VAL_SHARDS files"
+echo "   Test shards:           $TEST_SHARDS files"
+echo ""
+echo "📊 Dev dataset:"
+echo "   Source ACES files:     first $DEV_SAMPLE_COUNT from $ACES_DIR"
+echo "   Train shards:          $DEV_TRAIN_SHARDS files"
+echo "   Val shards:            $DEV_VAL_SHARDS files"
+echo "   Test shards:           $DEV_TEST_SHARDS files"
+echo ""
+echo "📁 Full output structure:"
 tree -L 2 "$OUTPUT_FULL" 2>/dev/null || find "$OUTPUT_FULL" -type d | sed 's|'$OUTPUT_FULL'||' | sort
 echo ""
-echo "📝 Next: Use dataset with WebDataset loader:"
-echo "   import webdataset as wds"
-echo "   dataset = wds.WebDataset('$OUTPUT_FULL/shards/{train,val,test}-*.tar')"
+echo "📁 Dev output structure:"
+tree -L 2 "$OUTPUT_DEV" 2>/dev/null || find "$OUTPUT_DEV" -type d | sed 's|'$OUTPUT_DEV'||' | sort
+echo ""
+echo "📝 Next: Use datasets with WebDataset loader:"
+echo "   Full: import webdataset as wds"
+echo "         dataset = wds.WebDataset('$OUTPUT_FULL/shards/{train,val,test}-*.tar')"
+echo "   Dev:  import webdataset as wds"
+echo "         dataset = wds.WebDataset('$OUTPUT_DEV/shards/{train,val,test}-*.tar')"
 echo ""
 log_step "⏱️  Processing complete! $(date '+%Y-%m-%d %H:%M:%S')"

@@ -18,7 +18,7 @@ from matplotlib.gridspec import GridSpec
 
 from luminascale.models.aces_mapper import ACESMapper
 from luminascale.utils.gpu_cdl_processor import GPUCDLProcessor
-from luminascale.utils.io import read_exr, write_exr
+from luminascale.utils.io import image_to_tensor, read_exr, write_exr
 from luminascale.utils.look_generator import CDLParameters, get_single_random_look
 from luminascale.utils.pytorch_aces_transformer import ACESColorTransformer
 
@@ -148,7 +148,7 @@ def save_comparison_grid(
     ref_srgb_hwc: torch.Tensor,
     pred_aces_hwc: torch.Tensor,
     ref_aces_hwc: torch.Tensor,
-    save_path: Path,
+    save_path: Path | None,
 ) -> Figure:
     """Build and save a compact 2x3 comparison dashboard for ACES mapper output quality."""
     input_np = to_hwc_numpy(input_srgb_hwc)
@@ -180,22 +180,22 @@ def save_comparison_grid(
     )
 
     ax00 = fig.add_subplot(gs[0, 0])
-    ax00.imshow(input_np, interpolation="nearest", aspect="auto")
+    ax00.imshow(input_np, aspect="auto")
     ax00.set_title("Input sRGB", fontsize=10, fontweight="bold")
     ax00.axis("off")
 
     ax01 = fig.add_subplot(gs[0, 1])
-    ax01.imshow(pred_np, interpolation="nearest", aspect="auto")
+    ax01.imshow(pred_np, aspect="auto")
     ax01.set_title("Model Output", fontsize=10, fontweight="bold")
     ax01.axis("off")
 
     ax02 = fig.add_subplot(gs[0, 2])
-    ax02.imshow(ref_np, interpolation="nearest", aspect="auto")
+    ax02.imshow(ref_np, aspect="auto")
     ax02.set_title("Reference", fontsize=10, fontweight="bold")
     ax02.axis("off")
 
     ax10 = fig.add_subplot(gs[1, 0])
-    im0 = ax10.imshow(diff_aces, cmap="magma", interpolation="nearest", aspect="auto")
+    im0 = ax10.imshow(diff_aces, cmap="magma", aspect="auto")
     ax10.set_title("ACES difference", fontsize=10, fontweight="bold")
     ax10.axis("off")
     cbar0 = plt.colorbar(im0, ax=ax10, fraction=0.046, pad=0.04, shrink=0.8)
@@ -207,8 +207,7 @@ def save_comparison_grid(
         residual_disp,
         cmap="coolwarm",
         vmin=-residual_limit,
-        vmax=residual_limit,
-        interpolation="nearest",
+        vmax=residual_limit,      
         aspect="auto",
     )
     ax11.set_title("Display residual", fontsize=10, fontweight="bold")
@@ -238,8 +237,49 @@ def save_comparison_grid(
 
     fig.suptitle("ACES Mapper Inference Dashboard", fontsize=12, fontweight="bold")
 
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=100, bbox_inches="tight")
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=100, bbox_inches="tight")
+    return fig
+
+
+def save_input_output_grid(
+    input_srgb_hwc: torch.Tensor,
+    pred_srgb_hwc: torch.Tensor,
+    save_path: Path | None,
+) -> Figure:
+    """Build and save a compact 1x2 dashboard when no ACES reference is available."""
+    input_np = to_hwc_numpy(input_srgb_hwc)
+    pred_np = to_hwc_numpy(pred_srgb_hwc)
+
+    fig = plt.figure(figsize=(12, 5))
+    gs = GridSpec(
+        1,
+        2,
+        figure=fig,
+        hspace=0.20,
+        wspace=0.20,
+        left=0.04,
+        right=0.98,
+        top=0.90,
+        bottom=0.06,
+    )
+
+    ax0 = fig.add_subplot(gs[0, 0])
+    ax0.imshow(input_np, aspect="auto")
+    ax0.set_title("Input sRGB", fontsize=10, fontweight="bold")
+    ax0.axis("off")
+
+    ax1 = fig.add_subplot(gs[0, 1])
+    ax1.imshow(pred_np, aspect="auto")
+    ax1.set_title("Model Output", fontsize=10, fontweight="bold")
+    ax1.axis("off")
+
+    fig.suptitle("ACES Mapper Inference Dashboard (No Reference)", fontsize=12, fontweight="bold")
+
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=100, bbox_inches="tight")
     return fig
 
 
@@ -251,20 +291,23 @@ def close_figure(figure: Figure | None) -> None:
 
 def run_aces_mapper_inference(
     model: torch.nn.Module,
-    aces_input: Path | str,
-    output_path: Path | str,
+    input: Path | str,
+    output_path: Path | str | None,
     look: CDLParameters | None = None,
     *,
     crop_size: int = 0,
     align_multiple: int = 64,
     max_side: int = 1024,
     pred_aces_output: Path | str | None = None,
+    input_is_aces: bool = True,
+    keep_aligned_output: bool = False,
     device: torch.device | str | None = None,
 ) -> Figure:
     """Run the ACES mapper visualization pipeline and return the matplotlib figure."""
-    input_path = Path(aces_input)
-    save_path = Path(output_path)
-    if look is None:
+    input_path = Path(input)
+    save_path = Path(output_path) if output_path is not None else None
+    has_aces_reference = bool(input_is_aces)
+    if has_aces_reference and look is None:
         look = build_look()
 
     forward_model = model.model if hasattr(model, "model") and isinstance(model.model, torch.nn.Module) else model
@@ -273,18 +316,30 @@ def run_aces_mapper_inference(
     model_dtype = reference_parameter.dtype
     use_autocast = inference_device.type == "cuda" and model_dtype in {torch.float16, torch.bfloat16}
 
-    aces_chw = read_exr(input_path)
-    aces_hwc = torch.from_numpy(aces_chw.transpose(1, 2, 0)).to(device=inference_device, dtype=torch.float32)
-    aces_hwc = center_crop_hwc(aces_hwc, crop_size)
-    aces_hwc = resize_to_max_side_hwc(aces_hwc, max_side)
-    aces_hwc = align_to_multiple_hwc(aces_hwc, align_multiple)
-
-    cdl_processor = GPUCDLProcessor(device=inference_device)
-    aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
-
     transformer = ACESColorTransformer(device=inference_device, use_lut=True)
-    input_srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
-    input_srgb_hwc = torch.clamp(input_srgb_hwc, 0.0, 1.0)
+    if has_aces_reference:
+        aces_chw = read_exr(input_path)
+        ref_aces_hwc = torch.from_numpy(aces_chw.transpose(1, 2, 0)).to(
+            device=inference_device,
+            dtype=torch.float32,
+        )
+        ref_aces_hwc = center_crop_hwc(ref_aces_hwc, crop_size)
+        ref_aces_hwc = resize_to_max_side_hwc(ref_aces_hwc, max_side)
+        output_height, output_width, _ = ref_aces_hwc.shape
+        ref_aces_hwc = align_to_multiple_hwc(ref_aces_hwc, align_multiple)
+
+        cdl_processor = GPUCDLProcessor(device=inference_device)
+        aces_graded_hwc = cdl_processor.apply_cdl_gpu(ref_aces_hwc, look)
+        input_srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
+        input_srgb_hwc = torch.clamp(input_srgb_hwc, 0.0, 1.0)
+    else:
+        input_chw = image_to_tensor(input_path)
+        input_srgb_hwc = input_chw.permute(1, 2, 0).to(device=inference_device, dtype=torch.float32)
+        input_srgb_hwc = center_crop_hwc(input_srgb_hwc, crop_size)
+        input_srgb_hwc = resize_to_max_side_hwc(input_srgb_hwc, max_side)
+        output_height, output_width, _ = input_srgb_hwc.shape
+        input_srgb_hwc = align_to_multiple_hwc(input_srgb_hwc, align_multiple)
+        input_srgb_hwc = torch.clamp(input_srgb_hwc, 0.0, 1.0)
 
     input_chw = input_srgb_hwc.permute(2, 0, 1).unsqueeze(0)
     model_input = input_chw if use_autocast else input_chw.to(dtype=model_dtype)
@@ -295,16 +350,31 @@ def run_aces_mapper_inference(
 
     pred_aces_hwc = pred_aces_chw.permute(1, 2, 0)
     pred_srgb_hwc = transformer.aces_to_srgb_32f(pred_aces_hwc.unsqueeze(0)).squeeze(0)
-    ref_srgb_hwc = transformer.aces_to_srgb_32f(aces_hwc.unsqueeze(0)).squeeze(0)
 
-    fig = save_comparison_grid(
-        input_srgb_hwc=input_srgb_hwc,
-        pred_srgb_hwc=pred_srgb_hwc,
-        ref_srgb_hwc=ref_srgb_hwc,
-        pred_aces_hwc=pred_aces_hwc,
-        ref_aces_hwc=aces_hwc,
-        save_path=save_path,
-    )
+    if not keep_aligned_output and align_multiple > 1:
+        input_srgb_hwc = input_srgb_hwc[:output_height, :output_width, :]
+        pred_aces_hwc = pred_aces_hwc[:output_height, :output_width, :]
+        pred_srgb_hwc = pred_srgb_hwc[:output_height, :output_width, :]
+        pred_aces_chw = pred_aces_chw[:, :output_height, :output_width]
+        if has_aces_reference:
+            ref_aces_hwc = ref_aces_hwc[:output_height, :output_width, :]
+
+    if has_aces_reference:
+        ref_srgb_hwc = transformer.aces_to_srgb_32f(ref_aces_hwc.unsqueeze(0)).squeeze(0)
+        fig = save_comparison_grid(
+            input_srgb_hwc=input_srgb_hwc,
+            pred_srgb_hwc=pred_srgb_hwc,
+            ref_srgb_hwc=ref_srgb_hwc,
+            pred_aces_hwc=pred_aces_hwc,
+            ref_aces_hwc=ref_aces_hwc,
+            save_path=save_path,
+        )
+    else:
+        fig = save_input_output_grid(
+            input_srgb_hwc=input_srgb_hwc,
+            pred_srgb_hwc=pred_srgb_hwc,
+            save_path=save_path,
+        )
 
     if pred_aces_output:
         pred_exr_path = Path(pred_aces_output)

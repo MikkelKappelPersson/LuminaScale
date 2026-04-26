@@ -124,9 +124,11 @@ class PeriodicACESMapperInferenceCallback(Callback):
             save_path = self.output_dir / f"epoch_{epoch_number:04d}.png"
             figure = run_aces_mapper_inference(
                 model=pl_module,
-                aces_input=self.aces_input_path,
+                input=self.aces_input_path,
                 output_path=save_path,
                 look=self.look,
+                pred_aces_output=None,
+                input_is_aces=True,
                 device=trainer.strategy.root_device,
             )
             trainer.logger.experiment.add_figure(

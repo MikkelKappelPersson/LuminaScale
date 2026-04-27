@@ -154,11 +154,8 @@ def run_mapper_inference_on_srgb(
 
     model_input = input_srgb_hwc.permute(2, 0, 1).unsqueeze(0)
     forward_model = model.model if hasattr(model, "model") and isinstance(model.model, torch.nn.Module) else model
-    reference_parameter = next(forward_model.parameters())
-    model_dtype = reference_parameter.dtype
-    use_autocast = device.type == "cuda" and model_dtype in {torch.float16, torch.bfloat16}
-    model_input = model_input if use_autocast else model_input.to(dtype=model_dtype)
-    amp_ctx = torch.autocast(device_type="cuda", dtype=model_dtype) if use_autocast else nullcontext()
+    model_input = model_input.to(dtype=torch.float32)
+    amp_ctx = nullcontext()
 
     with torch.inference_mode(), amp_ctx:
         pred_aces_chw = forward_model(model_input).squeeze(0)
@@ -177,6 +174,7 @@ def save_full_inference_dashboard(
     dequant_srgb_chw: torch.Tensor,
     mapper_srgb_chw: torch.Tensor,
     reference_srgb_chw: torch.Tensor | None,
+    dequant_reference_srgb_chw: torch.Tensor,
     save_path: Path,
 ) -> None:
     """Save custom full-inference dashboard (2x4)."""
@@ -187,6 +185,7 @@ def save_full_inference_dashboard(
     dequant_match = resize_chw_to(dequant_srgb_chw, target_h, target_w)
     mapper_match = mapper_srgb_chw
     ref_match = resize_chw_to(reference_srgb_chw, target_h, target_w) if reference_srgb_chw is not None else None
+    dequant_ref_match = resize_chw_to(dequant_reference_srgb_chw, target_h, target_w)
 
     input_np = torch.clamp(input_match, 0.0, 1.0).permute(1, 2, 0).numpy()
     dequant_np = torch.clamp(dequant_match, 0.0, 1.0).permute(1, 2, 0).numpy()
@@ -195,14 +194,28 @@ def save_full_inference_dashboard(
         torch.clamp(ref_match, 0.0, 1.0).permute(1, 2, 0).numpy() if ref_match is not None else np.zeros_like(mapper_np)
     )
 
-    dequant_diff = np.mean(np.abs(dequant_np - input_np), axis=2)
+    dequant_ref_np = torch.clamp(dequant_ref_match, 0.0, 1.0).permute(1, 2, 0).numpy()
+    dequant_diff = np.mean(np.abs(dequant_np - dequant_ref_np), axis=2)
+    dequant_input_diff = np.mean(np.abs(dequant_np - input_np), axis=2)
     mapper_ref = ref_np if ref_match is not None else dequant_np
     mapper_diff = np.mean(np.abs(mapper_np - mapper_ref), axis=2)
 
     luma_input = np.mean(input_np, axis=2)
+    luma_dequant_ref = np.mean(dequant_ref_np, axis=2)
     luma_dequant = np.mean(dequant_np, axis=2)
     luma_mapper = np.mean(mapper_np, axis=2)
     luma_ref = np.mean(mapper_ref, axis=2)
+
+    def gradient_magnitude(image_luma: np.ndarray) -> np.ndarray:
+        grad_y, grad_x = np.gradient(image_luma.astype(np.float32))
+        return np.sqrt((grad_x * grad_x) + (grad_y * grad_y))
+
+    grad_input = gradient_magnitude(luma_input)
+    grad_dequant_ref = gradient_magnitude(luma_dequant_ref)
+    grad_dequant = gradient_magnitude(luma_dequant)
+    grad_ref = gradient_magnitude(luma_ref)
+
+    grad_dequant_err = np.abs(grad_dequant - grad_dequant_ref)
 
     # Explicitly size the figure so each mosaic cell gets the requested dimensions,
     # while accounting for constrained-layout gaps and outer padding.
@@ -241,7 +254,7 @@ def save_full_inference_dashboard(
     fig, axd = plt.subplot_mosaic(
         [
             ["input", "dequant", "mapper", "reference"],
-            ["luma_profile", "dequant_diff", "mapper_diff", "luma_parity"],
+            ["gradient_domain", "dequant_diff", "mapper_diff", "luma_parity"],
         ],
         figsize=(fig_width, fig_height),
         gridspec_kw={"wspace": gap_w, "hspace": gap_h},
@@ -273,33 +286,85 @@ def save_full_inference_dashboard(
     axd["reference"].axis("off")
     axd["reference"].set_box_aspect(panel_aspect)
 
-    axd["dequant_diff"].imshow(dequant_diff, cmap="magma")
+    dequant_im = axd["dequant_diff"].imshow(dequant_diff, cmap="magma")
     axd["dequant_diff"].set_title(
-        f"|Dequant - Input| Mean - {float(dequant_diff.mean()):.5f} (max {float(dequant_diff.max()):.3f})",
+        f"|Dequant - LookRef | Mean - {float(dequant_diff.mean()):.5f} (max {float(dequant_diff.max()):.3f})",
         fontsize=title_fs,
     )
     axd["dequant_diff"].axis("off")
+    dequant_cax = axd["dequant_diff"].inset_axes([0.00, 0.00, 1, 0.05])
+    dequant_cbar = fig.colorbar(dequant_im, cax=dequant_cax, orientation="horizontal")
+    dequant_cbar.set_label("Abs Error", fontsize=axis_label_fs, labelpad=2)
+    dequant_cbar.ax.spines[:].set_visible(False)
+    dequant_cbar.ax.xaxis.set_ticks_position("bottom")
+    dequant_cbar.ax.xaxis.set_label_position("bottom")
+    dequant_cbar.ax.tick_params(labelsize=tick_fs)
 
-    axd["mapper_diff"].imshow(mapper_diff, cmap="magma")
+    mapper_im = axd["mapper_diff"].imshow(mapper_diff, cmap="magma")
     ref_label = "Reference" if ref_match is not None else "Dequant"
     axd["mapper_diff"].set_title(
         f"|Mapper - {ref_label}| Mean - {float(mapper_diff.mean()):.5f} (max {float(mapper_diff.max()):.3f})",
         fontsize=title_fs,
     )
     axd["mapper_diff"].axis("off")
+    mapper_cax = axd["mapper_diff"].inset_axes([0.00, 0.00, 1, 0.05])
+    mapper_cbar = fig.colorbar(mapper_im, cax=mapper_cax, orientation="horizontal")
+    mapper_cbar.set_label("Abs Error", fontsize=axis_label_fs, labelpad=2)
+    mapper_cbar.ax.spines[:].set_visible(False)
+    mapper_cbar.ax.xaxis.set_ticks_position("bottom")
+    mapper_cbar.ax.xaxis.set_label_position("bottom")
+    mapper_cbar.ax.tick_params(labelsize=tick_fs)
 
-    row_idx = target_h // 2
-    axd["luma_profile"].plot(luma_input[row_idx, :], label="Input", linewidth=1.0)
-    axd["luma_profile"].plot(luma_dequant[row_idx, :], label="Dequant", linewidth=1.0)
-    axd["luma_profile"].plot(luma_mapper[row_idx, :], label="Mapper", linewidth=1.0)
-    if ref_match is not None:
-        axd["luma_profile"].plot(luma_ref[row_idx, :], label="Reference", linewidth=1.0)
-    axd["luma_profile"].set_title("Center-row Luma Profile", fontsize=title_fs)
-    axd["luma_profile"].set_xlabel("Pixel Index", fontsize=axis_label_fs)
-    axd["luma_profile"].set_ylabel("Luma", fontsize=axis_label_fs)
-    axd["luma_profile"].tick_params(axis="both", labelsize=tick_fs)
-    axd["luma_profile"].grid(True, alpha=0.25)
-    axd["luma_profile"].legend(fontsize=legend_fs)
+    # Focus on median luma +/- 0.01 range to detect quantization steps
+    median_luma = np.median(luma_dequant_ref)
+    luma_range = 0.0001
+    luma_min = max(0.0, median_luma - luma_range)
+    luma_max = min(1.0, median_luma + luma_range)
+    
+    # Create bins in the focused range
+    num_bins = 1000
+    luma_bins = np.linspace(luma_min, luma_max, num_bins)
+    bin_centers = (luma_bins[:-1] + luma_bins[1:]) / 2
+    bin_centers = (luma_bins[:-1] + luma_bins[1:]) / 2
+    
+    # Get RGB channels
+    dequant_r = dequant_np[:, :, 0].flatten()
+    dequant_g = dequant_np[:, :, 1].flatten()
+    dequant_b = dequant_np[:, :, 2].flatten()
+    
+    ref_r = dequant_ref_np[:, :, 0].flatten()
+    ref_g = dequant_ref_np[:, :, 1].flatten()
+    ref_b = dequant_ref_np[:, :, 2].flatten()
+    
+    channels = [
+        (ref_r, 'Reference R', 'red'),
+        (ref_g, 'Reference G', 'green'),
+        (ref_b, 'Reference B', 'blue'),
+        (dequant_r, 'Dequant R', 'red', '--'),
+        (dequant_g, 'Dequant G', 'green', '--'),
+        (dequant_b, 'Dequant B', 'blue', '--'),
+    ]
+    
+    for channel_data, label, color, *style in channels:
+        hist, _ = np.histogram(channel_data, bins=luma_bins)
+        cumulative = np.cumsum(hist)
+        linestyle = style[0] if style else '-'
+        axd["gradient_domain"].plot(
+            bin_centers,
+            cumulative,
+            label=label,
+            linewidth=1.8,
+            color=color,
+            linestyle=linestyle,
+        )
+    
+    axd["gradient_domain"].set_title(f"Channel Distributions (Luma {median_luma:.3f} ±{luma_range})", fontsize=title_fs)
+    axd["gradient_domain"].set_xlabel("Channel Value", fontsize=axis_label_fs)
+    axd["gradient_domain"].set_ylabel("Accumulated Pixel Count", fontsize=axis_label_fs)
+    axd["gradient_domain"].set_xlim(luma_min, luma_max)
+    axd["gradient_domain"].tick_params(axis="both", labelsize=tick_fs)
+    axd["gradient_domain"].grid(True, alpha=0.25)
+    axd["gradient_domain"].legend(fontsize=legend_fs)
 
     flat_ref = luma_ref.reshape(-1)
     flat_mapper = luma_mapper.reshape(-1)
@@ -307,7 +372,7 @@ def save_full_inference_dashboard(
     sample_idx = np.linspace(0, flat_ref.size - 1, sample_count, dtype=np.int64)
     s_ref = flat_ref[sample_idx]
     s_mapper = flat_mapper[sample_idx]
-    axd["luma_parity"].scatter(s_ref, s_mapper, s=2, alpha=0.2, edgecolors="none")
+    axd["luma_parity"].scatter(s_ref, s_mapper, s=10, alpha=0.4, edgecolors="none")
     min_v = float(min(s_ref.min(), s_mapper.min()))
     max_v = float(max(s_ref.max(), s_mapper.max()))
     axd["luma_parity"].plot([min_v, max_v], [min_v, max_v], "k--", linewidth=1.0)
@@ -315,7 +380,7 @@ def save_full_inference_dashboard(
     axd["luma_parity"].set_xlabel(ref_label, fontsize=axis_label_fs)
     axd["luma_parity"].set_ylabel("Mapper", fontsize=axis_label_fs)
     axd["luma_parity"].tick_params(axis="both", labelsize=tick_fs)
-    axd["luma_parity"].grid(True, alpha=0.25)
+    axd["luma_parity"].grid(True, alpha=0.50)
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi="figure", bbox_inches="tight")
@@ -490,6 +555,7 @@ def main() -> None:
     look = None
     dequant_input_override_chw: torch.Tensor | None = None
     clean_reference_chw: torch.Tensor | None = None
+    dequant_reference_chw: torch.Tensor | None = None
     if is_exr_reference:
         print(f"Creating CDL look for inference: {args.look_mode}")
         look = build_look(args.look_mode, args.slope, args.offset, args.power, args.saturation)
@@ -508,6 +574,7 @@ def main() -> None:
         aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
         srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
         srgb_hwc = torch.clamp(srgb_hwc, 0.0, 1.0)
+        dequant_reference_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
         srgb_hwc = torch.round(srgb_hwc * 255.0) / 255.0
         dequant_input_override_chw = srgb_hwc.permute(2, 0, 1)
 
@@ -560,8 +627,8 @@ def main() -> None:
         num_lap=args.num_lap,
         num_residual_blocks=args.num_residual_blocks,
     )
-    if amp_enabled:
-        mapper_model = mapper_model.to(dtype=amp_dtype)
+    # Keep the mapper in float32: its spatial-frequency transformer uses
+    # complex operators that fail under ComplexHalf on CUDA.
 
     print("Running ACES mapper inference on dequant output...")
     if args.keep_padding:
@@ -585,11 +652,16 @@ def main() -> None:
     try:
         if args.save_plot:
             reference_for_dashboard = clean_reference_chw if is_exr_reference else None
+            assert dequant_reference_chw is not None, (
+                "Dequant reference (look-applied sRGB) is required for dashboard metrics; "
+                "run with --input-is-aces to generate it"
+            )
             save_full_inference_dashboard(
                 input_srgb_chw=dequant_input_chw_cpu,
                 dequant_srgb_chw=dequant_output_chw_cpu,
                 mapper_srgb_chw=mapper_srgb_chw_cpu,
                 reference_srgb_chw=reference_for_dashboard,
+                dequant_reference_srgb_chw=dequant_reference_chw,
                 save_path=resolved_plot_output,
             )
     finally:

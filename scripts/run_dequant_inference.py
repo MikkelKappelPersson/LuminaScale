@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import sys
 from pathlib import Path
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -51,18 +53,59 @@ def blur_image(image: np.ndarray, sigma: float) -> np.ndarray:
         blurred[:, :, c] = ndimage.gaussian_filter(image[:, :, c], sigma=sigma)
     return blurred
 
-def align_to_model(tensor: torch.Tensor) -> torch.Tensor:
-    """Align input tensor to be divisible by 64 (for 6-level U-Net)."""
-    h, w = tensor.shape[2], tensor.shape[3]
-    new_h = (h // 64) * 64
-    new_w = (w // 64) * 64
-    
-    if h != new_h or w != new_w:
-        print(f"Aligning resolution: {h}x{w} -> {new_h}x{new_w}")
-        return F.interpolate(tensor, size=(new_h, new_w), mode='bilinear', align_corners=False)
-    return tensor
+def center_crop_chw(image: torch.Tensor, crop_size: int) -> torch.Tensor:
+    """Center-crop image [C, H, W] if crop_size is positive and smaller than image size."""
+    if crop_size <= 0:
+        return image
 
-def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width: int | None, height: int | None, output_path: Path, gradient_type: str = "combined", contrast_strength: float = 10.0, apply_contrast_to_output: bool = False, target_blur_sigma: float = 0.0):
+    _, height, width = image.shape
+    assert crop_size <= height and crop_size <= width, (
+        f"crop_size={crop_size} must be <= image size ({height}x{width})"
+    )
+
+    top = (height - crop_size) // 2
+    left = (width - crop_size) // 2
+    return image[:, top : top + crop_size, left : left + crop_size]
+
+
+def resize_to_max_side_chw(image: torch.Tensor, max_side: int) -> torch.Tensor:
+    """Resize image [C, H, W] if its longest side exceeds max_side."""
+    if max_side <= 0:
+        return image
+
+    _, height, width = image.shape
+    current_max = max(height, width)
+    if current_max <= max_side:
+        return image
+
+    scale = max_side / float(current_max)
+    new_height = max(1, int(height * scale))
+    new_width = max(1, int(width * scale))
+
+    bchw = image.unsqueeze(0)
+    resized = F.interpolate(bchw, size=(new_height, new_width), mode="bilinear", align_corners=False)
+    return resized.squeeze(0)
+
+
+def align_to_multiple_bchw(tensor: torch.Tensor, multiple: int) -> tuple[torch.Tensor, int, int]:
+    """Pad input tensor [B, C, H, W] to nearest higher multiple using edge replication."""
+    if multiple <= 1:
+        return tensor, tensor.shape[2], tensor.shape[3]
+
+    h, w = tensor.shape[2], tensor.shape[3]
+    new_h = ((h + multiple - 1) // multiple) * multiple
+    new_w = ((w + multiple - 1) // multiple) * multiple
+
+    if h == new_h and w == new_w:
+        return tensor, h, w
+
+    pad_h = new_h - h
+    pad_w = new_w - w
+    aligned = F.pad(tensor, (0, pad_w, 0, pad_h), mode="replicate")
+    print(f"Aligning resolution: {h}x{w} -> {new_h}x{new_w}")
+    return aligned, h, w
+
+def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width: int | None, height: int | None, output_path: Path | None, plot_output: Path | None, gradient_type: str = "combined", contrast_strength: float = 10.0, apply_contrast_to_output: bool = False, target_blur_sigma: float = 0.0, amp_enabled: bool = False, amp_dtype: torch.dtype = torch.float16):
     """Generate and run inference on a synthetic primary gradients image.
     
     Note on resizing: All processing (quantization, contrast, etc.) happens at native resolution.
@@ -106,7 +149,8 @@ def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width:
     
     # Run model at native resolution
     input_tensor = torch.from_numpy(ldr_chw).float().to(device).unsqueeze(0)
-    with torch.no_grad():
+    amp_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype) if amp_enabled else nullcontext()
+    with torch.no_grad(), amp_ctx:
         output_tensor = model(input_tensor).squeeze(0).cpu().numpy()
     
     # Clip model output to [0, 1] for visualization and saving consistency
@@ -118,7 +162,8 @@ def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width:
         output_to_save = apply_s_curve_contrast(output_clipped.transpose(1, 2, 0), strength=contrast_strength).transpose(2, 0, 1)
     
     # Save as EXR (native resolution, no resizing)
-    write_exr(output_path, output_to_save)
+    if output_path is not None:
+        write_exr(output_path, output_to_save)
     
     # Save comparison: resizing for visualization happens only in save_comparison
     reference_clipped = np.clip(reference_chw, 0, 1)
@@ -130,10 +175,15 @@ def run_synthetic_inference(model: torch.nn.Module, device: torch.device, width:
         
     reference_final = reference_hwc.transpose(2, 0, 1)
     
-    save_comparison(ldr_chw, output_clipped, reference_final, output_path.with_suffix('.png'), strength=contrast_strength, synthetic=gradient_type)
-    print(f"✓ Synthetic inference complete. Model output: {output_path}")
+    if plot_output is not None:
+        save_comparison(ldr_chw, output_clipped, reference_final, plot_output, strength=contrast_strength, synthetic=gradient_type)
 
-def run_image_inference(model: torch.nn.Module, device: torch.device, input_path: Path, output_path: Path, contrast_strength: float = 20.0, apply_contrast_to_output: bool = False, target_blur_sigma: float = 0.0):
+    if output_path is not None:
+        print(f"✓ Synthetic inference complete. Model output: {output_path}")
+    else:
+        print("✓ Synthetic inference complete. Model output not saved (--no-save-output set)")
+
+def run_image_inference(model: torch.nn.Module, device: torch.device, input_path: Path, output_path: Path | None, plot_output: Path | None, crop_size: int = 0, align_multiple: int = 64, max_side: int = 1024, keep_padding: bool = False, contrast_strength: float = 20.0, apply_contrast_to_output: bool = False, target_blur_sigma: float = 0.0, amp_enabled: bool = False, amp_dtype: torch.dtype = torch.float16):
     """Run inference on a local image file."""
     print(f"Processing image: {input_path}")
     
@@ -143,14 +193,20 @@ def run_image_inference(model: torch.nn.Module, device: torch.device, input_path
         img = Image.open(input_path).convert("RGB")
         input_np = np.array(img).transpose(2, 0, 1).astype(np.float32) / 255.0
     
-    input_tensor = torch.from_numpy(input_np).float().unsqueeze(0).to(device)
-    original_h, original_w = input_tensor.shape[2], input_tensor.shape[3]
-    
-    input_tensor_aligned = align_to_model(input_tensor)
-    aligned_h, aligned_w = input_tensor_aligned.shape[2], input_tensor_aligned.shape[3]
-    
-    with torch.no_grad():
+    input_chw = torch.from_numpy(input_np).float()
+    input_chw = center_crop_chw(input_chw, crop_size)
+    input_chw = resize_to_max_side_chw(input_chw, max_side)
+    pre_align_h, pre_align_w = input_chw.shape[1], input_chw.shape[2]
+
+    input_tensor = input_chw.unsqueeze(0).to(device)
+    input_tensor_aligned, original_h, original_w = align_to_multiple_bchw(input_tensor, align_multiple)
+
+    amp_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype) if amp_enabled else nullcontext()
+    with torch.no_grad(), amp_ctx:
         output_tensor = model(input_tensor_aligned).squeeze(0).cpu().numpy()
+
+    if not keep_padding and align_multiple > 1:
+        output_tensor = output_tensor[:, :original_h, :original_w]
     
     # Clip model output to [0, 1] for visualization and saving consistency
     output_clipped = np.clip(output_tensor, 0, 1)
@@ -160,24 +216,26 @@ def run_image_inference(model: torch.nn.Module, device: torch.device, input_path
     if apply_contrast_to_output:
         output_to_save = apply_s_curve_contrast(output_clipped.transpose(1, 2, 0), strength=contrast_strength).transpose(2, 0, 1)
     
-    if output_path.suffix.lower() == '.exr':
-        write_exr(output_path, output_to_save)
-    else:
-        out_img = Image.fromarray((output_to_save.transpose(1, 2, 0) * 255).astype(np.uint8))
-        out_img.save(output_path)
+    if output_path is not None:
+        if output_path.suffix.lower() == '.exr':
+            write_exr(output_path, output_to_save)
+        else:
+            out_img = Image.fromarray((output_to_save.transpose(1, 2, 0) * 255).astype(np.uint8))
+            out_img.save(output_path)
     
     # Save comparison visualization (resize input to match output dimensions for shape compatibility)
     # If input was resized by align_to_model, resize back for comparison visualization
-    if (original_h != aligned_h or original_w != aligned_w):
+    aligned_h, aligned_w = output_clipped.shape[1], output_clipped.shape[2]
+    if (pre_align_h != aligned_h or pre_align_w != aligned_w):
         # Convert CHW back to HWC for PIL resizing
-        input_hwc = input_np.transpose(1, 2, 0)  # [H_orig, W_orig, C]
+        input_hwc = input_chw.numpy().transpose(1, 2, 0)
         input_pil = Image.fromarray((np.clip(input_hwc, 0, 1) * 255).astype(np.uint8))
         # Resize to match output dimensions
         input_pil_resized = input_pil.resize((aligned_w, aligned_h), Image.Resampling.LANCZOS)
         # Convert back to CHW float
         input_chw = np.array(input_pil_resized).astype(np.float32).transpose(2, 0, 1) / 255.0
     else:
-        input_chw = input_np
+        input_chw = input_chw.numpy()
         
     # Apply reference blur for comparison visualization
     reference_for_comparison = input_chw
@@ -187,9 +245,13 @@ def run_image_inference(model: torch.nn.Module, device: torch.device, input_path
         reference_hwc = blur_image(reference_hwc, sigma=target_blur_sigma)
         reference_for_comparison = reference_hwc.transpose(2, 0, 1)
     
-    save_comparison(input_chw, output_clipped, reference_for_comparison, output_path.with_suffix('.png'), strength=contrast_strength)
-    
-    print(f"✓ Inference complete. Saved to: {output_path}")
+    if plot_output is not None:
+        save_comparison(input_chw, output_clipped, reference_for_comparison, plot_output, strength=contrast_strength)
+
+    if output_path is not None:
+        print(f"✓ Inference complete. Saved to: {output_path}")
+    else:
+        print("✓ Inference complete. Model output not saved (--no-save-output set)")
 
 def save_comparison(ldr, model_out, gt, save_path: Path, strength: float = 10.0, synthetic: str | None = None):
     """Save comprehensive 3x3 comparison grid with all analysis plots."""
@@ -304,11 +366,61 @@ def save_comparison(ldr, model_out, gt, save_path: Path, strength: float = 10.0,
     print(f"✓ Comprehensive comparison grid saved: {save_path}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="LuminaScale Inference Script")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint (.pt)")
-    parser.add_argument("--input", type=str, help="Path to input image (optional if --synthetic used)")
-    parser.add_argument("--output", type=str, default="outputs/inference/result.exr", help="Path to save output")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run dequant inference and save comparison dashboard.")
+    parser.add_argument("--checkpoint", type=str, default="", help="Path to model checkpoint (.ckpt/.pt)")
+    parser.add_argument(
+        "--input",
+        dest="input_path",
+        type=str,
+        default="",
+        help="Path to regular input image (optional if --synthetic is set)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="",
+        help="Path to save dequant output (default: outputs/inference/<input_stem>_out.exr)",
+    )
+    parser.add_argument(
+        "--no-save-output",
+        action="store_true",
+        help="Disable saving dequant output",
+    )
+    parser.add_argument(
+        "--save-plot",
+        action="store_true",
+        help="Save comparison dashboard plot",
+    )
+    parser.add_argument(
+        "--plot-output",
+        type=str,
+        default="",
+        help="Path to save dashboard plot when --save-plot is set (default: outputs/inference/<input_stem>_plot.png)",
+    )
+    parser.add_argument(
+        "--crop-size",
+        type=int,
+        default=0,
+        help="Optional center crop size before inference (0 disables crop)",
+    )
+    parser.add_argument(
+        "--align-multiple",
+        type=int,
+        default=64,
+        help="Pad H/W to nearest higher multiple using edge replication (<=1 disables)",
+    )
+    parser.add_argument(
+        "--keep-padding",
+        action="store_true",
+        help="Keep padded aligned dimensions in generated outputs instead of removing alignment padding",
+    )
+    parser.add_argument(
+        "--max-side",
+        type=int,
+        default=1024,
+        help="Cap longest image side before inference to reduce VRAM use (<=0 disables)",
+    )
     parser.add_argument("--synthetic", action="store_true", help="Generate synthetic primary gradients instead of reading input")
     parser.add_argument("--gradient-type", type=str, default="combined", choices=["combined", "8x21", "4x21", "2x21"], help="Type of primary gradient to generate (default: combined)")
     parser.add_argument("--width", type=int, default=None, help="Width for synthetic gradient (default: native size)")
@@ -316,17 +428,58 @@ def main():
     parser.add_argument("--contrast-strength", type=float, default=100.0, help="S-curve contrast strength for visualization (default: 100.0)")
     parser.add_argument("--apply-contrast-to-output", action="store_true", help="Apply S-curve contrast to model output before saving EXR (default: False)")
     parser.add_argument("--target-blur-sigma", type=float, default=0.0, help="Gaussian blur sigma for reference (GT) comparison (default: 0.0)")
+    parser.add_argument("--seed", type=int, default=9, help="Seed for reproducible random generation")
     parser.add_argument("--channels", type=int, default=32, help="Model base channels (default: 32)")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda/cpu)")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Inference device (cuda/cpu)")
+    parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Enable automatic mixed precision during model inference on CUDA",
+    )
+    parser.add_argument(
+        "--amp-dtype",
+        type=str,
+        default="fp16",
+        choices=["fp16", "bf16"],
+        help="AMP dtype when --amp is enabled",
+    )
 
     args = parser.parse_args()
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
     device = torch.device(args.device)
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    amp_dtype = torch.float16 if args.amp_dtype == "fp16" else torch.bfloat16
+    amp_enabled = bool(args.amp and device.type == "cuda")
+
+    input_path = Path(args.input_path) if args.input_path else None
+    if not args.synthetic:
+        assert input_path is not None and input_path.exists(), "Input does not exist or is missing. Use --input or --synthetic"
+
+    default_output_dir = project_root / "outputs" / "inference"
+    if args.synthetic:
+        input_stem = args.gradient_type
+    else:
+        assert input_path is not None
+        input_stem = input_path.stem
+    resolved_output = Path(args.output) if args.output else default_output_dir / f"{input_stem}_out.exr"
+    resolved_plot_output = Path(args.plot_output) if args.plot_output else default_output_dir / f"{input_stem}_plot.png"
+    output_path = None if args.no_save_output else resolved_output
+    plot_output = resolved_plot_output if args.save_plot else None
+
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    if plot_output is not None:
+        plot_output.parent.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Model
+    assert args.checkpoint, "--checkpoint is required"
     print(f"Loading model on {device}...")
     model = create_dequant_net(device=device, base_channels=args.channels)
+    if amp_enabled:
+        model = model.to(dtype=amp_dtype)
     checkpoint = torch.load(args.checkpoint, map_location=device)
     # Handle both Lightning checkpoints and raw state dicts
     if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
@@ -347,24 +500,50 @@ def main():
             args.width, 
             args.height, 
             output_path, 
+            plot_output,
             gradient_type=args.gradient_type, 
             contrast_strength=args.contrast_strength, 
             apply_contrast_to_output=args.apply_contrast_to_output,
-            target_blur_sigma=args.target_blur_sigma
+            target_blur_sigma=args.target_blur_sigma,
+            amp_enabled=amp_enabled,
+            amp_dtype=amp_dtype,
         )
-    elif args.input:
+    elif input_path is not None:
+        if args.keep_padding:
+            print("Keeping aligned padded output dimensions (--keep-padding set)")
+        else:
+            print("Removing alignment padding from generated outputs (default behavior)")
+
         run_image_inference(
             model, 
             device, 
-            Path(args.input), 
+            input_path,
             output_path, 
+            plot_output,
+            crop_size=args.crop_size,
+            align_multiple=args.align_multiple,
+            max_side=args.max_side,
+            keep_padding=args.keep_padding,
             contrast_strength=args.contrast_strength, 
             apply_contrast_to_output=args.apply_contrast_to_output,
-            target_blur_sigma=args.target_blur_sigma
+            target_blur_sigma=args.target_blur_sigma,
+            amp_enabled=amp_enabled,
+            amp_dtype=amp_dtype,
         )
     else:
         print("Error: You must provide either --input or --synthetic")
         sys.exit(1)
+
+    print("===========================================================================")
+    if args.no_save_output:
+        print("Dequant output not saved (--no-save-output set)")
+    else:
+        print(f"Saved dequant output: {resolved_output}")
+
+    if args.save_plot:
+        print(f"Saved comparison dashboard: {resolved_plot_output}")
+    else:
+        print("Comparison dashboard not saved (--save-plot not set)")
 
 if __name__ == "__main__":
     main()

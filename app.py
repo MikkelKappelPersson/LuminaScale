@@ -89,8 +89,6 @@ def run_pipeline(
 	input_path: str,
 	output_dir: str,
 	output_name: str,
-	dequant_output_name: str,
-	save_dequant: bool,
 	save_plot: bool,
 	input_is_aces: bool,
 	seed: int,
@@ -98,6 +96,8 @@ def run_pipeline(
 	keep_padding: bool,
 	max_side: int,
 	# Defaulted internal parameters (removed from UI)
+	dequant_output_name: str="",
+	save_dequant: bool=False,
 	mapper_checkpoint: str="outputs/training/mapper/20260425_231537/checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
 	dequant_checkpoint: str="outputs/training/dequant/20260422_120606_L1=1.0_L2=0.0_CB=1.0_EA=0.0_TV-huber=0.0/checkpoints/last.ckpt",
 	look_mode: str = "random",
@@ -304,19 +304,61 @@ def run_pipeline(
 		return details, None, None, None
 
 
+def _warmup_pipeline(
+	mapper_checkpoint: str,
+	dequant_checkpoint: str,
+	device_name: str = "cuda",
+) -> None:
+	"""Run a dummy pass to initialize CUDA kernels and prevent the first-run crash."""
+	try:
+		if device_name == "cuda" and not torch.cuda.is_available():
+			return
+
+		LOGGER.info("Warming up pipeline with dummy data...")
+		device = torch.device(device_name)
+
+		# 1. Load models
+		mapper_ckpt = Path(mapper_checkpoint).expanduser().resolve()
+		dequant_ckpt = Path(dequant_checkpoint).expanduser().resolve()
+		if not mapper_ckpt.exists() or not dequant_ckpt.exists():
+			LOGGER.warning("Warmup skipped: Checkpoints not found at default paths.")
+			return
+
+		dequant_model = rfi.load_dequant_model_from_checkpoint(dequant_ckpt, device, channels=32)
+		mapper_model = rfi.load_model_from_checkpoint(
+			mapper_ckpt,
+			device,
+			num_luts=3,
+			lut_dim=33,
+			num_lap=3,
+			num_residual_blocks=5,
+		)
+
+		# 2. Run dummy dequant (128x128)
+		dummy_input = torch.zeros((1, 3, 128, 128), device=device)
+		with torch.no_grad():
+			_ = dequant_model(dummy_input)
+			LOGGER.info("Dequant warmup complete.")
+
+			# 3. Run dummy mapper
+			_ = mapper_model(dummy_input)
+			LOGGER.info("Mapper warmup complete.")
+
+		LOGGER.info("Pipeline warmup successful.")
+	except Exception as e:
+		LOGGER.warning("Warmup failed (this is usually non-fatal): %s", e)
+
+
 def _run_pipeline_from_ui(
 	selected_input_path: str,
-	output_dir: str,
 	output_name: str,
-	dequant_output_name: str,
-	save_dequant: bool,
 	save_plot: bool,
 	input_is_aces: bool,
 	seed: int,
 	crop_size: int,
 	keep_padding: bool,
 	max_side: int,
-) -> tuple[str, str | None, str | None, str | None]:
+) -> tuple[str | None, str | None, str | None, str | None]:
 	resolved_input_path = selected_input_path.strip()
 	LOGGER.info("UI selected input path=%s", resolved_input_path)
 	if not resolved_input_path:
@@ -325,8 +367,6 @@ def _run_pipeline_from_ui(
 		input_path=resolved_input_path,
 		output_dir=output_dir,
 		output_name=output_name,
-		dequant_output_name=dequant_output_name,
-		save_dequant=save_dequant,
 		save_plot=save_plot,
 		input_is_aces=input_is_aces,
 		seed=seed,
@@ -336,7 +376,7 @@ def _run_pipeline_from_ui(
 	)
 
 
-default_input = "dataset/full/aces/MIT-Adobe_5K_a0001-jmac_DSC1459.exr"
+
 example_images = sorted(str(p) for p in Path("assets/imgs").glob("*.jpg"))
 
 with gr.Blocks(title="LuminaScale Full Inference") as demo:
@@ -345,34 +385,36 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 
 	with gr.Row():
 		with gr.Column(scale=1):
-			gr.Markdown("## Select input image")
-			selected_input_path = gr.State(default_input)
+			gr.Markdown("## Select input image \n Upload an image or select from gallery.")
+			selected_input_path = gr.State(None)
 
-			input_gallery = gr.Gallery(example_images, label="Example inputs", columns=1, allow_preview=False)
 			input_upload = gr.Image(label="Upload input image", type="filepath", )
+			input_gallery = gr.Gallery(example_images, label="Example inputs", columns=1, allow_preview=False)
 		with gr.Column(scale=2):
 			with gr.Column():
-				gr.Markdown("## Input Image")
-				input_image = gr.Image(label="Selected input preview", type="filepath", interactive=False, value=_preview_path_for_input(default_input))
+				gr.Markdown("## Input Image \n ")
+				input_image = gr.Image(label="Selected input preview", type="filepath", interactive=False, value=None)
 				gr.Markdown("## Params")
-			with gr.Row():
-				output_dir = gr.Textbox(label="Output directory", value=str(DEFAULT_OUTPUT_DIR))
-				output_name = gr.Textbox(label="Predicted ACES EXR filename", value="")
-				dequant_output_name = gr.Textbox(label="Dequant EXR filename", value="")
-
+			
 			with gr.Row():
 				input_is_aces = gr.Checkbox(label="Input is ACES EXR", value=True)
-				save_dequant = gr.Checkbox(label="Save dequant intermediate", value=False)
 				save_plot = gr.Checkbox(label="Save dashboard plot", value=True)
 				keep_padding = gr.Checkbox(label="Keep alignment padding", value=False)
+			
+			with gr.Row():
+				output_name = gr.Textbox(label="Output filename", value="")
+
 
 			with gr.Row():
 				seed = gr.Number(label="Seed", value=9, precision=0)
-				crop_size = gr.Number(label="Crop size", value=0, precision=0)
-				max_side = gr.Number(label="Max side", value=1024, precision=0)
+				crop_size = gr.Number(label="Crop size (0=disable)", value=0, precision=0)
+				max_side = gr.Number(label="Max side (0=disable)", value=1024, precision=0)
 
-	run_button = gr.Button("Run full inference", variant="primary")
-
+			run_button = gr.Button("Run full inference", variant="primary")
+	
+	plot_output = gr.Image(label="Dashboard plot", type="filepath")
+	status_output = gr.Textbox(label="Status", lines=12)
+	
 	def _set_selected_input(source_path: object) -> tuple[str, str]:
 		LOGGER.info("Received UI selection payload type=%s value=%r", type(source_path).__name__, source_path)
 		resolved_source_path = _normalize_gradio_image_path(source_path).strip()
@@ -399,20 +441,13 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 	input_upload.select(fn=_set_selected_input, inputs=input_upload, outputs=[input_image, selected_input_path])
 	input_upload.upload(fn=_set_selected_input, inputs=input_upload, outputs=[input_image, selected_input_path])
 
-	status_output = gr.Textbox(label="Status", lines=12)
-	debug_log_output = gr.Textbox(label="Debug log path", value=str(DEBUG_LOG_PATH), interactive=False)
-	pred_exr_output = gr.Textbox(label="Predicted ACES EXR path")
-	dequant_exr_output = gr.Textbox(label="Dequant EXR path (if saved)")
-	plot_output = gr.Image(label="Dashboard plot", type="filepath")
+	output_dir = str(DEFAULT_OUTPUT_DIR)
 
 	run_button.click(
 		fn=_run_pipeline_from_ui,
 		inputs=[
 			selected_input_path,
-			output_dir,
 			output_name,
-			dequant_output_name,
-			save_dequant,
 			save_plot,
 			input_is_aces,
 			seed,
@@ -420,10 +455,15 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 			keep_padding,
 			max_side,
 		],
-		outputs=[status_output, pred_exr_output, dequant_exr_output, plot_output],
+		outputs=[status_output, gr.File(visible=False), gr.File(visible=False), plot_output],
 	)
 
 
 
 if __name__ == "__main__":
+	# Run warmup before launching the UI to ensure CUDA kernels are initialized
+	_warmup_pipeline(
+		mapper_checkpoint="outputs/training/mapper/20260425_231537/checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
+		dequant_checkpoint="outputs/training/dequant/20260422_120606_L1=1.0_L2=0.0_CB=1.0_EA=0.0_TV-huber=0.0/checkpoints/last.ckpt"
+	)
 	demo.launch(server_name="127.0.0.1", server_port=7860, share=True)

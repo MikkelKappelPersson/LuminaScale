@@ -7,14 +7,11 @@ import os
 import random
 import logging
 import traceback
-import anyio
-os.environ["ANYIO_BACKEND"] = "asyncio"
 from pathlib import Path
 
 import gradio as gr
 import numpy as np
 import torch
-import nest_asyncio
 from PIL import Image
 
 from scripts import run_full_inference as rfi
@@ -39,7 +36,8 @@ if not LOGGER.handlers:
 
 def _parse_triplet(text: str, name: str) -> tuple[float, float, float]:
 	parts = [part.strip() for part in text.split(",")]
-	assert len(parts) == 3, f"{name} must contain exactly 3 comma-separated values"
+	if len(parts) != 3:
+		raise gr.Error(f"{name} must contain exactly 3 comma-separated values", duration=5)
 	values = (float(parts[0]), float(parts[1]), float(parts[2]))
 	return values
 
@@ -117,6 +115,27 @@ def run_pipeline(
 	amp_enabled: bool = False,
 	amp_dtype_name: str = "fp16",
 ) -> tuple[str, str | None, str | None, str | None]:
+	# --- Pre-inference validation (outside try-except to allow gr.Error visibility) ---
+	input_image_path = Path(input_path).expanduser().resolve()
+	if not input_image_path.exists():
+		raise gr.Error(f"Input image does not exist: {input_image_path}", duration=5)
+
+	mapper_ckpt = Path(mapper_checkpoint).expanduser().resolve()
+	dequant_ckpt = Path(dequant_checkpoint).expanduser().resolve()
+	if not mapper_ckpt.exists():
+		raise gr.Error(f"Mapper checkpoint does not exist: {mapper_ckpt}", duration=5)
+	if not dequant_ckpt.exists():
+		raise gr.Error(f"Dequant checkpoint does not exist: {dequant_ckpt}", duration=5)
+
+	if input_is_aces:
+		if input_image_path.suffix.lower() != ".exr":
+			raise gr.Error("input_is_aces requires an EXR input", duration=5)
+
+	if look_mode == "manual":
+		_parse_triplet(slope, "slope")
+		_parse_triplet(offset, "offset")
+		_parse_triplet(power, "power")
+
 	try:
 		LOGGER.info("Starting inference run")
 		LOGGER.info("input=%s output_dir=%s", input_path, output_dir)
@@ -125,22 +144,6 @@ def run_pipeline(
 		random.seed(seed)
 		np.random.seed(seed)
 		torch.manual_seed(seed)
-
-		input_image_path = Path(input_path).expanduser().resolve()
-		assert input_image_path.exists(), f"Input image does not exist: {input_image_path}"
-
-		mapper_ckpt = Path(mapper_checkpoint).expanduser().resolve()
-		dequant_ckpt = Path(dequant_checkpoint).expanduser().resolve()
-		assert mapper_ckpt.exists(), f"Mapper checkpoint does not exist: {mapper_ckpt}"
-		assert dequant_ckpt.exists(), f"Dequant checkpoint does not exist: {dequant_ckpt}"
-
-		if input_is_aces:
-			assert input_image_path.suffix.lower() == ".exr", "input_is_aces requires an EXR input"
-
-		if look_mode == "manual":
-			_parse_triplet(slope, "slope")
-			_parse_triplet(offset, "offset")
-			_parse_triplet(power, "power")
 
 		if device_name == "cuda" and not torch.cuda.is_available():
 			device_name = "cpu"
@@ -252,7 +255,8 @@ def run_pipeline(
 		plot_path: str | None = None
 		if save_plot and input_is_aces:
 			LOGGER.info("Saving dashboard plot")
-			assert dequant_reference_chw is not None, "Expected dequant reference for dashboard"
+			if dequant_reference_chw is None:
+				raise gr.Error("Expected dequant reference for dashboard", duration=5)
 			reference_for_dashboard = clean_reference_chw if input_is_aces else None
 			rfi.save_full_inference_dashboard(
 				input_srgb_chw=dequant_input_chw_cpu,
@@ -315,7 +319,8 @@ def _run_pipeline_from_ui(
 ) -> tuple[str, str | None, str | None, str | None]:
 	resolved_input_path = selected_input_path.strip()
 	LOGGER.info("UI selected input path=%s", resolved_input_path)
-	assert resolved_input_path, "Please select a gallery image or upload an image"
+	if not resolved_input_path:
+		raise gr.Error("Please select a gallery image or upload an image", duration=5)
 	return run_pipeline(
 		input_path=resolved_input_path,
 		output_dir=output_dir,
@@ -344,7 +349,7 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 			selected_input_path = gr.State(default_input)
 
 			input_gallery = gr.Gallery(example_images, label="Example inputs", columns=1, allow_preview=False)
-			input_upload = gr.File(label="Upload input image", type="filepath")
+			input_upload = gr.Image(label="Upload input image", type="filepath", )
 		with gr.Column(scale=2):
 			with gr.Column():
 				gr.Markdown("## Input Image")
@@ -372,7 +377,8 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 		LOGGER.info("Received UI selection payload type=%s value=%r", type(source_path).__name__, source_path)
 		resolved_source_path = _normalize_gradio_image_path(source_path).strip()
 		LOGGER.info("Normalized UI selection path=%s", resolved_source_path)
-		assert resolved_source_path, "No input image selected"
+		if not resolved_source_path:
+			raise gr.Error("No input image selected", duration=5)
 		preview_path = _preview_path_for_input(resolved_source_path)
 		LOGGER.info("Selection ready preview=%s input=%s", preview_path, resolved_source_path)
 		return preview_path, resolved_source_path
@@ -380,15 +386,18 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 	def _gallery_to_input_path(event: gr.SelectData) -> tuple[str, str]:
 		selected_index = event.index
 		LOGGER.info("Gallery selection event index=%r value_type=%s", selected_index, type(event.value).__name__)
-		assert selected_index is not None, "No gallery image selected"
+		if selected_index is None:
+			raise gr.Error("No gallery image selected", duration=5)
 		selected_idx = int(selected_index)
-		assert 0 <= selected_idx < len(example_images), "Gallery selection out of range"
+		if not (0 <= selected_idx < len(example_images)):
+			raise gr.Error("Gallery selection out of range", duration=5)
 		selected_path = example_images[selected_idx]
 		LOGGER.info("Gallery resolved path=%s", selected_path)
 		return _set_selected_input(selected_path)
 
 	input_gallery.select(fn=_gallery_to_input_path, outputs=[input_image, selected_input_path])
-	input_upload.change(fn=_set_selected_input, inputs=input_upload, outputs=[input_image, selected_input_path])
+	input_upload.select(fn=_set_selected_input, inputs=input_upload, outputs=[input_image, selected_input_path])
+	input_upload.upload(fn=_set_selected_input, inputs=input_upload, outputs=[input_image, selected_input_path])
 
 	status_output = gr.Textbox(label="Status", lines=12)
 	debug_log_output = gr.Textbox(label="Debug log path", value=str(DEBUG_LOG_PATH), interactive=False)

@@ -65,13 +65,20 @@ def write_exr(path: Path | str, array: np.ndarray | torch.Tensor) -> None:
 
 def oiio_aces_to_display(path: Path | str) -> np.ndarray:
     """Read ACES EXR and convert to sRGB display space using OpenImageIO.
-    
+
     This is a CPU alternative to aces_to_display_gpu for simple visualization.
+    Uses OCIO display transform for accurate RRT + ODT mapping.
     """
     buf = oiio.ImageBuf(str(path))
-    # Apply color space conversion (depends on OCIO config)
-    # This assumes OpenImageIO can find the OCIO config from environment or default
-    result = oiio.ImageBufAlgo.colorconvert(buf, "aces", "sRGB")
+    # Apply OCIO display transform (RRT + ODT)
+    # Using 'sRGB - Display' and 'ACES 2.0 - SDR 100 nits (Rec.709)' found in OCIO config
+    result = oiio.ImageBufAlgo.ociodisplay(
+        buf, 
+        "sRGB - Display", 
+        "ACES 2.0 - SDR 100 nits (Rec.709)", 
+        "ACES2065-1"
+    )
+    
     return np.asarray(result.get_pixels(), dtype=np.float32).transpose(2, 0, 1)
 
 

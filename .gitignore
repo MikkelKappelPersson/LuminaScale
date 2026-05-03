@@ -14,6 +14,11 @@ dataset/
 !/outputs/training/*/config.yaml
 !/outputs/training/*/tensorboard/
 
+# Assets
+assets/srgb_8u/
+assets/srgb_32f/
+assets/aces_32f/
+
 # aim
 .aim/
 

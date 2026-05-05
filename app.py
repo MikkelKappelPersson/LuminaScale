@@ -157,6 +157,7 @@ def run_pipeline(
     crop_size: int,
     keep_padding: bool,
     max_side: int,
+    apply_random_look: bool = False,
     # Defaulted internal parameters (removed from UI)
     dequant_output_name: str = "",
     save_dequant: bool = False,
@@ -242,21 +243,29 @@ def run_pipeline(
 
         if input_is_aces:
             LOGGER.info("Preparing ACES reference input")
-            look = rfi.build_look(look_mode, slope, offset, power, saturation)
             aces_chw = rfi.image_to_tensor(input_image_path).to(device=device, dtype=torch.float32)
             aces_hwc = aces_chw.permute(1, 2, 0)
 
-            cdl_processor = rfi.GPUCDLProcessor(device=device)
             transformer = rfi.ACESColorTransformer(device=device, use_lut=True)
 
+            # Always compute clean reference (ungraded ACES to sRGB)
             clean_srgb_hwc = transformer.aces_to_srgb_32f(aces_hwc.unsqueeze(0)).squeeze(0)
             clean_srgb_hwc = torch.clamp(clean_srgb_hwc, 0.0, 1.0)
             clean_reference_chw = clean_srgb_hwc.permute(2, 0, 1).detach().cpu()
 
-            aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
-            srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
-            srgb_hwc = torch.clamp(srgb_hwc, 0.0, 1.0)
-            dequant_reference_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
+            if apply_random_look:
+                # Apply CDL grading if requested
+                look = rfi.build_look(look_mode, slope, offset, power, saturation)
+                cdl_processor = rfi.GPUCDLProcessor(device=device)
+                aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
+                srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
+                srgb_hwc = torch.clamp(srgb_hwc, 0.0, 1.0)
+                dequant_reference_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
+            else:
+                # Use clean reference as dequant reference if no grading
+                srgb_hwc = clean_srgb_hwc
+                dequant_reference_chw = clean_reference_chw.clone()
+
             srgb_hwc = torch.round(srgb_hwc * 255.0) / 255.0
             dequant_input_override_chw = srgb_hwc.permute(2, 0, 1)
 
@@ -508,6 +517,7 @@ def _run_pipeline_from_ui(
 	output_name: str,
 	save_plot: bool,
 	input_is_aces: bool,
+	apply_random_look: bool,
 	seed: int,
 	crop_size: int,
 	keep_padding: bool,
@@ -523,6 +533,7 @@ def _run_pipeline_from_ui(
 		output_name=output_name,
 		save_plot=save_plot,
 		input_is_aces=input_is_aces,
+		apply_random_look=apply_random_look,
 		seed=seed,
 		crop_size=crop_size,
 		keep_padding=keep_padding,
@@ -616,135 +627,197 @@ def _get_download_zip(
 example_images, _thumbnail_to_original = _prepare_gallery_images()
 
 with gr.Blocks(title="LuminaScale Full Inference") as demo:
-	gr.Markdown("# LuminaScale Gradio Inference")
-	gr.Markdown("Run dequantization followed by ACES mapping using local checkpoints.")
+    gr.Markdown("# LuminaScale Gradio Inference")
+    gr.Markdown("Run dequantization followed by ACES mapping using local checkpoints.")
 
-	with gr.Row():
-		with gr.Column(scale=1):
-			gr.Markdown("## Select input image \n Upload an image or select from gallery.")
-			selected_input_path = gr.State(None)
+    with gr.Row():
+        with gr.Column(scale=1):
+            gr.Markdown(
+                "## Select input image \n Upload an image or select from gallery."
+            )
+            selected_input_path = gr.State(None)
 
-			input_upload = gr.File(label="Upload input image (EXR, JPG, PNG, etc.)", type="filepath")
-			input_gallery = gr.Gallery(example_images, label="Example inputs", columns=1, allow_preview=False)
-		with gr.Column(scale=2):
-			with gr.Column():
-				gr.Markdown("## Input Image \n ")
-				input_image = gr.Image(label="Selected input preview", type="filepath", interactive=False, value=None)
-				gr.Markdown("## Params")
-			
-			with gr.Row():
-				input_is_aces = gr.Checkbox(label="Input is ACES EXR", value=True)
-				save_plot = gr.Checkbox(label="Save dashboard plot", value=True)
-				keep_padding = gr.Checkbox(label="Keep alignment padding", value=False)
-			
-			with gr.Row():
-				output_name = gr.Textbox(label="Output filename", value="")
+            input_upload = gr.File(
+                label="Upload input image (EXR, JPG, PNG, etc.)", type="filepath"
+            )
+            input_gallery = gr.Gallery(
+                example_images, label="Example inputs", columns=1, allow_preview=False
+            )
+        with gr.Column(scale=2):
+            with gr.Column():
+                gr.Markdown("## Input Image \n ")
+                input_image = gr.Image(
+                    label="Selected input preview",
+                    type="filepath",
+                    interactive=False,
+                    value=None,
+                )
+                gr.Markdown("## Params")
+
+            with gr.Row():
+                input_is_aces = gr.Checkbox(label="Input is ACES EXR", value=True)
+                apply_random_look = gr.Checkbox(label="Apply random CDL look", value=False)
+                save_plot = gr.Checkbox(label="Save dashboard plot", value=True)
+                keep_padding = gr.Checkbox(label="Keep alignment padding", value=False)
+
+            with gr.Row():
+                seed = gr.Number(
+                    label="Seed (controls random CDL look)", value=9, precision=0
+                )
+                crop_size = gr.Number(
+                    label="Crop size (0=disable)", value=0, precision=0
+                )
+                max_side = gr.Number(
+                    label="Max side (0=disable)", value=1024, precision=0
+                )
+
+            with gr.Row():
+                output_name = gr.Textbox(label="Output filename", value="")
 
 
-			with gr.Row():
-				seed = gr.Number(label="Seed", value=9, precision=0)
-				crop_size = gr.Number(label="Crop size (0=disable)", value=0, precision=0)
-				max_side = gr.Number(label="Max side (0=disable)", value=1024, precision=0)
+            run_button = gr.Button("Run full inference", variant="primary")
 
-			run_button = gr.Button("Run full inference", variant="primary")
-	
-	with gr.Column():
-		gr.Markdown("## Output")
-		with gr.Row(scale=1):
-			slider_dropdown_1 = gr.Dropdown(value=DEFAULT_SLIDER_SELECTIONS[0], choices=list(OUTPUT_DISPLAY_ORDER), label="compare image 1", info="first image for comparison.")
-			slider_dropdown_2 = gr.Dropdown(value=DEFAULT_SLIDER_SELECTIONS[1], choices=list(OUTPUT_DISPLAY_ORDER), label="compare image 2", info="second image for comparison.")
-		img_slider = gr.ImageSlider(label="image slider", type="filepath")
-		plot_output = gr.Image(label="Dashboard plot", type="filepath")
-	
-	with gr.Column():
-		gr.Markdown("## Download")
-		download_checkbox_group = gr.CheckboxGroup(value=list(DEFAULT_DOWNLOAD_SELECTIONS), choices=list(OUTPUT_DISPLAY_ORDER), label="Select downloads", info="Select which outputs to download.")
-		download_button = gr.DownloadButton(label="Download selected outputs") 
-	
-	
-	
-	status_output = gr.Textbox(label="Status", lines=12)
-	
-	# State variable to store outputs catalog for use in callbacks
-	outputs_catalog = gr.State({})
-	
-	def _set_selected_input(source_path: object) -> tuple[str, str]:
-		LOGGER.info("Received UI selection payload type=%s value=%r", type(source_path).__name__, source_path)
-		resolved_source_path = _normalize_gradio_image_path(source_path).strip()
-		LOGGER.info("Normalized UI selection path=%s", resolved_source_path)
-		if not resolved_source_path:
-			raise gr.Error("No input image selected", duration=5)
-		preview_path = _preview_path_for_input(resolved_source_path)
-		LOGGER.info("Selection ready preview=%s input=%s", preview_path, resolved_source_path)
-		return preview_path, resolved_source_path
+    with gr.Column():
+        gr.Markdown("## Output")
+        with gr.Row(scale=1):
+            slider_dropdown_1 = gr.Dropdown(
+                value=DEFAULT_SLIDER_SELECTIONS[0],
+                choices=list(OUTPUT_DISPLAY_ORDER),
+                label="compare image 1",
+                info="first image for comparison.",
+            )
+            slider_dropdown_2 = gr.Dropdown(
+                value=DEFAULT_SLIDER_SELECTIONS[1],
+                choices=list(OUTPUT_DISPLAY_ORDER),
+                label="compare image 2",
+                info="second image for comparison.",
+            )
+        img_slider = gr.ImageSlider(label="image slider", type="filepath")
+        plot_output = gr.Image(label="Dashboard plot", type="filepath")
 
-	def _gallery_to_input_path(event: gr.SelectData) -> tuple[str, str]:
-		selected_index = event.index
-		LOGGER.info("Gallery selection event index=%r value_type=%s", selected_index, type(event.value).__name__)
-		if selected_index is None:
-			raise gr.Error("No gallery image selected", duration=5)
-		selected_idx = int(selected_index)
-		if not (0 <= selected_idx < len(example_images)):
-			raise gr.Error("Gallery selection out of range", duration=5)
-		selected_path = example_images[selected_idx]
-		# Map thumbnail back to original EXR if needed
-		if selected_path in _thumbnail_to_original:
-			actual_input_path = _thumbnail_to_original[selected_path]
-			LOGGER.info("Gallery resolved thumbnail=%s to original=%s", selected_path, actual_input_path)
-		else:
-			actual_input_path = selected_path
-			LOGGER.info("Gallery resolved path=%s", actual_input_path)
-		return _set_selected_input(actual_input_path)
+    with gr.Column():
+        gr.Markdown("## Download")
+        download_checkbox_group = gr.CheckboxGroup(
+            value=list(DEFAULT_DOWNLOAD_SELECTIONS),
+            choices=list(OUTPUT_DISPLAY_ORDER),
+            label="Select downloads",
+            info="Select which outputs to download.",
+        )
+        download_button = gr.DownloadButton(label="Download selected outputs")
 
-	input_gallery.select(fn=_gallery_to_input_path, outputs=[input_image, selected_input_path])
-	input_upload.select(fn=_set_selected_input, inputs=input_upload, outputs=[input_image, selected_input_path])
-	input_upload.upload(fn=_set_selected_input, inputs=input_upload, outputs=[input_image, selected_input_path])
+    status_output = gr.Textbox(label="Status", lines=12)
 
-	output_dir = str(DEFAULT_OUTPUT_DIR)
+    # State variable to store outputs catalog for use in callbacks
+    outputs_catalog = gr.State({})
 
-	run_event = run_button.click(
-		fn=_run_pipeline_from_ui,
-		inputs=[
-			selected_input_path,
-			output_name,
-			save_plot,
-			input_is_aces,
-			seed,
-			crop_size,
-			keep_padding,
-			max_side,
-		],
-		outputs=[status_output, gr.File(visible=False), gr.File(visible=False), plot_output, outputs_catalog],
-	)
+    def _set_selected_input(source_path: object) -> tuple[str, str]:
+        LOGGER.info(
+            "Received UI selection payload type=%s value=%r",
+            type(source_path).__name__,
+            source_path,
+        )
+        resolved_source_path = _normalize_gradio_image_path(source_path).strip()
+        LOGGER.info("Normalized UI selection path=%s", resolved_source_path)
+        if not resolved_source_path:
+            raise gr.Error("No input image selected", duration=5)
+        preview_path = _preview_path_for_input(resolved_source_path)
+        LOGGER.info(
+            "Selection ready preview=%s input=%s", preview_path, resolved_source_path
+        )
+        return preview_path, resolved_source_path
 
-	# Wire slider dropdown changes to update slider images
-	def _update_slider(dropdown1: str, dropdown2: str, catalog: dict[str, str]) -> tuple[str, str]:
-		"""Callback to update slider when dropdowns change."""
-		return _get_slider_images(dropdown1, dropdown2, catalog)
+    def _gallery_to_input_path(event: gr.SelectData) -> tuple[str, str]:
+        selected_index = event.index
+        LOGGER.info(
+            "Gallery selection event index=%r value_type=%s",
+            selected_index,
+            type(event.value).__name__,
+        )
+        if selected_index is None:
+            raise gr.Error("No gallery image selected", duration=5)
+        selected_idx = int(selected_index)
+        if not (0 <= selected_idx < len(example_images)):
+            raise gr.Error("Gallery selection out of range", duration=5)
+        selected_path = example_images[selected_idx]
+        # Map thumbnail back to original EXR if needed
+        if selected_path in _thumbnail_to_original:
+            actual_input_path = _thumbnail_to_original[selected_path]
+            LOGGER.info(
+                "Gallery resolved thumbnail=%s to original=%s",
+                selected_path,
+                actual_input_path,
+            )
+        else:
+            actual_input_path = selected_path
+            LOGGER.info("Gallery resolved path=%s", actual_input_path)
+        return _set_selected_input(actual_input_path)
 
-	run_event.success(
+    input_gallery.select(
+        fn=_gallery_to_input_path, outputs=[input_image, selected_input_path]
+    )
+    input_upload.select(
+        fn=_set_selected_input,
+        inputs=input_upload,
+        outputs=[input_image, selected_input_path],
+    )
+    input_upload.upload(
+        fn=_set_selected_input,
+        inputs=input_upload,
+        outputs=[input_image, selected_input_path],
+    )
+
+    output_dir = str(DEFAULT_OUTPUT_DIR)
+
+    run_event = run_button.click(
+        fn=_run_pipeline_from_ui,
+        inputs=[
+            selected_input_path,
+            output_name,
+            save_plot,
+            input_is_aces,
+            apply_random_look,
+            seed,
+            crop_size,
+            keep_padding,
+            max_side,
+        ],
+        outputs=[
+            status_output,
+            gr.File(visible=False),
+            gr.File(visible=False),
+            plot_output,
+            outputs_catalog,
+        ],
+    )
+
+    # Wire slider dropdown changes to update slider images
+    def _update_slider(dropdown1: str, dropdown2: str, catalog: dict[str, str]) -> tuple[str, str]:
+        """Callback to update slider when dropdowns change."""
+        return _get_slider_images(dropdown1, dropdown2, catalog)
+
+    run_event.success(
 		fn=_sync_output_controls,
 		inputs=[outputs_catalog],
 		outputs=[slider_dropdown_1, slider_dropdown_2, img_slider, download_checkbox_group],
 	)
 
-	slider_dropdown_1.change(
+    slider_dropdown_1.change(
 		fn=_update_slider,
 		inputs=[slider_dropdown_1, slider_dropdown_2, outputs_catalog],
 		outputs=[img_slider],
 	)
-	slider_dropdown_2.change(
+    slider_dropdown_2.change(
 		fn=_update_slider,
 		inputs=[slider_dropdown_1, slider_dropdown_2, outputs_catalog],
 		outputs=[img_slider],
 	)
 
-	# Wire download button - returns file path for download
-	def _handle_download_request(selected: list[str], catalog: dict[str, str]) -> str | None:
-		"""Wrapper to handle download request and return file path."""
-		return _get_download_zip(selected, catalog)
-	
-	download_button.click(
+    # Wire download button - returns file path for download
+    def _handle_download_request(selected: list[str], catalog: dict[str, str]) -> str | None:
+        """Wrapper to handle download request and return file path."""
+        return _get_download_zip(selected, catalog)
+
+    download_button.click(
 		fn=_handle_download_request,
 		inputs=[download_checkbox_group, outputs_catalog],
 		outputs=download_button,

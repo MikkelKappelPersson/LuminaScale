@@ -90,14 +90,19 @@ def _normalize_gradio_image_path(value: object) -> str:
 	if isinstance(value, Path):
 		return str(value)
 	if isinstance(value, dict):
+		# Handle gr.Image dict structure: {'image': {'path': '/tmp/xyz'}}
 		image_value = value.get("image")
 		if isinstance(image_value, dict):
 			path_value = image_value.get("path")
 			if isinstance(path_value, str):
 				return path_value
-		path_value = value.get("path")
-		if isinstance(path_value, str):
-			return path_value
+		
+		# Handle gr.File dict structure and other variants
+		# gr.File may return: {'name': 'file.ext', ...} or {'path': '/tmp/xyz'}
+		for key in ("path", "file_path", "name", "tmp_path", "tmpfile", "tempfile"):
+			path_value = value.get(key)
+			if isinstance(path_value, str) and path_value.strip():
+				return path_value
 	return str(value)
 
 
@@ -619,7 +624,7 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 			gr.Markdown("## Select input image \n Upload an image or select from gallery.")
 			selected_input_path = gr.State(None)
 
-			input_upload = gr.Image(label="Upload input image", type="filepath", )
+			input_upload = gr.File(label="Upload input image (EXR, JPG, PNG, etc.)", type="filepath")
 			input_gallery = gr.Gallery(example_images, label="Example inputs", columns=1, allow_preview=False)
 		with gr.Column(scale=2):
 			with gr.Column():

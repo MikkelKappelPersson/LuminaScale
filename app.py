@@ -21,6 +21,16 @@ from src.luminascale.utils.output_catalog import OutputCatalog
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "inference"
 DEBUG_LOG_PATH = DEFAULT_OUTPUT_DIR / "gradio_debug.log"
+OUTPUT_DISPLAY_ORDER: tuple[str, ...] = (
+	"input",
+	"dequant output",
+	"full output",
+	"full output(srgb)",
+	"reference",
+	"reference(srgb)",
+)
+DEFAULT_SLIDER_SELECTIONS: tuple[str, str] = ("full output(srgb)", "reference(srgb)")
+DEFAULT_DOWNLOAD_SELECTIONS: tuple[str, ...] = ("input", "full output", "reference")
 
 
 LOGGER = logging.getLogger("luminascale.gradio")
@@ -83,6 +93,47 @@ def _normalize_gradio_image_path(value: object) -> str:
 		if isinstance(path_value, str):
 			return path_value
 	return str(value)
+
+
+def _catalog_display_names(outputs_catalog: dict[str, str]) -> list[str]:
+	"""Return the available output display names in a stable, preferred order."""
+	return [name for name in OUTPUT_DISPLAY_ORDER if name in outputs_catalog]
+
+
+def _catalog_download_defaults(outputs_catalog: dict[str, str]) -> list[str]:
+	"""Return the preferred default download selections that exist in the catalog."""
+	return [name for name in DEFAULT_DOWNLOAD_SELECTIONS if name in outputs_catalog]
+
+
+def _catalog_slider_defaults(outputs_catalog: dict[str, str]) -> tuple[str, str]:
+	"""Choose valid default dropdown values for the slider from the current catalog."""
+	available_names = _catalog_display_names(outputs_catalog)
+	if not available_names:
+		return "", ""
+
+	left_default, right_default = DEFAULT_SLIDER_SELECTIONS
+	left_value = left_default if left_default in outputs_catalog else available_names[0]
+	if right_default in outputs_catalog:
+		right_value = right_default
+	elif len(available_names) > 1:
+		right_value = available_names[1]
+	else:
+		right_value = available_names[0]
+	return left_value, right_value
+
+
+def _sync_output_controls(outputs_catalog: dict[str, str]) -> tuple[object, object, tuple[str, str], object]:
+	"""Update dropdown choices/defaults and refresh the image slider after inference."""
+	choices = _catalog_display_names(outputs_catalog)
+	left_value, right_value = _catalog_slider_defaults(outputs_catalog)
+	slider_images = _get_slider_images(left_value, right_value, outputs_catalog)
+	download_defaults = _catalog_download_defaults(outputs_catalog)
+	return (
+		gr.update(choices=choices, value=left_value),
+		gr.update(choices=choices, value=right_value),
+		slider_images,
+		gr.update(choices=choices, value=download_defaults),
+	)
 
 
 def run_pipeline(
@@ -592,14 +643,14 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 	with gr.Column():
 		gr.Markdown("## Output")
 		with gr.Row(scale=1):
-			slider_dropdown_1 = gr.Dropdown(value="full output(srgb)", choices=["input", "full output", "full output(srgb)", "dequant output", "reference", "reference(srgb)"], label="compare image 1", info="first image for comparison.")
-			slider_dropdown_2 = gr.Dropdown(value="reference(srgb)", choices=["input", "full output", "full output(srgb)", "dequant output", "reference", "reference(srgb)"], label="compare image 2", info="second image for comparison.")
-		img_slider = gr.ImageSlider(label="Predicted ACES EXR (sRGB)", type="filepath")
+			slider_dropdown_1 = gr.Dropdown(value=DEFAULT_SLIDER_SELECTIONS[0], choices=list(OUTPUT_DISPLAY_ORDER), label="compare image 1", info="first image for comparison.")
+			slider_dropdown_2 = gr.Dropdown(value=DEFAULT_SLIDER_SELECTIONS[1], choices=list(OUTPUT_DISPLAY_ORDER), label="compare image 2", info="second image for comparison.")
+		img_slider = gr.ImageSlider(label="image slider", type="filepath")
 		plot_output = gr.Image(label="Dashboard plot", type="filepath")
 	
 	with gr.Column():
 		gr.Markdown("## Download")
-		download_checkbox_group = gr.CheckboxGroup(value=["input","full output", "reference"], choices=["input", "full output", "full output(srgb)", "dequant output", "reference", "reference(srgb)"], label="Select downloads", info="Select which outputs to download.")
+		download_checkbox_group = gr.CheckboxGroup(value=list(DEFAULT_DOWNLOAD_SELECTIONS), choices=list(OUTPUT_DISPLAY_ORDER), label="Select downloads", info="Select which outputs to download.")
 		download_button = gr.DownloadButton(label="Download selected outputs") 
 	
 	
@@ -643,7 +694,7 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 
 	output_dir = str(DEFAULT_OUTPUT_DIR)
 
-	run_button.click(
+	run_event = run_button.click(
 		fn=_run_pipeline_from_ui,
 		inputs=[
 			selected_input_path,
@@ -659,11 +710,15 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 	)
 
 	# Wire slider dropdown changes to update slider images
-	def _update_slider(*args):
+	def _update_slider(dropdown1: str, dropdown2: str, catalog: dict[str, str]) -> tuple[str, str]:
 		"""Callback to update slider when dropdowns change."""
-		# args order: dropdown1, dropdown2, catalog
-		dropdown1, dropdown2, catalog = args[0], args[1], args[2]
 		return _get_slider_images(dropdown1, dropdown2, catalog)
+
+	run_event.success(
+		fn=_sync_output_controls,
+		inputs=[outputs_catalog],
+		outputs=[slider_dropdown_1, slider_dropdown_2, img_slider, download_checkbox_group],
+	)
 
 	slider_dropdown_1.change(
 		fn=_update_slider,

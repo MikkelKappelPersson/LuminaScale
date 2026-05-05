@@ -133,17 +133,19 @@ def _catalog_slider_defaults(outputs_catalog: dict[str, str]) -> tuple[str, str]
 	return left_value, right_value
 
 
-def _sync_output_controls(outputs_catalog: dict[str, str]) -> tuple[object, object, tuple[str, str], object]:
+def _sync_output_controls(outputs_catalog: dict[str, str]) -> tuple[object, object, tuple[str, str], object, list[str]]:
 	"""Update dropdown choices/defaults and refresh the image slider after inference."""
 	choices = _catalog_display_names(outputs_catalog)
 	left_value, right_value = _catalog_slider_defaults(outputs_catalog)
 	slider_images = _get_slider_images(left_value, right_value, outputs_catalog)
 	download_defaults = _catalog_download_defaults(outputs_catalog)
+	LOGGER.info("Syncing output controls with download defaults: %s", download_defaults)
 	return (
 		gr.update(choices=choices, value=left_value),
 		gr.update(choices=choices, value=right_value),
 		slider_images,
 		gr.update(choices=choices, value=download_defaults),
+		download_defaults,
 	)
 
 
@@ -697,18 +699,23 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 
     with gr.Column():
         gr.Markdown("## Download")
-        download_checkbox_group = gr.CheckboxGroup(
-            value=list(DEFAULT_DOWNLOAD_SELECTIONS),
-            choices=list(OUTPUT_DISPLAY_ORDER),
-            label="Select downloads",
-            info="Select which outputs to download.",
-        )
-        download_button = gr.DownloadButton(label="Download selected outputs")
+        with gr.Row(scale=1):
+            download_checkbox_group = gr.CheckboxGroup(
+                value=list(DEFAULT_DOWNLOAD_SELECTIONS),
+                choices=list(OUTPUT_DISPLAY_ORDER),
+                label="Select downloads",
+                info="Select which outputs to download.",
+            )
+            prepare_download_button = gr.Button("Prepare Download", variant="secondary")
+        prepared_zip_file = gr.File(label="Download", interactive=False)
 
     status_output = gr.Textbox(label="Status", lines=12)
 
     # State variable to store outputs catalog for use in callbacks
     outputs_catalog = gr.State({})
+    
+    # State variable to track selected downloads (explicitly updated on checkbox changes)
+    selected_downloads = gr.State(list(DEFAULT_DOWNLOAD_SELECTIONS))
 
     def _set_selected_input(source_path: object) -> tuple[str, str]:
         LOGGER.info(
@@ -798,7 +805,7 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
     run_event.success(
 		fn=_sync_output_controls,
 		inputs=[outputs_catalog],
-		outputs=[slider_dropdown_1, slider_dropdown_2, img_slider, download_checkbox_group],
+		outputs=[slider_dropdown_1, slider_dropdown_2, img_slider, download_checkbox_group, selected_downloads],
 	)
 
     slider_dropdown_1.change(
@@ -813,15 +820,41 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 	)
 
     # Wire download button - returns file path for download
-    def _handle_download_request(selected: list[str], catalog: dict[str, str]) -> str | None:
-        """Wrapper to handle download request and return file path."""
-        return _get_download_zip(selected, catalog)
+    def _handle_download_request(selected: list[str], catalog: dict[str, str]) -> str:
+        """Create zip and return zip_path."""
+        LOGGER.info("Prepare button clicked. Selected items: %s, Catalog keys: %s", selected, list(catalog.keys()))
+        if not catalog:
+            LOGGER.warning("No inference results available. Run inference first.")
+            return ""
+        if not selected:
+            LOGGER.warning("No outputs selected. Check at least one output.")
+            return ""
+        
+        zip_path = _get_download_zip(selected, catalog)
+        if zip_path:
+            LOGGER.info("Download ready: %s", Path(zip_path).name)
+            return zip_path
+        else:
+            LOGGER.error("Failed to create download zip. Check logs.")
+            return ""
 
-    download_button.click(
-		fn=_handle_download_request,
-		inputs=[download_checkbox_group, outputs_catalog],
-		outputs=download_button,
-	)
+    # Update selected_downloads state whenever checkbox group changes
+    def _update_selected_downloads(checked_items: list[str]) -> list[str]:
+        """Update the selected downloads state when user changes checkbox group."""
+        LOGGER.info("Checkbox group changed by user, updated selected items: %s", checked_items)
+        return checked_items
+
+    download_checkbox_group.change(
+        fn=_update_selected_downloads,
+        inputs=download_checkbox_group,
+        outputs=selected_downloads,
+    )
+
+    prepare_download_button.click(
+        fn=_handle_download_request,
+        inputs=[selected_downloads, outputs_catalog],
+        outputs=[prepared_zip_file],
+    )
 
 
 if __name__ == "__main__":
@@ -830,4 +863,4 @@ if __name__ == "__main__":
 		mapper_checkpoint="checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
 		dequant_checkpoint="checkpoints/last.ckpt"
 	)
-	demo.launch(server_name="127.0.0.1", server_port=7860, share=True)
+	demo.launch(server_name="127.0.0.1", server_port=7860, share=False)

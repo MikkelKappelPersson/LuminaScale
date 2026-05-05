@@ -2,7 +2,18 @@
 
 Machine learning model for bit-depth expansion and ACES color space normalization.
 
-## login to ai-cloud hpc
+## Quick Start
+
+- **New to LuminaScale?** → See [WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) for a step-by-step guide on Windows
+- **Running on HPC?** → Continue to [AI-Cloud Setup](#hpc-setup-ai-cloud) below
+
+---
+
+## HPC Setup (AI-Cloud)
+
+For advanced users running large-scale training on the AI-Cloud HPC cluster:
+
+### login to ai-cloud hpc
 
 ```bash
 ssh aicloud

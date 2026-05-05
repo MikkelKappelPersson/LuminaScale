@@ -40,6 +40,12 @@ if not LOGGER.handlers:
 	_stream_handler = logging.StreamHandler()
 	_stream_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
 	LOGGER.addHandler(_stream_handler)
+	# Ensure the output directory for logs exists before creating the FileHandler
+	try:
+		DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+	except Exception:
+		# If directory creation fails, fall back to stream-only logging but continue
+		LOGGER.exception("Failed to create log directory: %s", DEBUG_LOG_PATH.parent)
 	_file_handler = logging.FileHandler(DEBUG_LOG_PATH, encoding="utf-8")
 	_file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
 	LOGGER.addHandler(_file_handler)
@@ -137,137 +143,136 @@ def _sync_output_controls(outputs_catalog: dict[str, str]) -> tuple[object, obje
 
 
 def run_pipeline(
-
-	input_path: str,
-	output_dir: str,
-	output_name: str,
-	save_plot: bool,
-	input_is_aces: bool,
-	seed: int,
-	crop_size: int,
-	keep_padding: bool,
-	max_side: int,
-	# Defaulted internal parameters (removed from UI)
-	dequant_output_name: str="",
-	save_dequant: bool=False,
-	mapper_checkpoint: str="outputs/training/mapper/20260425_231537/checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
-	dequant_checkpoint: str="outputs/training/dequant/20260422_120606_L1=1.0_L2=0.0_CB=1.0_EA=0.0_TV-huber=0.0/checkpoints/last.ckpt",
-	look_mode: str = "random",
-	slope: str = "1.0,1.0,1.0",
-	offset: str = "0.0,0.0,0.0",
-	power: str = "1.0,1.0,1.0",
-	saturation: float = 1.0,
-	align_multiple: int = 64,
-	num_luts: int = 3,
-	lut_dim: int = 33,
-	num_lap: int = 3,
-	num_residual_blocks: int = 5,
-	dequant_channels: int = 32,
-	device_name: str = "cuda",
-	amp_enabled: bool = False,
-	amp_dtype_name: str = "fp16",
+    input_path: str,
+    output_dir: str,
+    output_name: str,
+    save_plot: bool,
+    input_is_aces: bool,
+    seed: int,
+    crop_size: int,
+    keep_padding: bool,
+    max_side: int,
+    # Defaulted internal parameters (removed from UI)
+    dequant_output_name: str = "",
+    save_dequant: bool = False,
+    mapper_checkpoint: str = "checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
+    dequant_checkpoint: str = "checkpoints/last.ckpt",
+    look_mode: str = "random",
+    slope: str = "1.0,1.0,1.0",
+    offset: str = "0.0,0.0,0.0",
+    power: str = "1.0,1.0,1.0",
+    saturation: float = 1.0,
+    align_multiple: int = 64,
+    num_luts: int = 3,
+    lut_dim: int = 33,
+    num_lap: int = 3,
+    num_residual_blocks: int = 5,
+    dequant_channels: int = 32,
+    device_name: str = "cuda",
+    amp_enabled: bool = False,
+    amp_dtype_name: str = "fp16",
 ) -> tuple[str, str | None, str | None, str | None, dict[str, str]]:
-	# --- Pre-inference validation (outside try-except to allow gr.Error visibility) ---
-	input_image_path = Path(input_path).expanduser().resolve()
-	if not input_image_path.exists():
-		raise gr.Error(f"Input image does not exist: {input_image_path}", duration=5)
+    # --- Pre-inference validation (outside try-except to allow gr.Error visibility) ---
+    input_image_path = Path(input_path).expanduser().resolve()
+    if not input_image_path.exists():
+        raise gr.Error(f"Input image does not exist: {input_image_path}", duration=5)
 
-	mapper_ckpt = Path(mapper_checkpoint).expanduser().resolve()
-	dequant_ckpt = Path(dequant_checkpoint).expanduser().resolve()
-	if not mapper_ckpt.exists():
-		raise gr.Error(f"Mapper checkpoint does not exist: {mapper_ckpt}", duration=5)
-	if not dequant_ckpt.exists():
-		raise gr.Error(f"Dequant checkpoint does not exist: {dequant_ckpt}", duration=5)
+    mapper_ckpt = Path(mapper_checkpoint).expanduser().resolve()
+    dequant_ckpt = Path(dequant_checkpoint).expanduser().resolve()
+    if not mapper_ckpt.exists():
+        raise gr.Error(f"Mapper checkpoint does not exist: {mapper_ckpt}", duration=5)
+    if not dequant_ckpt.exists():
+        raise gr.Error(f"Dequant checkpoint does not exist: {dequant_ckpt}", duration=5)
 
-	if input_is_aces:
-		if input_image_path.suffix.lower() != ".exr":
-			raise gr.Error("input_is_aces requires an EXR input", duration=5)
+    if input_is_aces:
+        if input_image_path.suffix.lower() != ".exr":
+            raise gr.Error("input_is_aces requires an EXR input", duration=5)
 
-	if look_mode == "manual":
-		_parse_triplet(slope, "slope")
-		_parse_triplet(offset, "offset")
-		_parse_triplet(power, "power")
+    if look_mode == "manual":
+        _parse_triplet(slope, "slope")
+        _parse_triplet(offset, "offset")
+        _parse_triplet(power, "power")
 
-	try:
-		LOGGER.info("Starting inference run")
-		LOGGER.info("input=%s output_dir=%s", input_path, output_dir)
-		LOGGER.info("mapper_checkpoint=%s", mapper_checkpoint)
-		LOGGER.info("dequant_checkpoint=%s", dequant_checkpoint)
-		random.seed(seed)
-		np.random.seed(seed)
-		torch.manual_seed(seed)
+    try:
+        LOGGER.info("Starting inference run")
+        LOGGER.info("input=%s output_dir=%s", input_path, output_dir)
+        LOGGER.info("mapper_checkpoint=%s", mapper_checkpoint)
+        LOGGER.info("dequant_checkpoint=%s", dequant_checkpoint)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
-		if device_name == "cuda" and not torch.cuda.is_available():
-			device_name = "cpu"
+        if device_name == "cuda" and not torch.cuda.is_available():
+            device_name = "cpu"
 
-		device = torch.device(device_name)
-		amp_dtype = torch.float16 if amp_dtype_name == "fp16" else torch.bfloat16
-		use_amp = bool(amp_enabled and device.type == "cuda")
+        device = torch.device(device_name)
+        amp_dtype = torch.float16 if amp_dtype_name == "fp16" else torch.bfloat16
+        use_amp = bool(amp_enabled and device.type == "cuda")
 
-		ocio_config = PROJECT_ROOT / "config" / "aces" / "studio-config.ocio"
-		if ocio_config.exists():
-			os.environ["OCIO"] = str(ocio_config)
+        ocio_config = PROJECT_ROOT / "config" / "aces" / "studio-config.ocio"
+        if ocio_config.exists():
+            os.environ["OCIO"] = str(ocio_config)
 
-		out_dir = Path(output_dir).expanduser().resolve() if output_dir else DEFAULT_OUTPUT_DIR
-		out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = Path(output_dir).expanduser().resolve() if output_dir else DEFAULT_OUTPUT_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-		# Initialize output catalog for tracking all inference outputs
-		catalog = OutputCatalog(out_dir)
+        # Initialize output catalog for tracking all inference outputs
+        catalog = OutputCatalog(out_dir)
 
-		input_stem = input_image_path.stem
-		pred_name = output_name.strip() if output_name.strip() else f"{input_stem}_out.exr"
-		deq_name = dequant_output_name.strip() if dequant_output_name.strip() else f"{input_stem}_dequant.exr"
-		plot_name = f"{input_stem}_plot.png"
-		preview_name = f"{input_stem}_mapper_preview.png"
+        input_stem = input_image_path.stem
+        pred_name = output_name.strip() if output_name.strip() else f"{input_stem}_out.exr"
+        deq_name = dequant_output_name.strip() if dequant_output_name.strip() else f"{input_stem}_dequant.exr"
+        plot_name = f"{input_stem}_plot.png"
+        preview_name = f"{input_stem}_mapper_preview.png"
 
-		resolved_pred_aces_output = out_dir / pred_name
-		resolved_dequant_output = out_dir / deq_name
-		resolved_plot_output = out_dir / plot_name
-		resolved_preview_output = out_dir / preview_name
+        resolved_pred_aces_output = out_dir / pred_name
+        resolved_dequant_output = out_dir / deq_name
+        resolved_plot_output = out_dir / plot_name
+        resolved_preview_output = out_dir / preview_name
 
-		look = None
-		dequant_input_override_chw: torch.Tensor | None = None
-		clean_reference_chw: torch.Tensor | None = None
-		dequant_reference_chw: torch.Tensor | None = None
+        look = None
+        dequant_input_override_chw: torch.Tensor | None = None
+        clean_reference_chw: torch.Tensor | None = None
+        dequant_reference_chw: torch.Tensor | None = None
 
-		if input_is_aces:
-			LOGGER.info("Preparing ACES reference input")
-			look = rfi.build_look(look_mode, slope, offset, power, saturation)
-			aces_chw = rfi.image_to_tensor(input_image_path).to(device=device, dtype=torch.float32)
-			aces_hwc = aces_chw.permute(1, 2, 0)
+        if input_is_aces:
+            LOGGER.info("Preparing ACES reference input")
+            look = rfi.build_look(look_mode, slope, offset, power, saturation)
+            aces_chw = rfi.image_to_tensor(input_image_path).to(device=device, dtype=torch.float32)
+            aces_hwc = aces_chw.permute(1, 2, 0)
 
-			cdl_processor = rfi.GPUCDLProcessor(device=device)
-			transformer = rfi.ACESColorTransformer(device=device, use_lut=True)
+            cdl_processor = rfi.GPUCDLProcessor(device=device)
+            transformer = rfi.ACESColorTransformer(device=device, use_lut=True)
 
-			clean_srgb_hwc = transformer.aces_to_srgb_32f(aces_hwc.unsqueeze(0)).squeeze(0)
-			clean_srgb_hwc = torch.clamp(clean_srgb_hwc, 0.0, 1.0)
-			clean_reference_chw = clean_srgb_hwc.permute(2, 0, 1).detach().cpu()
+            clean_srgb_hwc = transformer.aces_to_srgb_32f(aces_hwc.unsqueeze(0)).squeeze(0)
+            clean_srgb_hwc = torch.clamp(clean_srgb_hwc, 0.0, 1.0)
+            clean_reference_chw = clean_srgb_hwc.permute(2, 0, 1).detach().cpu()
 
-			aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
-			srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
-			srgb_hwc = torch.clamp(srgb_hwc, 0.0, 1.0)
-			dequant_reference_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
-			srgb_hwc = torch.round(srgb_hwc * 255.0) / 255.0
-			dequant_input_override_chw = srgb_hwc.permute(2, 0, 1)
+            aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
+            srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
+            srgb_hwc = torch.clamp(srgb_hwc, 0.0, 1.0)
+            dequant_reference_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
+            srgb_hwc = torch.round(srgb_hwc * 255.0) / 255.0
+            dequant_input_override_chw = srgb_hwc.permute(2, 0, 1)
 
-		if save_dequant:
-			dequant_stage_output = resolved_dequant_output
-			temporary_dequant_path: Path | None = None
-		else:
-			temporary_dequant_path = out_dir / f"{input_stem}_dequant_tmp.exr"
-			dequant_stage_output = temporary_dequant_path
+        if save_dequant:
+            dequant_stage_output = resolved_dequant_output
+            temporary_dequant_path: Path | None = None
+        else:
+            temporary_dequant_path = out_dir / f"{input_stem}_dequant_tmp.exr"
+            dequant_stage_output = temporary_dequant_path
 
-		dequant_model = rfi.load_dequant_model_from_checkpoint(
+        dequant_model = rfi.load_dequant_model_from_checkpoint(
 			checkpoint_path=dequant_ckpt,
 			device=device,
 			channels=dequant_channels,
 		)
-		LOGGER.info("Loaded dequant model")
-		if use_amp:
-			dequant_model = dequant_model.to(dtype=amp_dtype)
+        LOGGER.info("Loaded dequant model")
+        if use_amp:
+            dequant_model = dequant_model.to(dtype=amp_dtype)
 
-		LOGGER.info("Running dequant inference")
-		_, dequant_input_chw_cpu, dequant_output_chw_cpu = rfi.run_dequant_inference(
+        LOGGER.info("Running dequant inference")
+        _, dequant_input_chw_cpu, dequant_output_chw_cpu = rfi.run_dequant_inference(
 			model=dequant_model,
 			input_path=input_image_path,
 			output_path=dequant_stage_output,
@@ -279,22 +284,22 @@ def run_pipeline(
 			input_chw_override=dequant_input_override_chw,
 		)
 
-		# Capture input and dequant output to catalog
-		catalog.add_tensor_output(
+        # Capture input and dequant output to catalog
+        catalog.add_tensor_output(
 			"input",
 			dequant_input_chw_cpu,
 			f"{input_stem}_input.jpg",
 			quality=95,
 		)
-		catalog.add_tensor_output(
+        catalog.add_tensor_output(
 			"dequant output",
 			dequant_output_chw_cpu,
 			f"{input_stem}_dequant.jpg",
 			quality=95,
 		)
-		LOGGER.info("Captured dequant stage outputs to catalog")
+        LOGGER.info("Captured dequant stage outputs to catalog")
 
-		mapper_model = rfi.load_model_from_checkpoint(
+        mapper_model = rfi.load_model_from_checkpoint(
 			checkpoint_path=mapper_ckpt,
 			device=device,
 			num_luts=num_luts,
@@ -302,12 +307,12 @@ def run_pipeline(
 			num_lap=num_lap,
 			num_residual_blocks=num_residual_blocks,
 		)
-		LOGGER.info("Loaded mapper model")
-		# Keep the mapper in float32: the spatial-frequency transformer uses
-		# complex ops that fail under ComplexHalf autocast on CUDA.
+        LOGGER.info("Loaded mapper model")
+        # Keep the mapper in float32: the spatial-frequency transformer uses
+        # complex ops that fail under ComplexHalf autocast on CUDA.
 
-		LOGGER.info("Running mapper inference")
-		pred_aces_chw_cpu, mapper_srgb_chw_cpu = rfi.run_mapper_inference_on_srgb(
+        LOGGER.info("Running mapper inference")
+        pred_aces_chw_cpu, mapper_srgb_chw_cpu = rfi.run_mapper_inference_on_srgb(
 			model=mapper_model,
 			input_srgb_chw=dequant_output_chw_cpu,
 			crop_size=crop_size,
@@ -317,8 +322,8 @@ def run_pipeline(
 			device=device,
 		)
 
-		# Capture full output (ACES EXR + sRGB JPG)
-		catalog.add_aces_output(
+        # Capture full output (ACES EXR + sRGB JPG)
+        catalog.add_aces_output(
 			"full output",
 			pred_aces_chw_cpu,
 			f"{input_stem}_out.exr",
@@ -326,34 +331,34 @@ def run_pipeline(
 			device,
 			quality=95,
 		)
-		LOGGER.info("Captured mapper ACES output to catalog")
+        LOGGER.info("Captured mapper ACES output to catalog")
 
-		rfi.write_exr(resolved_pred_aces_output, pred_aces_chw_cpu.numpy())
-		LOGGER.info("Saved predicted ACES EXR to %s", resolved_pred_aces_output)
-		_save_preview_png(mapper_srgb_chw_cpu, resolved_preview_output)
-		LOGGER.info("Saved mapper preview to %s", resolved_preview_output)
+        rfi.write_exr(resolved_pred_aces_output, pred_aces_chw_cpu.numpy())
+        LOGGER.info("Saved predicted ACES EXR to %s", resolved_pred_aces_output)
+        _save_preview_png(mapper_srgb_chw_cpu, resolved_preview_output)
+        LOGGER.info("Saved mapper preview to %s", resolved_preview_output)
 
-		# Capture reference output if input_is_aces
-		# Note: We save the clean (ungraded) reference ACES in EXR format
-		if input_is_aces:
-			# Reload ACES tensor for EXR export (reference should be the original clean ACES)
-			aces_original_chw = rfi.image_to_tensor(input_image_path).to(device=device, dtype=torch.float32)
-			catalog.add_reference_aces_output(
+        # Capture reference output if input_is_aces
+        # Note: We save the clean (ungraded) reference ACES in EXR format
+        if input_is_aces:
+            # Reload ACES tensor for EXR export (reference should be the original clean ACES)
+            aces_original_chw = rfi.image_to_tensor(input_image_path).to(device=device, dtype=torch.float32)
+            catalog.add_reference_aces_output(
 				aces_original_chw,
 				f"{input_stem}_reference.exr",
 				f"{input_stem}_reference_srgb.jpg",
 				device,
 				quality=95,
 			)
-			LOGGER.info("Captured reference ACES output to catalog")
+            LOGGER.info("Captured reference ACES output to catalog")
 
-		plot_path: str | None = None
-		if save_plot and input_is_aces:
-			LOGGER.info("Saving dashboard plot")
-			if dequant_reference_chw is None:
-				raise gr.Error("Expected dequant reference for dashboard", duration=5)
-			reference_for_dashboard = clean_reference_chw if input_is_aces else None
-			rfi.save_full_inference_dashboard(
+        plot_path: str | None = None
+        if save_plot and input_is_aces:
+            LOGGER.info("Saving dashboard plot")
+            if dequant_reference_chw is None:
+                raise gr.Error("Expected dequant reference for dashboard", duration=5)
+            reference_for_dashboard = clean_reference_chw if input_is_aces else None
+            rfi.save_full_inference_dashboard(
 				input_srgb_chw=dequant_input_chw_cpu,
 				dequant_srgb_chw=dequant_output_chw_cpu,
 				mapper_srgb_chw=mapper_srgb_chw_cpu,
@@ -361,13 +366,13 @@ def run_pipeline(
 				dequant_reference_srgb_chw=dequant_reference_chw,
 				save_path=resolved_plot_output,
 			)
-			plot_path = str(resolved_plot_output)
+            plot_path = str(resolved_plot_output)
 
-		if (not save_dequant) and temporary_dequant_path is not None and temporary_dequant_path.exists():
-			temporary_dequant_path.unlink()
-			LOGGER.info("Removed temporary dequant file")
+        if (not save_dequant) and temporary_dequant_path is not None and temporary_dequant_path.exists():
+            temporary_dequant_path.unlink()
+            LOGGER.info("Removed temporary dequant file")
 
-		summary_lines = [
+        summary_lines = [
 			"Inference completed.",
 			f"Input: {input_image_path}",
 			f"Predicted ACES EXR: {resolved_pred_aces_output}",
@@ -378,17 +383,17 @@ def run_pipeline(
 			f"Device: {device}",
 			f"AMP: {'enabled' if use_amp else 'disabled'} ({amp_dtype_name})",
 		]
-		if save_plot and not input_is_aces:
-			summary_lines.append("Dashboard was skipped because input_is_aces is disabled.")
-		summary_lines.append(f"Debug log: {DEBUG_LOG_PATH}")
+        if save_plot and not input_is_aces:
+            summary_lines.append("Dashboard was skipped because input_is_aces is disabled.")
+        summary_lines.append(f"Debug log: {DEBUG_LOG_PATH}")
 
-		dequant_path = str(resolved_dequant_output) if save_dequant else None
-		outputs_dict = catalog.get_catalog()
-		return "\n".join(summary_lines), str(resolved_pred_aces_output), dequant_path, plot_path, outputs_dict
+        dequant_path = str(resolved_dequant_output) if save_dequant else None
+        outputs_dict = catalog.get_catalog()
+        return "\n".join(summary_lines), str(resolved_pred_aces_output), dequant_path, plot_path, outputs_dict
 
-	except Exception as exc:  # noqa: BLE001
-		LOGGER.exception("Inference failed")
-		details = "\n".join(
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Inference failed")
+        details = "\n".join(
 			[
 				f"Inference failed: {exc}",
 				"",
@@ -396,8 +401,8 @@ def run_pipeline(
 				traceback.format_exc(),
 			]
 		)
-		details += f"\nDebug log: {DEBUG_LOG_PATH}"
-		return details, None, None, None, {}
+        details += f"\nDebug log: {DEBUG_LOG_PATH}"
+        return details, None, None, None, {}
 
 
 def _warmup_pipeline(
@@ -518,8 +523,6 @@ def _run_pipeline_from_ui(
 		keep_padding=keep_padding,
 		max_side=max_side,
 	)
-
-
 
 
 def _get_slider_images(
@@ -743,11 +746,10 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 	)
 
 
-
 if __name__ == "__main__":
 	# Run warmup before launching the UI to ensure CUDA kernels are initialized
 	_warmup_pipeline(
-		mapper_checkpoint="outputs/training/mapper/20260425_231537/checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
-		dequant_checkpoint="outputs/training/dequant/20260422_120606_L1=1.0_L2=0.0_CB=1.0_EA=0.0_TV-huber=0.0/checkpoints/last.ckpt"
+		mapper_checkpoint="checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
+		dequant_checkpoint="checkpoints/last.ckpt"
 	)
 	demo.launch(server_name="127.0.0.1", server_port=7860, share=True)

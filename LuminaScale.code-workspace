@@ -42,6 +42,10 @@
 			"/^python -m py_compile visualisations/validate_training_pairs\\.py src/luminascale/training/dequantization_trainer\\.py scripts/train_dequant_net\\.py src/luminascale/utils/dataset_pair_generator\\.py 2>&1 \\| head -50$/": {
 				"approve": true,
 				"matchCommandLine": true
+			},
+			"/^python -c \"from hydra import initialize, compose; from omegaconf import OmegaConf; initialize\\(config_path='configs', version_base='1\\.1'\\); cfg = compose\\(config_name='mapper_dev'\\); print\\('✓ Config loaded successfully'\\); print\\('Model params:', OmegaConf\\.to_container\\(cfg\\.model\\.params\\)\\)\"$/": {
+				"approve": true,
+				"matchCommandLine": true
 			}
 		}
 	}

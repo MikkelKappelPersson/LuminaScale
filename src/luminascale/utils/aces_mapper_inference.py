@@ -20,7 +20,6 @@ from luminascale.models.aces_mapper import ACESMapper
 from luminascale.utils.gpu_cdl_processor import GPUCDLProcessor
 from luminascale.utils.io import image_to_tensor, read_exr, write_exr
 from luminascale.utils.look_generator import CDLParameters, get_single_random_look
-from luminascale.utils.pytorch_aces_transformer import ACESColorTransformer
 
 
 def parse_triplet(value: str) -> tuple[float, float, float]:
@@ -180,18 +179,18 @@ def save_comparison_grid(
     )
 
     ax00 = fig.add_subplot(gs[0, 0])
-    ax00.imshow(input_np, aspect="auto")
-    ax00.set_title("Input sRGB", fontsize=10, fontweight="bold")
+    ax00.imshow(input_np, aspect="auto", vmin=0.0, vmax=1.0)
+    ax00.set_title("Input sRGB (CDL-graded)", fontsize=10, fontweight="bold")
     ax00.axis("off")
 
     ax01 = fig.add_subplot(gs[0, 1])
-    ax01.imshow(pred_np, aspect="auto")
+    ax01.imshow(pred_np, aspect="auto", vmin=0.0, vmax=1.0)
     ax01.set_title("Model Output", fontsize=10, fontweight="bold")
     ax01.axis("off")
 
     ax02 = fig.add_subplot(gs[0, 2])
-    ax02.imshow(ref_np, aspect="auto")
-    ax02.set_title("Reference", fontsize=10, fontweight="bold")
+    ax02.imshow(ref_np, aspect="auto", vmin=0.0, vmax=1.0)
+    ax02.set_title("Reference (ungraded)", fontsize=10, fontweight="bold")
     ax02.axis("off")
 
     ax10 = fig.add_subplot(gs[1, 0])
@@ -235,7 +234,11 @@ def save_comparison_grid(
     ax12.grid(True, alpha=0.25, linestyle="--")
     ax12.tick_params(labelsize=8)
 
-    fig.suptitle("ACES Mapper Inference Dashboard", fontsize=12, fontweight="bold")
+    fig.suptitle(
+        "ACES Mapper Inference Dashboard (input CDL-graded, reference ungraded)",
+        fontsize=12,
+        fontweight="bold",
+    )
 
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -266,12 +269,12 @@ def save_input_output_grid(
     )
 
     ax0 = fig.add_subplot(gs[0, 0])
-    ax0.imshow(input_np, aspect="auto")
+    ax0.imshow(input_np, aspect="auto", vmin=0.0, vmax=1.0)
     ax0.set_title("Input sRGB", fontsize=10, fontweight="bold")
     ax0.axis("off")
 
     ax1 = fig.add_subplot(gs[0, 1])
-    ax1.imshow(pred_np, aspect="auto")
+    ax1.imshow(pred_np, aspect="auto", vmin=0.0, vmax=1.0)
     ax1.set_title("Model Output", fontsize=10, fontweight="bold")
     ax1.axis("off")
 
@@ -302,6 +305,10 @@ def run_aces_mapper_inference(
     input_is_aces: bool = True,
     keep_aligned_output: bool = False,
     device: torch.device | str | None = None,
+    lut_cube_size: int = 257,
+    target_color_space: str = "ACEScct",
+    display: str = "sRGB - Display",
+    view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
 ) -> Figure:
     """Run the ACES mapper visualization pipeline and return the matplotlib figure."""
     input_path = Path(input)
@@ -316,8 +323,10 @@ def run_aces_mapper_inference(
     model_dtype = reference_parameter.dtype
     use_autocast = inference_device.type == "cuda" and model_dtype in {torch.float16, torch.bfloat16}
 
-    transformer = ACESColorTransformer(device=inference_device, use_lut=True)
+    acescct_hwc: torch.Tensor | None = None
+    ref_aces_hwc: torch.Tensor | None = None
     if has_aces_reference:
+        assert look is not None
         aces_chw = read_exr(input_path)
         ref_aces_hwc = torch.from_numpy(aces_chw.transpose(1, 2, 0)).to(
             device=inference_device,
@@ -329,9 +338,35 @@ def run_aces_mapper_inference(
         ref_aces_hwc = align_to_multiple_hwc(ref_aces_hwc, align_multiple)
 
         cdl_processor = GPUCDLProcessor(device=inference_device)
-        aces_graded_hwc = cdl_processor.apply_cdl_gpu(ref_aces_hwc, look)
-        input_srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
-        input_srgb_hwc = torch.clamp(input_srgb_hwc, 0.0, 1.0)
+        # Convert reference ACES2065-1 to model working space, then apply same CDL look.
+        from luminascale.utils.io import colorconvert
+        ref_aces_exr_path = Path(input_path)
+        acescct_array = colorconvert(
+            ref_aces_exr_path,
+            from_space="ACES2065-1",
+            to_space=target_color_space,
+            strict=False,
+        )  # [H, W, 3]
+        acescct_hwc = torch.from_numpy(acescct_array).to(
+            device=inference_device, dtype=torch.float32
+        )
+        acescct_hwc = center_crop_hwc(acescct_hwc, crop_size)
+        acescct_hwc = resize_to_max_side_hwc(acescct_hwc, max_side)
+        acescct_hwc = align_to_multiple_hwc(acescct_hwc, align_multiple)
+        acescct_graded_hwc = cdl_processor.apply_cdl_gpu(acescct_hwc, look)
+        # Keep reference ungraded in model space (ACEScct).
+        ref_aces_hwc = acescct_hwc
+        # Use OCIO-backed conversion (proper RRT+ODT)
+        from luminascale.utils.io import aces_to_display_gpu
+        
+        input_srgb_32f, _ = aces_to_display_gpu(
+            acescct_graded_hwc,
+            input_cs=target_color_space,
+            display=display,
+            view=view,
+            lut_cube_size=lut_cube_size,
+        )
+        input_srgb_hwc = input_srgb_32f
     else:
         input_chw = image_to_tensor(input_path)
         input_srgb_hwc = input_chw.permute(1, 2, 0).to(device=inference_device, dtype=torch.float32)
@@ -349,7 +384,17 @@ def run_aces_mapper_inference(
         pred_aces_chw = forward_model(model_input).squeeze(0)
 
     pred_aces_hwc = pred_aces_chw.permute(1, 2, 0)
-    pred_srgb_hwc = transformer.aces_to_srgb_32f(pred_aces_hwc.unsqueeze(0)).squeeze(0)
+    # Model output is in ACEScct (working space); use OCIO-backed conversion
+    from luminascale.utils.io import aces_to_display_gpu
+    
+    pred_srgb_32f, _ = aces_to_display_gpu(
+        pred_aces_hwc,
+        input_cs=target_color_space,
+        display=display,
+        view=view,
+        lut_cube_size=lut_cube_size,
+    )
+    pred_srgb_hwc = pred_srgb_32f
 
     if not keep_aligned_output and align_multiple > 1:
         input_srgb_hwc = input_srgb_hwc[:output_height, :output_width, :]
@@ -357,10 +402,22 @@ def run_aces_mapper_inference(
         pred_srgb_hwc = pred_srgb_hwc[:output_height, :output_width, :]
         pred_aces_chw = pred_aces_chw[:, :output_height, :output_width]
         if has_aces_reference:
+            assert ref_aces_hwc is not None
             ref_aces_hwc = ref_aces_hwc[:output_height, :output_width, :]
 
     if has_aces_reference:
-        ref_srgb_hwc = transformer.aces_to_srgb_32f(ref_aces_hwc.unsqueeze(0)).squeeze(0)
+        # Reference is in model working space (same space as model output).
+        assert ref_aces_hwc is not None
+        from luminascale.utils.io import aces_to_display_gpu
+        
+        ref_srgb_32f, _ = aces_to_display_gpu(
+            ref_aces_hwc,
+            input_cs=target_color_space,
+            display=display,
+            view=view,
+            lut_cube_size=lut_cube_size,
+        )
+        ref_srgb_hwc = ref_srgb_32f
         fig = save_comparison_grid(
             input_srgb_hwc=input_srgb_hwc,
             pred_srgb_hwc=pred_srgb_hwc,

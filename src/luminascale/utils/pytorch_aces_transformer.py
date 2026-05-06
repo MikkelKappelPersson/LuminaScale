@@ -20,9 +20,12 @@ Differentiable: ✅ Yes (enables backprop through color transforms)
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple, cast
 
 import numpy as np
 import torch
@@ -30,6 +33,113 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_DISPLAY = "sRGB - Display"
+DEFAULT_VIEW = "ACES 2.0 - SDR 100 nits (Rec.709)"
+DEFAULT_LUT_CUBE_SIZE = 257
+
+
+def _slugify(value: str) -> str:
+    """Convert an arbitrary label into a stable slug for file paths."""
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "unknown"
+
+
+def _sha256_file(file_path: Path) -> str:
+    """Compute SHA256 of a file."""
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_profile_dir(
+    config_path: Path,
+    display: str,
+    view: str,
+    cube_size: int,
+) -> Path:
+    """Build deterministic baked-LUT profile directory path."""
+    config_hash8 = _sha256_file(config_path)[:8]
+    display_slug = _slugify(display)
+    view_slug = _slugify(view)
+    profile_id = f"{config_hash8}__{display_slug}__{view_slug}__{int(cube_size)}"
+    repo_root = Path(__file__).resolve().parents[3]
+    return repo_root / "assets" / "luts" / profile_id
+
+
+def _load_baked_runtime_lut(
+    *,
+    config_path: Path,
+    display: str,
+    view: str,
+    cube_size: int,
+    input_cs: str,
+) -> tuple[torch.Tensor, tuple[float, float]] | None:
+    """Load baked runtime tensor LUT for a given input color space.
+
+    Expected files per profile:
+    - manifest.json
+    - domains.json
+    - aces2065_to_srgb_display.pt
+    - acescct_to_srgb_display.pt
+    """
+    profile_dir = _artifact_profile_dir(
+        config_path=config_path,
+        display=display,
+        view=view,
+        cube_size=cube_size,
+    )
+    if not profile_dir.exists():
+        return None
+
+    manifest_path = profile_dir / "manifest.json"
+    domains_path = profile_dir / "domains.json"
+    if not manifest_path.exists() or not domains_path.exists():
+        return None
+
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+
+    expected_hash = _sha256_file(config_path)
+    if manifest.get("ocio_config_sha256") != expected_hash:
+        return None
+    if manifest.get("display") != display or manifest.get("view") != view:
+        return None
+    if int(manifest.get("quality_cube_size", -1)) != int(cube_size):
+        return None
+
+    with domains_path.open("r", encoding="utf-8") as handle:
+        domains = json.load(handle)
+
+    if input_cs == "ACES2065-1":
+        lut_name = "aces2065_to_srgb_display.pt"
+        domain_key = "aces2065"
+    elif input_cs == "ACEScct":
+        lut_name = "acescct_to_srgb_display.pt"
+        domain_key = "acescct"
+    else:
+        return None
+
+    lut_path = profile_dir / lut_name
+    if not lut_path.exists() or domain_key not in domains:
+        return None
+
+    lut_payload = torch.load(lut_path, weights_only=False)
+    if isinstance(lut_payload, dict):
+        lut_3d = lut_payload.get("lut_3d")
+    else:
+        lut_3d = lut_payload
+
+    assert isinstance(lut_3d, torch.Tensor), f"Invalid LUT payload in {lut_path}"
+    assert lut_3d.ndim == 4 and lut_3d.shape[-1] == 3, f"Unexpected LUT shape: {lut_3d.shape}"
+
+    domain_min = float(domains[domain_key]["min"])
+    domain_max = float(domains[domain_key]["max"])
+    assert domain_max > domain_min, f"Invalid domain in {domains_path}: {domain_key}"
+
+    return lut_3d.float(), (domain_min, domain_max)
 
 
 # =============================================================================
@@ -43,11 +153,18 @@ class ACESMatrices:
     https://github.com/AcademySoftwareFoundation/aces
     """
     
-    # AP0 → AP1: ACES2065-1 to ACES RRT color space
+    # AP0 → AP1: ACES2065-1 to ACEScg/working color space
     M_AP0_TO_AP1 = torch.tensor([
-        [0.695202192603776, 0.140678696470703, 0.164119110925521],
-        [0.044794442326405, 0.859671142578125, 0.095534415531158],
-        [-0.005480591960907, 0.004868886886478, 1.000611705074429]
+        [1.4514393161, -0.2365107469, -0.2149285693],
+        [-0.0765537734, 1.1762296998, -0.0996759264],
+        [0.0083161484, -0.0060324498, 0.9977163014],
+    ], dtype=torch.float32)
+
+    # AP1 → AP0: ACEScg/working color space back to ACES2065-1
+    M_AP1_TO_AP0 = torch.tensor([
+        [0.6954522414, 0.1406786965, 0.1638690622],
+        [0.0447945634, 0.8596711185, 0.0955343182],
+        [-0.0055258826, 0.0040252103, 1.0015006723],
     ], dtype=torch.float32)
     
     # AP1 → CIE XYZ (D60): ACES AP1 to CIE XYZ color space
@@ -78,6 +195,7 @@ class ACESMatrices:
         """
         return {
             "M_AP0_TO_AP1": cls.M_AP0_TO_AP1.to(device),
+            "M_AP1_TO_AP0": cls.M_AP1_TO_AP0.to(device),
             "M_AP1_TO_XYZ": cls.M_AP1_TO_XYZ.to(device),
             "M_XYZ_TO_REC709": cls.M_XYZ_TO_REC709.to(device),
         }
@@ -125,8 +243,10 @@ class LUTInterpolator(nn.Module):
         indices = (rgb_flat * (self.lut_size - 1)).round().long()
         indices = torch.clamp(indices, 0, self.lut_size - 1)
         
+        lut = cast(torch.Tensor, self.lut_3d)
+
         # Lookup and reshape
-        result = self.lut_3d[indices[:, 0], indices[:, 1], indices[:, 2], :]
+        result = lut[indices[:, 0], indices[:, 1], indices[:, 2], :]
         return result.reshape(*shape, 3)
     
     def lookup_trilinear(self, rgb: torch.Tensor) -> torch.Tensor:
@@ -156,15 +276,17 @@ class LUTInterpolator(nn.Module):
         # Clamp floor indices to valid range
         coords_floor = torch.clamp(coords_floor, 0, self.lut_size - 2)
         
+        lut = cast(torch.Tensor, self.lut_3d)
+
         # Compute 8 corner indices for trilinear interpolation
-        idx_000 = self.lut_3d[coords_floor[:, 0], coords_floor[:, 1], coords_floor[:, 2]]
-        idx_001 = self.lut_3d[coords_floor[:, 0], coords_floor[:, 1], coords_floor[:, 2] + 1]
-        idx_010 = self.lut_3d[coords_floor[:, 0], coords_floor[:, 1] + 1, coords_floor[:, 2]]
-        idx_011 = self.lut_3d[coords_floor[:, 0], coords_floor[:, 1] + 1, coords_floor[:, 2] + 1]
-        idx_100 = self.lut_3d[coords_floor[:, 0] + 1, coords_floor[:, 1], coords_floor[:, 2]]
-        idx_101 = self.lut_3d[coords_floor[:, 0] + 1, coords_floor[:, 1], coords_floor[:, 2] + 1]
-        idx_110 = self.lut_3d[coords_floor[:, 0] + 1, coords_floor[:, 1] + 1, coords_floor[:, 2]]
-        idx_111 = self.lut_3d[coords_floor[:, 0] + 1, coords_floor[:, 1] + 1, coords_floor[:, 2] + 1]
+        idx_000 = lut[coords_floor[:, 0], coords_floor[:, 1], coords_floor[:, 2]]
+        idx_001 = lut[coords_floor[:, 0], coords_floor[:, 1], coords_floor[:, 2] + 1]
+        idx_010 = lut[coords_floor[:, 0], coords_floor[:, 1] + 1, coords_floor[:, 2]]
+        idx_011 = lut[coords_floor[:, 0], coords_floor[:, 1] + 1, coords_floor[:, 2] + 1]
+        idx_100 = lut[coords_floor[:, 0] + 1, coords_floor[:, 1], coords_floor[:, 2]]
+        idx_101 = lut[coords_floor[:, 0] + 1, coords_floor[:, 1], coords_floor[:, 2] + 1]
+        idx_110 = lut[coords_floor[:, 0] + 1, coords_floor[:, 1] + 1, coords_floor[:, 2]]
+        idx_111 = lut[coords_floor[:, 0] + 1, coords_floor[:, 1] + 1, coords_floor[:, 2] + 1]
         
         # Trilinear interpolation formula
         wx = coords_frac[:, 0:1]  # [N, 1]
@@ -241,7 +363,7 @@ def _save_lut_cache(lut_data: dict[str, torch.Tensor], cache_path: Path) -> None
 # LUT Extraction from OCIO
 # =============================================================================
 
-def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Tensor]:
+def extract_luts_from_ocio(config_path: str | Path | None = None) -> dict[str, torch.Tensor]:
     """Extract tone curve LUTs from OCIO configuration with caching.
     
     This function reads the OCIO config and extracts the RRT/ODT tone curve
@@ -273,6 +395,8 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
             "PyOpenColorIO required for LUT extraction. "
             "Install via: pixi install opencolorio"
         )
+
+    ocio_dyn: Any = ocio
     
     # Resolve config path
     if config_path is None:
@@ -292,18 +416,18 @@ def extract_luts_from_ocio(config_path: str | Path = None) -> dict[str, torch.Te
     
     # Try to set search path if method exists (for shader/file resolution)
     try:
-        ocio.SetConfigSearchPath(str(config_path.parent))
+        ocio_dyn.SetConfigSearchPath(str(config_path.parent))
     except AttributeError:
         logger.debug("SetConfigSearchPath not available in this OCIO version, continuing...")
     
-    config = ocio.Config.CreateFromFile(str(config_path))
+    config = ocio_dyn.Config.CreateFromFile(str(config_path))
     
     # Build a processor for ACES2065-1 → sRGB transform
     processor = config.getProcessor(
         "ACES2065-1",
         "sRGB - Display",
         "ACES 2.0 - SDR 100 nits (Rec.709)",
-        ocio.TRANSFORM_DIR_FORWARD
+        ocio_dyn.TRANSFORM_DIR_FORWARD
     )
     
     # Create CPU processor for sampling
@@ -413,6 +537,9 @@ class ACESColorTransformer(nn.Module):
         device: str | torch.device = 'cuda',
         use_lut: bool = True,
         lut_config_path: str | Path | None = None,
+        display: str = DEFAULT_DISPLAY,
+        view: str = DEFAULT_VIEW,
+        lut_cube_size: int = DEFAULT_LUT_CUBE_SIZE,
     ):
         """Initialize ACES color transformer.
         
@@ -428,6 +555,11 @@ class ACESColorTransformer(nn.Module):
         
         self.device = torch.device(device)
         self.use_lut = use_lut
+        self.display = display
+        self.view = view
+        self.lut_cube_size = int(lut_cube_size)
+        self.lut_interpolators: dict[str, LUTInterpolator] = {}
+        self.lut_domains: dict[str, tuple[float, float]] = {}
         
         logger.debug(f"Initializing ACESColorTransformer on {self.device}")
         
@@ -443,9 +575,37 @@ class ACESColorTransformer(nn.Module):
             logger.debug(msg)
             sys.stderr.write(msg + "\n")
             sys.stderr.flush()
-            
-            lut_data = extract_luts_from_ocio(lut_config_path)
-            self.lut_interpolator = LUTInterpolator(lut_data["lut_3d"].to(self.device))
+
+            config_path = Path(lut_config_path).resolve() if lut_config_path else (
+                Path(__file__).parent.parent.parent.parent / "config" / "aces" / "studio-config.ocio"
+            ).resolve()
+
+            # Prefer baked runtime artifacts for both input spaces.
+            loaded_any = False
+            for input_cs in ("ACES2065-1", "ACEScct"):
+                baked = _load_baked_runtime_lut(
+                    config_path=config_path,
+                    display=self.display,
+                    view=self.view,
+                    cube_size=self.lut_cube_size,
+                    input_cs=input_cs,
+                )
+                if baked is None:
+                    continue
+
+                lut_3d, domain = baked
+                self.lut_interpolators[input_cs] = LUTInterpolator(lut_3d.to(self.device))
+                self.lut_domains[input_cs] = domain
+                loaded_any = True
+
+            # Backward-compatible fallback: OCIO-extracted AP0 LUT.
+            if not loaded_any:
+                lut_data = extract_luts_from_ocio(config_path)
+                self.lut_interpolators["ACES2065-1"] = LUTInterpolator(lut_data["lut_3d"].to(self.device))
+                self.lut_domains["ACES2065-1"] = (0.0, 8.0)
+
+            # Legacy attribute kept for compatibility with existing callsites.
+            self.lut_interpolator = self.lut_interpolators.get("ACES2065-1")
             
             msg = f"[ACESColorTransformer] ✓ LUT loaded successfully"
             logger.debug(msg)
@@ -478,6 +638,37 @@ class ACESColorTransformer(nn.Module):
         
         return result.reshape(*shape, 3)
     
+    def _acescct_to_ap1_linear(self, acescct_tensor: torch.Tensor) -> torch.Tensor:
+        """Convert ACEScct working-space values to ACEScg/AP1 linear values.
+
+        Uses the official piecewise inverse ACEScct transform:
+        - for ACEScct <= 0.155251141552511:
+            lin = (ACEScct - 0.0729055341958355) / 10.5402377416545
+        - otherwise:
+            lin = 2 ** (ACEScct * 17.52 - 9.72)
+
+        Args:
+            acescct_tensor: [..., 3] ACEScct values.
+
+        Returns:
+            [..., 3] AP1 linear values.
+        """
+        cct_break = 0.155251141552511
+        lin_slope = 10.5402377416545
+        lin_offset = 0.0729055341958355
+
+        linear_branch = (acescct_tensor - lin_offset) / lin_slope
+        log_branch = torch.pow(2.0, acescct_tensor * 17.52 - 9.72)
+
+        return torch.where(acescct_tensor <= cct_break, linear_branch, log_branch)
+
+    def _tone_map_lut_for_space(self, values: torch.Tensor, input_cs: str) -> torch.Tensor:
+        """Apply space-specific 3D LUT interpolation using configured input domain."""
+        assert input_cs in self.lut_interpolators, f"No LUT loaded for input color space: {input_cs}"
+        domain_min, domain_max = self.lut_domains[input_cs]
+        normalized = torch.clamp((values - domain_min) / (domain_max - domain_min), 0.0, 1.0)
+        return self.lut_interpolators[input_cs].lookup_trilinear(normalized)
+
     def _tone_map_lut(self, ap0_linear: torch.Tensor) -> torch.Tensor:
         """Apply tone mapping via 3D LUT interpolation.
         
@@ -490,14 +681,7 @@ class ACESColorTransformer(nn.Module):
         Returns:
             [..., 3] sRGB gamma-encoded values in [0, 1]
         """
-        # Clamp to [0, 8] range (typical ACES dynamic range for LUT coverage)
-        ap0_clamped = torch.clamp(ap0_linear, 0.0, 8.0)
-        
-        # Normalize to [0, 1] for LUT size 64 (which covers [0, 8])
-        ap0_normalized = ap0_clamped / 8.0
-        
-        # Use trilinear LUT interpolation
-        return self.lut_interpolator.lookup_trilinear(ap0_normalized)
+        return self._tone_map_lut_for_space(ap0_linear, "ACES2065-1")
     
     def _tone_map_analytical(self, ap1_linear: torch.Tensor) -> torch.Tensor:
         """Apply tone mapping via analytical Michaelis-Menten curve.
@@ -556,28 +740,36 @@ class ACESColorTransformer(nn.Module):
         
         return torch.clamp(srgb, 0.0, 1.0)
     
-    def aces_to_srgb_32f(self, aces_tensor: torch.Tensor) -> torch.Tensor:
-        """Transform ACES2065-1 to linear sRGB (float32).
+    def aces_to_srgb_32f(self, aces_tensor: torch.Tensor, input_cs: str) -> torch.Tensor:
+        """Transform ACES-family color space to sRGB (float32).
+        
+        Supports conversion from ACES2065-1 (linear) or ACEScct (logarithmic) to sRGB.
         
         Full pipeline:
-        1. ACES2065-1 (AP0) → ACES AP1 (matrix)
-        2. Tone mapping via LUT or analytical curve
-        3. ACES AP1 → CIE XYZ (matrix)
-        4. CIE XYZ → Rec.709 (matrix)
-        5. sRGB OETF (gamma encoding)
+        1. [Conditional] ACEScct → ACES2065-1 (inverse log transform if needed)
+        2. ACES2065-1 (AP0) → ACES AP1 (matrix)
+        3. Tone mapping via LUT or analytical curve
+        4. ACES AP1 → CIE XYZ (matrix)
+        5. CIE XYZ → Rec.709 (matrix)
+        6. sRGB OETF (gamma encoding)
         
         Args:
             aces_tensor: [H, W, 3] or [B, H, W, 3] float32 tensor on device
-                        Values unbounded, in ACES2065-1 color space
+                        Values unbounded, in color space specified by input_cs
+            input_cs: Input color space ("ACES2065-1" or "ACEScct"). REQUIRED.
         
         Returns:
             srgb_32f: Same shape as input, float32 [0, 1]
                      sRGB gamma-encoded display values
         
         Raises:
-            ValueError: If input not on same device
+            ValueError: If input not on same device or unknown color space
             RuntimeError: If transform fails
         """
+        # Validate input color space
+        if input_cs not in ("ACES2065-1", "ACEScct"):
+            raise ValueError(f"Unknown input color space: {input_cs}. Must be 'ACES2065-1' or 'ACEScct'.")
+        
         # Check device compatibility (handle 'cuda' vs 'cuda:0' equivalence)
         tensor_device_type = aces_tensor.device.type
         transformer_device_type = self.device.type
@@ -596,58 +788,84 @@ class ACESColorTransformer(nn.Module):
                     f"Input on cuda:{tensor_idx}, transformer on cuda:{transformer_idx}"
                 )
         
+        direct_acescct_lut = self.use_lut and ("ACEScct" in self.lut_interpolators)
+
+        # Step 0: Convert ACEScct to ACES2065-1 if needed (only when direct ACEScct LUT unavailable).
+        ap0_linear: torch.Tensor | None = None
+        if input_cs == "ACES2065-1":
+            ap0_linear = aces_tensor
+        elif not direct_acescct_lut:
+            ap1_linear_from_cct = self._acescct_to_ap1_linear(aces_tensor)
+            m_ap1_to_ap0 = cast(torch.Tensor, self.M_AP1_TO_AP0)
+            ap0_linear = self._apply_matrix(ap1_linear_from_cct, m_ap1_to_ap0)
+        
+        m_ap0_to_ap1 = cast(torch.Tensor, self.M_AP0_TO_AP1)
+        m_ap1_to_xyz = cast(torch.Tensor, self.M_AP1_TO_XYZ)
+        m_xyz_to_rec709 = cast(torch.Tensor, self.M_XYZ_TO_REC709)
+
+        ap1_linear: torch.Tensor | None = None
+
         # Step 1: AP0 → AP1 (but we only need this for analytical tone mapping)
         if not self.use_lut:
-            ap1_linear = self._apply_matrix(aces_tensor, self.M_AP0_TO_AP1)
+            assert ap0_linear is not None
+            ap1_linear = self._apply_matrix(ap0_linear, m_ap0_to_ap1)
         
         # Step 2: Tone mapping & color space transforms
         if self.use_lut:
-            # LUT takes ACES2065-1 (AP0) directly and outputs sRGB
-            srgb_gamma = self._tone_map_lut(aces_tensor)  # Pass AP0, not AP1
+            if input_cs == "ACEScct" and direct_acescct_lut:
+                srgb_gamma = self._tone_map_lut_for_space(aces_tensor, "ACEScct")
+            else:
+                assert ap0_linear is not None
+                # LUT takes ACES2065-1 (AP0) directly and outputs sRGB
+                srgb_gamma = self._tone_map_lut(ap0_linear)  # Pass AP0, not AP1
             return torch.clamp(srgb_gamma, 0.0, 1.0)
         else:
             # Analytical: continue with AP1 → XYZ → Rec.709 → sRGB
+            assert ap1_linear is not None
             ap1_display = self._tone_map_analytical(ap1_linear)
             
             # Step 3-4: AP1 → XYZ → Rec.709
-            xyz = self._apply_matrix(ap1_display, self.M_AP1_TO_XYZ)
-            rec709_linear = self._apply_matrix(xyz, self.M_XYZ_TO_REC709)
+            xyz = self._apply_matrix(ap1_display, m_ap1_to_xyz)
+            rec709_linear = self._apply_matrix(xyz, m_xyz_to_rec709)
             
             # Step 5: sRGB OETF (gamma)
             srgb_gamma = self._apply_srgb_oetf(rec709_linear)
             
             return srgb_gamma
     
-    def aces_to_srgb_8u(self, aces_tensor: torch.Tensor) -> torch.Tensor:
-        """Transform ACES2065-1 to sRGB uint8.
+    def aces_to_srgb_8u(self, aces_tensor: torch.Tensor, input_cs: str) -> torch.Tensor:
+        """Transform ACES-family color space to sRGB uint8.
         
         Same as aces_to_srgb_32f but quantized to 8-bit [0, 255].
         
         Args:
             aces_tensor: [H, W, 3] or [B, H, W, 3] float32 tensor
-                        Values unbounded, in ACES2065-1 color space
+                        Values unbounded, in color space specified by input_cs
+            input_cs: Input color space ("ACES2065-1" or "ACEScct")
+                     Default: "ACEScct" (project working space)
         
         Returns:
             srgb_8u: Same spatial shape, uint8 [0, 255]
         """
-        srgb_32f = self.aces_to_srgb_32f(aces_tensor)
+        srgb_32f = self.aces_to_srgb_32f(aces_tensor, input_cs=input_cs)
         
         # Quantize: [0, 1] → [0, 255]
         srgb_8u = (torch.clamp(srgb_32f, 0.0, 1.0) * 255).round().to(torch.uint8)
         
         return srgb_8u
     
-    def forward(self, aces_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, aces_tensor: torch.Tensor, input_cs: str) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass: compute both 32-bit and 8-bit sRGB outputs.
         
         Args:
             aces_tensor: [H, W, 3] or [B, H, W, 3] ACES tensor
+            input_cs: Input color space (\"ACES2065-1\" or \"ACEScct\"). REQUIRED.
             
         Returns:
             (srgb_32f, srgb_8u): Float32 and uint8 sRGB outputs
         """
-        srgb_32f = self.aces_to_srgb_32f(aces_tensor)
-        srgb_8u = self.aces_to_srgb_8u(aces_tensor)
+        srgb_32f = self.aces_to_srgb_32f(aces_tensor, input_cs=input_cs)
+        srgb_8u = self.aces_to_srgb_8u(aces_tensor, input_cs=input_cs)
         return srgb_32f, srgb_8u
 
 
@@ -657,6 +875,7 @@ class ACESColorTransformer(nn.Module):
 
 def aces_to_srgb_torch(
     aces_tensor: torch.Tensor,
+    input_cs: str,
     device: str | torch.device = 'cuda',
     use_lut: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -667,7 +886,8 @@ def aces_to_srgb_torch(
     persistent ACESColorTransformer instance instead.
     
     Args:
-        aces_tensor: [H, W, 3] or [B, H, W, 3] ACES2065-1 tensor
+        aces_tensor: [H, W, 3] or [B, H, W, 3] ACES tensor
+        input_cs: Input color space (\"ACES2065-1\" or \"ACEScct\"). REQUIRED.
         device: Target device ('cuda' or 'cpu')
         use_lut: Use LUT-based or analytical tone mapping
         
@@ -676,7 +896,7 @@ def aces_to_srgb_torch(
         
     Example:
         >>> aces = torch.randn(512, 512, 3, device='cuda')
-        >>> srgb_32f, srgb_8u = aces_to_srgb_torch(aces)
+        >>> srgb_32f, srgb_8u = aces_to_srgb_torch(aces, input_cs=\"ACEScct\")
     """
     transformer = ACESColorTransformer(device=device, use_lut=use_lut)
-    return transformer.forward(aces_tensor)
+    return transformer.forward(aces_tensor, input_cs=input_cs)

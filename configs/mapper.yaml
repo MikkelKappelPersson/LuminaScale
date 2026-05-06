@@ -13,7 +13,19 @@ checkpoint_freq: 5        # Checkpoint every 5 epochs
 save_top_k: 3             # Keep best 3 performers (PSNR)
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 precision: "32"
-inference_vis_input_path: dataset/exr_ACES2065-1/MIT-Adobe_5K_a0001-jmac_DSC1459.exr
+inference_vis_input_path: dataset/exr_ACES2065-1/MIT-Adobe_5K_a0001-jmac_DSC1459.exr  # Reference image (ACES2065-1); will be converted to target_color_space at runtime
+inference_vis_downsample_size: 1024 
+
+# Color management / display LUT settings (used by periodic inference visualization)
+color_management:
+  display: "sRGB - Display"
+  view: "ACES 2.0 - SDR 100 nits (Rec.709)"
+  lut_cube_size: 257
+  auto_bake_luts: true
+  aces2065_domain_min: -0.5
+  aces2065_domain_max: 10.0
+  acescct_domain_min: -1.0
+  acescct_domain_max: 1.0
 
 # Model Configuration (SOTA-inspired Hybrid Mapper)
 model:
@@ -26,6 +38,7 @@ model:
     sft_embed_dim: 64
     sft_depths: [1, 1, 1, 1, 1, 1, 1, 1]
     sft_num_heads: [2, 4, 8, 16, 16, 8, 4, 2]
+    target_color_space: "ACEScct"  # Target output color space. Training targets loaded from ACEScct shards.
 
 # Lightning Trainer/Module params
 trainer:
@@ -37,13 +50,14 @@ trainer:
     lambda_lpips: 0.1
     lambda_smooth: 1e-4
     lambda_mono: 1e-4
+    target_color_space: "ACEScct"  # Target color space for loss computation. Shards contain ACEScct data.
 
 # Image processing
 crop_size: 1024
 
 # dataset
-shard_path: "dataset/ACEScct/full/shards/train"  # Use test shards for quick dev runs
-val_shard_path: "dataset/ACEScct/full/shards/val"
+shard_path: "dataset/ACEScct/full/shards/train"  # WebDataset shards in ACEScct color space
+val_shard_path: "dataset/ACEScct/full/shards/val"  # Validation shards (ACEScct)
 metadata_parquet: "dataset/ACEScct/full/training_metadata.parquet"
 
 

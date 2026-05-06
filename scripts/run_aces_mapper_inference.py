@@ -41,7 +41,7 @@ def main() -> None:
         "--input",
         dest="input_path",
         type=str, 
-        default="dataset/full/aces/MIT-Adobe_5K_a0001-jmac_DSC1459.exr",
+        default="dataset/exr_ACES2065-1/MIT-Adobe_5K_a0001-jmac_DSC1459.exr",
         help="Path to regular (non-ACES) input image by default",
     )
     parser.add_argument(
@@ -95,6 +95,12 @@ def main() -> None:
         help="Cap longest image side before inference to reduce VRAM use (<=0 disables)",
     )
     parser.add_argument(
+        "--lut-cube-size",
+        type=int,
+        default=257,
+        help="LUT cube size for ACES-to-display conversion",
+    )
+    parser.add_argument(
         "--look-mode",
         type=str,
         default="random",
@@ -108,7 +114,7 @@ def main() -> None:
     parser.add_argument(
         "--seed",
         type=int,
-        default=9,
+        default=16,
         help="Seed for reproducible random look generation",
     )
     parser.add_argument("--num-luts", type=int, default=3, help="Model num_luts")
@@ -203,6 +209,7 @@ def main() -> None:
         input_is_aces=is_exr_reference,
         keep_aligned_output=args.keep_padding,
         device=device,
+        lut_cube_size=args.lut_cube_size,
     )
 
     close_figure(figure)

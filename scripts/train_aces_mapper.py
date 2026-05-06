@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
+import re
+import subprocess
 import sys
 import warnings
 from datetime import datetime
@@ -56,6 +59,89 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _slugify(value: str) -> str:
+    """Convert label to filesystem-safe slug."""
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "unknown"
+
+
+def _sha256_file(file_path: Path) -> str:
+    """Compute SHA256 for a file."""
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ensure_display_luts(project_root: Path, cfg: DictConfig) -> None:
+    """Ensure required baked display LUT artifacts exist; auto-bake if configured."""
+    cm = cfg.get("color_management", {})
+    display = str(cm.get("display", "sRGB - Display"))
+    view = str(cm.get("view", "ACES 2.0 - SDR 100 nits (Rec.709)"))
+    lut_cube_size = int(cm.get("lut_cube_size", 257))
+    auto_bake = bool(cm.get("auto_bake_luts", True))
+
+    ocio_config = project_root / "config" / "aces" / "studio-config.ocio"
+    if not ocio_config.exists():
+        raise FileNotFoundError(f"OCIO config not found: {ocio_config}")
+
+    config_hash8 = _sha256_file(ocio_config)[:8]
+    profile_id = f"{config_hash8}__{_slugify(display)}__{_slugify(view)}__{lut_cube_size}"
+    profile_dir = project_root / "assets" / "luts" / profile_id
+
+    required = [
+        profile_dir / "manifest.json",
+        profile_dir / "domains.json",
+        profile_dir / "aces2065_to_srgb_display.pt",
+        profile_dir / "acescct_to_srgb_display.pt",
+    ]
+
+    missing = [p for p in required if not p.exists()]
+    if not missing:
+        logger.info(f"[LUT] Using existing baked LUT profile: {profile_dir}")
+        return
+
+    if not auto_bake:
+        missing_str = "\n  - ".join(str(p) for p in missing)
+        raise FileNotFoundError(
+            "Required LUT artifacts are missing and auto_bake_luts is disabled. Missing:\n"
+            f"  - {missing_str}"
+        )
+
+    logger.info("[LUT] Missing LUT artifacts detected; auto-baking profile...")
+    bake_cmd = [
+        sys.executable,
+        str(project_root / "scripts" / "bake_display_luts.py"),
+        "--config",
+        str(ocio_config),
+        "--display",
+        display,
+        "--view",
+        view,
+        "--cube-size",
+        str(lut_cube_size),
+        "--aces2065-domain-min",
+        str(float(cm.get("aces2065_domain_min", -0.5))),
+        "--aces2065-domain-max",
+        str(float(cm.get("aces2065_domain_max", 10.0))),
+        "--acescct-domain-min",
+        str(float(cm.get("acescct_domain_min", -1.0))),
+        "--acescct-domain-max",
+        str(float(cm.get("acescct_domain_max", 1.0))),
+    ]
+    subprocess.run(bake_cmd, check=True)
+
+    missing_after = [p for p in required if not p.exists()]
+    if missing_after:
+        missing_str = "\n  - ".join(str(p) for p in missing_after)
+        raise FileNotFoundError(
+            "LUT auto-bake finished but required artifacts are still missing:\n"
+            f"  - {missing_str}"
+        )
+    logger.info(f"[LUT] Auto-bake complete: {profile_dir}")
+
+
 class HparamsMetricsCallback(Callback):
     """Explicitly log hparams + metrics with CustomTensorBoardLogger.
 
@@ -90,7 +176,11 @@ class HparamsMetricsCallback(Callback):
 
 
 class PeriodicACESMapperInferenceCallback(Callback):
-    """Save and log ACES mapper comparison dashboards every N epochs."""
+    """Save and log ACES mapper comparison dashboards every N epochs.
+    
+    Converts ACES2065-1 reference data to ACEScct (project working space) internally
+    for fair comparison with model output. Visualization handles color space transformations.
+    """
 
     def __init__(
         self,
@@ -98,15 +188,36 @@ class PeriodicACESMapperInferenceCallback(Callback):
         every_n_epochs: int = 1,
         aces_input_path: Path,
         output_dir: Path,
+        downsample_size: int = 1024,
+        lut_cube_size: int = 257,
+        target_color_space: str = "ACEScct",
+        display: str = "sRGB - Display",
+        view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
     ) -> None:
         super().__init__()
         self.every_n_epochs = max(1, int(every_n_epochs))
         self.aces_input_path = aces_input_path
         self.output_dir = output_dir
-        self.look = build_look()
+        self.downsample_size = max(0, int(downsample_size))
+        self.lut_cube_size = max(2, int(lut_cube_size))
+        self.target_color_space = str(target_color_space)
+        self.display = str(display)
+        self.view = str(view)
+        # Only build look and enable inference if input path exists
+        self.enabled = aces_input_path.exists()
+        self.look = build_look() if self.enabled else None
+        if not self.enabled:
+            logger.warning(
+                f"[PeriodicACESMapperInferenceCallback] Input path does not exist: {aces_input_path}. "
+                f"Inference visualization will be disabled."
+            )
+        else:
+            logger.info(
+                f"[PeriodicACESMapperInferenceCallback] Enabled with input: {aces_input_path}"
+            )
 
     def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        if trainer.sanity_checking or not trainer.is_global_zero:
+        if trainer.sanity_checking or not trainer.is_global_zero or not self.enabled:
             return
 
         epoch_number = trainer.current_epoch + 1
@@ -121,15 +232,24 @@ class PeriodicACESMapperInferenceCallback(Callback):
         figure = None
 
         try:
+            if trainer.strategy.root_device.type == "cuda":
+                torch.cuda.empty_cache()
+
             save_path = self.output_dir / f"epoch_{epoch_number:04d}.png"
             figure = run_aces_mapper_inference(
                 model=pl_module,
                 input=self.aces_input_path,
                 output_path=save_path,
                 look=self.look,
+                crop_size=0,
+                max_side=self.downsample_size,
                 pred_aces_output=None,
                 input_is_aces=True,
                 device=trainer.strategy.root_device,
+                lut_cube_size=self.lut_cube_size,
+                target_color_space=self.target_color_space,
+                display=self.display,
+                view=self.view,
             )
             trainer.logger.experiment.add_figure(
                 "inference/comparison",
@@ -138,6 +258,8 @@ class PeriodicACESMapperInferenceCallback(Callback):
             )
         finally:
             close_figure(figure)
+            if trainer.strategy.root_device.type == "cuda":
+                torch.cuda.empty_cache()
             if was_training:
                 pl_module.train()
 
@@ -157,10 +279,29 @@ def main(cfg: DictConfig) -> None:
         )
     )
     
+    # Resolve inference path relative to project root (Hydra changes cwd)
+    if not inference_vis_input_path.is_absolute():
+        inference_vis_input_path = project_root / inference_vis_input_path
+    
+    # Validate inference input file exists
+    if not inference_vis_input_path.exists():
+        logger.warning(
+            f"[MAIN] Inference input path does not exist: {inference_vis_input_path}"
+        )
+        logger.warning(
+            f"[MAIN] Inference visualization will be skipped. "
+            f"Please check inference_vis_input_path config."
+        )
+    else:
+        logger.info(f"[MAIN] Inference input validated: {inference_vis_input_path}")
+    
     # Set OCIO environment if needed
     ocio_config = project_root / "config" / "aces" / "studio-config.ocio"
     if ocio_config.exists():
         os.environ["OCIO"] = str(ocio_config)
+
+    # Ensure baked display LUT artifacts exist for configured color management.
+    ensure_display_luts(project_root, cfg)
 
     print(f"\n{'='*80}")
     print(f"[MAIN] Starting ACESMapper Training Initialization...")
@@ -232,6 +373,7 @@ def main(cfg: DictConfig) -> None:
         "num_residual_blocks": int(cfg.model.params.num_residual_blocks),
         "num_workers": int(cfg.get("num_workers", 4)),
         "inference_vis_every_n_epochs": int(cfg.get("inference_vis_every_n_epochs", 1)),
+        "inference_vis_downsample_size": int(cfg.get("inference_vis_downsample_size", cfg.get("crop_size", 1024))),
     }
 
     inference_output_dir = Path(logger_tb.log_dir)
@@ -252,6 +394,11 @@ def main(cfg: DictConfig) -> None:
             aces_input_path=inference_vis_input_path,
             output_dir=inference_output_dir,
             every_n_epochs=int(cfg.get("inference_vis_every_n_epochs", 1)),
+            downsample_size=int(cfg.get("inference_vis_downsample_size", cfg.get("crop_size", 1024))),
+            lut_cube_size=int(cfg.get("color_management", {}).get("lut_cube_size", 257)),
+            target_color_space=str(cfg.model.params.get("target_color_space", "ACEScct")),
+            display=str(cfg.get("color_management", {}).get("display", "sRGB - Display")),
+            view=str(cfg.get("color_management", {}).get("view", "ACES 2.0 - SDR 100 nits (Rec.709)")),
         ),
     ]
 

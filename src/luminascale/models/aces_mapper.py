@@ -1,7 +1,7 @@
-"""ACES2065-1 Color Space Mapper for LuminaScale.
+"""ACES Color Space Mapper for LuminaScale.
 
 Counterpart to DequantNet. Integrates SFT weight prediction, Adaptive 3D LUTs,
-and Laplacian Local Refinement to map images to ACES2065-1 linear light.
+and Laplacian Local Refinement to map images to a target color space (configurable).
 
 Mandatory Attribution: Based on LLF-LUT (Zeng et al./Wang et al.)
 """
@@ -19,7 +19,10 @@ from .local_refiner import LocalRefinementHead
 
 class ACESMapper(nn.Module):
     """
-    Top-level integrator for the ACES2065-1 color space mapping head.
+    Top-level integrator for color space mapping (ACES-family color spaces).
+    
+    Maps from display-referred sRGB to a target color space (ACES2065-1, ACEScct, etc.)
+    using LLF-LUT-style global LUT fitting + local Laplacian refinement.
     """
     def __init__(
         self,
@@ -30,8 +33,10 @@ class ACESMapper(nn.Module):
         sft_embed_dim: int = 64,  # Changed from 96 to be divisible by 16 heads (max head count)
         sft_depths: list[int] = [1, 1, 1, 1, 1, 1, 1, 1],
         sft_num_heads: list[int] = [2, 4, 8, 16, 16, 8, 4, 2],
+        target_color_space: str = "ACEScct",
     ) -> None:
         super().__init__()
+        self.target_color_space = target_color_space
         
         # 1. Global Fitting Head: SFT Weight Predictor
         self.sft = SpatialFrequencyTransformer(
@@ -60,10 +65,11 @@ class ACESMapper(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: Input image of shape [B, 3, H, W] in display-referred space.
+            x: Input image of shape [B, 3, H, W] in display-referred sRGB space.
             
         Returns:
-            Mapped image in ACES2065-1 linear light of shape [B, 3, H, W].
+            Mapped image in target color space (self.target_color_space) of shape [B, 3, H, W].
+            Color space is typically ACEScct or ACES2065-1, as configured.
         """
         # 1. Predict weights via SFT
         # We need a low-res version for the SFT as per LLF-LUT

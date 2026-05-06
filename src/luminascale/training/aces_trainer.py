@@ -1,7 +1,8 @@
 """ACESMapper Training Module for LuminaScale.
 
-Implements PyTorch Lightning training for color space mapping to ACES2065-1.
+Implements PyTorch Lightning training for color space mapping.
 Uses TensorBoard for logging and an LLF-LUT-style reconstruction objective.
+Supports flexible target color spaces (ACEScct, ACES2065-1, etc.).
 
 Mandatory Attribution: Based on LLF-LUT (Zeng et al./Wang et al.)
 """
@@ -38,6 +39,7 @@ class ACESMapperTrainer(L.LightningModule):
         lambda_mono: float = 1e-4,
         lambda_color: float | None = None,
         crop_size: int = 512,
+        target_color_space: str = "ACEScct",
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -45,12 +47,15 @@ class ACESMapperTrainer(L.LightningModule):
         if lambda_color is not None:
             self.hparams.lambda_lpips = lambda_color
         
-        # 1. Initialize model
+        # 1. Initialize model with target color space
+        # Note: Training targets come from WebDataset shards (ACEScct by default).
+        # Loss is computed in the target color space specified by config.
         self.model = ACESMapper(
             num_luts=num_luts,
             lut_dim=lut_dim,
             num_lap=num_lap,
-            num_residual_blocks=num_residual_blocks
+            num_residual_blocks=num_residual_blocks,
+            target_color_space=target_color_space,
         )
         
         # 2. Loss Functions

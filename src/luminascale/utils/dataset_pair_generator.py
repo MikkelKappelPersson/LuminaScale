@@ -298,10 +298,16 @@ class DatasetPairGenerator:
         exr_bytes_list: list[bytes], 
         crop_size: int = 512,
     ) -> tuple[torch.Tensor, torch.Tensor, dict]:
-        """Process a list of raw EXR bytes into (LDR_Input, ACES_Target) pairs for ACES Mapper.
+        """Process a list of raw EXR bytes into (sRGB_Input, ACEScct_Target) pairs for ACES Mapper training.
         
-        Input: sRGB 8-bit (graded via random look)
-        Target: ACES2065-1 Linear (original data)
+        WebDataset shards contain images in ACEScct color space (logarithmic working space).
+        This function loads ACEScct target data and creates sRGB input via CDL grading + color transform.
+        
+        Returns:
+            Tuple of (srgb_input_batch, acetcct_target_batch, timing_dict)
+            - srgb_input_batch: [B, 3, H, W] float32, display-referred sRGB (graded version)
+            - acetcct_target_batch: [B, 3, H, W] float32, original ACEScct from shards (training target)
+            - timing_dict: Performance metrics
         """
         import OpenImageIO as oiio
         import tempfile
@@ -346,8 +352,8 @@ class DatasetPairGenerator:
                 if pixels is None:
                     continue
 
-                # 1. Target: Original ACES Linear
-                aces_target = torch.from_numpy(pixels.copy()).to(self.device).to(torch.float32) # [H, W, 3]
+                # 1. Target: ACEScct from WebDataset shards (training target in working space, not ACES2065-1)
+                aces_target = torch.from_numpy(pixels.copy()).to(self.device).to(torch.float32)  # [H, W, 3]
                 
                 # Ensure 3 channels
                 if aces_target.shape[-1] > 3:
@@ -359,7 +365,8 @@ class DatasetPairGenerator:
                 aces_graded = self.cdl_processor.apply_cdl_gpu(aces_target, look)
                 
                 # Transform to sRGB (Keeping 32-bit float precision)
-                srgb_input = self.pytorch_transformer.aces_to_srgb_32f(aces_graded.unsqueeze(0)).squeeze(0)
+                # aces_graded is in ACEScct color space (from shards)
+                srgb_input = self.pytorch_transformer.aces_to_srgb_32f(aces_graded.unsqueeze(0), input_cs="ACEScct").squeeze(0)
                 
                 # Store [3, H, W]
                 tensors_ldr.append(srgb_input.permute(2, 0, 1))

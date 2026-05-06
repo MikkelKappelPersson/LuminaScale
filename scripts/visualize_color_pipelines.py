@@ -82,8 +82,8 @@ def pipeline_old_gpu(img_path: Path | str) -> np.ndarray:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         aces_tensor = torch.from_numpy(aces_hwc).float().to(device)
         
-        _, srgb_8bit = aces_to_display_gpu(aces_tensor, input_cs="ACES2065-1")  # Returns (float32, uint8)
-        return srgb_8bit.cpu().numpy()  # [H, W, 3] uint8
+        srgb_32f, _ = aces_to_display_gpu(aces_tensor, input_cs="ACES2065-1")  # Returns (float32, uint8)
+        return srgb_32f.cpu().numpy()  # [H, W, 3] float32 in [0, 1]
     except Exception as e:
         print(f"⚠️ GPU rendering failed: {e}, falling back to OIIO")
         return pipeline_old_oiio(img_path)
@@ -91,10 +91,15 @@ def pipeline_old_gpu(img_path: Path | str) -> np.ndarray:
 
 def pipeline_new_gpu(img_path: Path | str) -> np.ndarray:
     """New pipeline (ACES2065-1 → ACEScct → sRGB).
-    
-    Uses ACEScct via OIIO (GPU ACEScct→sRGB not yet available).
+
+    Uses GPU rendering for ACEScct → sRGB after CPU/OIIO conversion from
+    ACES2065-1 → ACEScct to match training data preparation.
     """
-    return pipeline_new_oiio(img_path)
+    img_acescct = colorconvert(str(img_path), "ACES2065-1", "ACEScct", strict=True)  # [H, W, 3]
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    acescct_tensor = torch.from_numpy(img_acescct).float().to(device)
+    srgb_32f, _ = aces_to_display_gpu(acescct_tensor, input_cs="ACEScct")
+    return srgb_32f.detach().cpu().numpy()
 
 
 def main():

@@ -54,42 +54,36 @@ def get_single_random_look() -> CDLParameters:
     return random_cdl()
 
 
-def random_cdl(variance=0.2, sat_range=(0.4, 1.6)) -> CDLParameters:
+def random_cdl(variance=0.05, sat_range=(0.8, 1.2)) -> CDLParameters:
     """
     Generates extreme looks using a Master + Variance approach for
     Slope, Offset, and Power.
     """
     # 1. SLOPE (Highlights/Gain)
-    master_slope = random.uniform(0.6, 1.3)
-    slope = tuple(master_slope + random.uniform(-variance, variance) for _ in range(3))
+    master_slope = random.uniform(0.9, 1.1)
+    slope = tuple(master_slope + random.uniform(-variance * 0.2, variance * 0.2) for _ in range(3))
 
     # 2. OFFSET (Shadows/Lift)
     # Master offset determines if shadows are 'crushed' or 'faded'
     master_offset = random.uniform(-0.1, 0.1)
     # Variance adds a color tint specifically to the shadows
     offset = tuple(
-        master_offset + random.uniform(-variance * 0.3, variance * 0.3)
+        master_offset + random.uniform(-variance * 0.2, variance * 0.2)
         for _ in range(3)
     )
 
     # 3. POWER (Gamma/Contrast)
     # Master power determines the overall punchiness
-    master_power = random.uniform(0.8, 1.3)
+    master_power = random.uniform(0.8, 1.2)
     # Variance creates 'cross-processed' color curves
     power = tuple(
-        master_power + random.uniform(-variance * 0.3, variance * 0.3) for _ in range(3)
+        master_power + random.uniform(-variance * 0.5, variance * 0.5) for _ in range(3)
     )
 
     return CDLParameters(
         slope=(float(slope[0]), float(slope[1]), float(slope[2])),
         offset=(float(offset[0]), float(offset[1]), float(offset[2])),
         power=(float(power[0]), float(power[1]), float(power[2])),
-        saturation=random.uniform(*sat_range),
-    )
-    return CDLParameters(
-        slope=(slope[0], slope[1], slope[2]),
-        offset=(offset[0], offset[1], offset[2]),
-        power=(power[0], power[1], power[2]),
         saturation=random.uniform(*sat_range),
     )
 

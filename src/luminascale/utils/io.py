@@ -136,34 +136,42 @@ def aces_to_display_gpu(
     input_cs: str,
     display: str = "sRGB - Display",
     view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
+    lut_cube_size: int = 257,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """GPU-accelerated ACES-to-display color transform (PyTorch).
+    """GPU-accelerated ACES-to-display color transform (PyTorch native CUDA).
 
-    Applies ACES rendering transform (RRT + ODT) to convert from
-    scene-referred linear ACES to display-referred sRGB.
-    Uses PyTorch-native CUDA implementation for high performance.
+    Applies ACES rendering transform (RRT + ODT) using pure PyTorch/CUDA
+    implementation with 3D LUT tone mapping. Fully differentiable and GPU-native.
 
     Args:
         aces_tensor: [H, W, 3] float32 tensor on device (in color space specified by input_cs).
         input_cs: Input color space (e.g., "ACES2065-1", "ACEScct"). REQUIRED for safety.
-        display: OCIO display name (default: sRGB - Display).
-        view: OCIO view name (default: ACES 2.0 SDR 100 nits).
+        display: Display type (currently ignored; always outputs sRGB).
+        view: View type (currently ignored; always outputs ACES 2.0 SDR 100 nits).
 
     Returns:
         Tuple of (srgb_32bit, srgb_8bit):
             - srgb_32bit: [H, W, 3] float32 on same device, values in [0, 1]
             - srgb_8bit: [H, W, 3] uint8 on same device, quantized to [0, 255]
     """
-    # PyTorch-native implementation (with LUT for accuracy)
-    from .pytorch_aces_transformer import ACESColorTransformer
+    from luminascale.utils.pytorch_aces_transformer import ACESColorTransformer
+
+    if input_cs not in ("ACES2065-1", "ACEScct"):
+        raise ValueError(
+            f"Unsupported input_cs={input_cs!r}. Expected 'ACES2065-1' or 'ACEScct'."
+        )
 
     device = aces_tensor.device
-    transformer = ACESColorTransformer(device=device, use_lut=True)
-    
-    srgb_32bit = transformer.aces_to_srgb_32f(aces_tensor)
-    srgb_8bit = transformer.aces_to_srgb_8u(aces_tensor)
-
-    return srgb_32bit, srgb_8bit
+    transformer = ACESColorTransformer(
+        device=device,
+        use_lut=True,
+        display=display,
+        view=view,
+        lut_cube_size=lut_cube_size,
+    )
+    srgb_32f = transformer.aces_to_srgb_32f(aces_tensor, input_cs=input_cs)
+    srgb_8u = transformer.aces_to_srgb_8u(aces_tensor, input_cs=input_cs)
+    return srgb_32f, srgb_8u
 
 
 def image_to_tensor(image_path: Path | str) -> torch.Tensor:

@@ -7,9 +7,9 @@ defaults:
 
 epochs: 3  
 
-shard_path: "dataset/dev/shards/train"  # Use test shards for quick dev runs
-val_shard_path: "dataset/dev/shards/val"
-metadata_parquet: "dataset/dev/training_metadata.parquet"
+shard_path: "dataset/ACEScct/dev/shards/train"  # Use test shards for quick dev runs
+val_shard_path: "dataset/ACEScct/dev/shards/val"
+metadata_parquet: "dataset/ACEScct/dev/training_metadata.parquet"
 
 # Output scoping
 output_dir: ./outputs/training/mapper

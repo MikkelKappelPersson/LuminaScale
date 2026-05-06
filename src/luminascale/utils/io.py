@@ -63,28 +63,77 @@ def write_exr(path: Path | str, array: np.ndarray | torch.Tensor) -> None:
     out.close()
 
 
-def oiio_aces_to_display(path: Path | str) -> np.ndarray:
-    """Read ACES EXR and convert to sRGB display space using OpenImageIO.
+def colorconvert(
+    img_path: Path | str,
+    from_space: str,
+    to_space: str,
+    strict: bool = True,
+) -> np.ndarray:
+    """Convert image between color spaces using OpenImageIO.
+    
+    Leverages OCIO (OpenColorIO) for accurate, standards-compliant color transforms.
+    
+    Args:
+        img_path: Path to input image file (EXR, JPG, PNG, etc.)
+        from_space: Source color space (e.g., "ACES2065-1", "ACEScct", "sRGB")
+        to_space: Target color space (e.g., "ACEScct", "sRGB", "ACES2065-1")
+        strict: If True, enforce strict color space conversion; if False, use lenient mode
+        
+    Returns:
+        Converted image as [H, W, 3] float32 numpy array
+    """
+    src = oiio.ImageBuf(str(img_path))
+    if not src.initialized:
+        raise FileNotFoundError(f"Could not load image: {img_path}")
+    
+    # Use OIIO's colorconvert with OCIO backend
+    dst = oiio.ImageBufAlgo.colorconvert(src, from_space, to_space, strict)
+    
+    if not dst.initialized:
+        raise RuntimeError(f"Color conversion failed: {from_space} → {to_space}")
+    
+    # Return as [H, W, 3] float32 numpy array
+    array = np.asarray(dst.get_pixels(), dtype=np.float32)
+    
+    # Ensure RGB
+    if array.shape[2] > 3:
+        array = array[:, :, :3]
+    elif array.shape[2] < 3:
+        raise ValueError(f"Expected RGB image, got {array.shape[2]} channels")
+    
+    return array  # [H, W, 3]
+
+
+def oiio_aces_to_display(
+    path: Path | str,
+    input_cs: str,
+    display: str = "sRGB - Display",
+    view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
+) -> np.ndarray:
+    """Read ACES EXR and convert to display space using OpenImageIO.
 
     This is a CPU alternative to aces_to_display_gpu for simple visualization.
     Uses OCIO display transform for accurate RRT + ODT mapping.
+    
+    Args:
+        path: Path to input EXR file.
+        input_cs: Input color space (e.g., "ACES2065-1", "ACEScct"). REQUIRED for safety.
+        display: OCIO display name (default: "sRGB - Display").
+        view: OCIO view name (default: "ACES 2.0 - SDR 100 nits (Rec.709)").
+        
+    Returns:
+        Image as [C, H, W] float32 numpy array.
     """
     buf = oiio.ImageBuf(str(path))
     # Apply OCIO display transform (RRT + ODT)
-    # Using 'sRGB - Display' and 'ACES 2.0 - SDR 100 nits (Rec.709)' found in OCIO config
-    result = oiio.ImageBufAlgo.ociodisplay(
-        buf, 
-        "sRGB - Display", 
-        "ACES 2.0 - SDR 100 nits (Rec.709)", 
-        "ACES2065-1"
-    )
+    result = oiio.ImageBufAlgo.ociodisplay(buf, display, view, input_cs)
     
     return np.asarray(result.get_pixels(), dtype=np.float32).transpose(2, 0, 1)
 
 
 def aces_to_display_gpu(
     aces_tensor: torch.Tensor,
-    input_cs: str = "ACES2065-1",
+    input_cs: str,
     display: str = "sRGB - Display",
     view: str = "ACES 2.0 - SDR 100 nits (Rec.709)",
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -95,10 +144,10 @@ def aces_to_display_gpu(
     Uses PyTorch-native CUDA implementation for high performance.
 
     Args:
-        aces_tensor: [H, W, 3] float32 tensor on device in ACES2065-1.
-        input_cs: Input color space (default: ACES2065-1, kept for API compatibility).
-        display: OCIO display name (default: sRGB - Display, kept for API compatibility).
-        view: OCIO view name (default: ACES 2.0 SDR 100 nits, kept for API compatibility).
+        aces_tensor: [H, W, 3] float32 tensor on device (in color space specified by input_cs).
+        input_cs: Input color space (e.g., "ACES2065-1", "ACEScct"). REQUIRED for safety.
+        display: OCIO display name (default: sRGB - Display).
+        view: OCIO view name (default: ACES 2.0 SDR 100 nits).
 
     Returns:
         Tuple of (srgb_32bit, srgb_8bit):

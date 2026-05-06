@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Quality-filtered ACES conversion script.
 
-Runs quality checks on RAW images and converts passing images to ACES format.
+Runs quality checks on RAW images and converts passing images to ACES2065-1 format.
 Images that pass quality checks are converted using rawtoaces.
 
 Usage:
@@ -12,7 +12,7 @@ Options:
     --highlight-clip PCT    Max highlight clipping % (default: 3.0)
     --noise-floor STD       Max shadow noise std (default: 15.0)
     --input-dir DIR         Input directory for RAW images (default: dataset/temp/raw)
-    --output-dir DIR        Output directory for ACES files (default: dataset/temp/aces)
+    --output-dir DIR        Output directory for ACES2065-1 files (default: dataset/temp/aces)
     --dataset-prefix STR    Prefix for output filenames (e.g., PPR10K_, MIT-Adobe_5K_)
     --help                  Show this help message
 """
@@ -172,7 +172,7 @@ def main() -> int:
             print(f"✓ PASS ({result.highlight_clip_pct:.2f}% clip, {result.shadow_noise_std:.2f} noise) ", end="", flush=True)
             passed_count += 1
             
-            # Convert to ACES
+            # Convert to ACES2065-1
             print("→ Converting...", end=" ", flush=True)
             conversion_status = _convert_to_aces(image_path, aces_dir, args.dataset_prefix)
             if conversion_status == "ok":
@@ -287,11 +287,11 @@ def _append_summary_log(
 
 
 def _convert_to_aces(image_path: Path, output_dir: Path, prefix: str = "") -> str:
-    """Convert a single RAW image to ACES format using rawtoaces.
+    """Convert a single RAW image to ACES2065-1 format using rawtoaces.
     
     Args:
         image_path: Path to RAW image file
-        output_dir: Output directory for ACES file
+        output_dir: Output directory for ACES2065-1 file
         prefix: Optional prefix for the output filename
         
     Returns:

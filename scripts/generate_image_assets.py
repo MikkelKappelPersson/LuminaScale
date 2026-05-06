@@ -43,7 +43,7 @@ def generate_image_assets():
         try:
             # 1. Transform ACES2065-1 to sRGB display space using OIIO
             # result is [C, H, W] float32
-            srgb_32f_np = oiio_aces_to_display(aces_file)
+            srgb_32f_np = oiio_aces_to_display(aces_file, input_cs="ACES2065-1")
             
             # 2. Save sRGB 32f as EXR
             exr_out_path = srgb_32f_dir / aces_file.name

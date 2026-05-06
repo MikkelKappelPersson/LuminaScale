@@ -63,8 +63,8 @@ def compare_renders(image_path, looks=None):
     print(f"✓ Old version rendered: shape={result_old.shape}, dtype={result_old.dtype}")
     print(f"  Value range: [{result_old.min():.4f}, {result_old.max():.4f}]")
     
-    # Render with current version
-    result_current = aces_to_display_current(image_path, looks=looks)
+    # Render with current version (now requires explicit input_cs)
+    result_current = aces_to_display_current(image_path, input_cs="ACES2065-1")
     print(f"✓ Current version rendered: shape={result_current.shape}, dtype={result_current.dtype}")
     print(f"  Value range: [{result_current.min():.4f}, {result_current.max():.4f}]")
     

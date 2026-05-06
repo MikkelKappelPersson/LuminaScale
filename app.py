@@ -863,4 +863,4 @@ if __name__ == "__main__":
 		mapper_checkpoint="checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
 		dequant_checkpoint="checkpoints/last.ckpt"
 	)
-	demo.launch(server_name="127.0.0.1", server_port=7860, share=False)
+	demo.launch(server_name="127.0.0.1", server_port=7860, share=True)

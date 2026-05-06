@@ -155,12 +155,66 @@ def _read_and_crop_exr_bytes(img_path: Path, crop_size: int, rng: np.random.Gene
     return exr_data, crop_meta
 
 
+def _crop_exr_array(image_chw: np.ndarray, crop_size: int, rng: np.random.Generator) -> tuple[bytes, dict]:
+    """Crop a [C, H, W] numpy array and write as EXR bytes."""
+    channels, height, width = image_chw.shape
+    
+    # Transpose to [H, W, C]
+    image = image_chw.transpose(1, 2, 0)
+
+    crop_applied = False
+    x0 = 0
+    y0 = 0
+    crop_w = width
+    crop_h = height
+
+    if crop_size > 0 and width >= crop_size and height >= crop_size:
+        x0 = int(rng.integers(0, width - crop_size + 1))
+        y0 = int(rng.integers(0, height - crop_size + 1))
+        crop_w = crop_size
+        crop_h = crop_size
+        image = image[y0:y0 + crop_h, x0:x0 + crop_w, :]
+        crop_applied = True
+
+    with tempfile.NamedTemporaryFile(suffix=".exr", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        out = oiio.ImageOutput.create(str(tmp_path))
+        if out is None:
+            raise RuntimeError(f"Failed to create EXR output: {tmp_path}")
+        out_spec = oiio.ImageSpec(crop_w, crop_h, channels, oiio.FLOAT)
+        if not out.open(str(tmp_path), out_spec):
+            raise RuntimeError(f"Failed to open EXR output for writing: {tmp_path}")
+        if not out.write_image(image):
+            raise RuntimeError(f"Failed to write cropped EXR data: {tmp_path}")
+        out.close()
+
+        with open(tmp_path, "rb") as f:
+            exr_data = f.read()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    crop_meta = {
+        "crop_applied": crop_applied,
+        "crop_size": crop_size,
+        "crop_x": x0,
+        "crop_y": y0,
+        "crop_width": crop_w,
+        "crop_height": crop_h,
+        "source_width": width,
+        "source_height": height,
+    }
+    return exr_data, crop_meta
+
+
 def bake_webdataset(
     metadata_parquet: str,
     shard_root: str,
     max_shard_size_gb: float = 3.0,
     crop_size: int = 2048,
     crop_seed: int = 42,
+    convert_to_acescct: bool = True,
 ):
     """
     Transform existing EXR files + Parquet manifest into WebDataset .tar shards.
@@ -168,11 +222,27 @@ def bake_webdataset(
     
     Safe to re-run: skips splits that already have shards, resumes from last checkpoint.
     
+    Args:
+        metadata_parquet: Path to Parquet manifest with image metadata
+        shard_root: Root directory for output shards
+        max_shard_size_gb: Maximum shard size in GB
+        crop_size: Random crop size before packing (0 to disable)
+        crop_seed: Seed for reproducible random crops
+        convert_to_acescct: If True, convert ACES2065-1 to ACEScct during baking
+    
     Each image is stored ONCE. During training, WebDataset.repeat(patches_per_image) loops through
     the data to enable on-the-fly patch generation (like OnTheFlyBDEDataset).
     """
     df = pd.read_parquet(metadata_parquet)
     max_size_bytes = int(max_shard_size_gb * 1e9)
+    
+    # Import conversion function if needed
+    if convert_to_acescct:
+        from pathlib import Path as PathLib
+        import sys
+        src_dir = PathLib(__file__).parent.parent / "src"
+        sys.path.insert(0, str(src_dir))
+        from luminascale.utils.io import colorconvert
     
     # Process each split separately so shards are non-overlapping
     for split in ["train", "val", "test"]:
@@ -197,9 +267,10 @@ def bake_webdataset(
         # Pattern for ShardWriter: train-000000.tar, etc.
         pattern = str(split_dir / f"{split}-%06d.tar")
         
+        color_note = " (converting to ACEScct)" if convert_to_acescct else ""
         print(
             f"🚀 Baking {len(split_df)} images into {split} shards "
-            f"(random crop={crop_size}x{crop_size}, seed={split_seed})..."
+            f"(random crop={crop_size}x{crop_size}, seed={split_seed}){color_note}..."
         )
         
         try:
@@ -209,8 +280,20 @@ def bake_webdataset(
                     if not img_path.exists():
                         print(f"⚠️ Warning: File not found {img_path}")
                         continue
-                        
-                    exr_data, crop_meta = _read_and_crop_exr_bytes(img_path, crop_size, rng)
+                    
+                    # Convert ACES2065-1 to ACEScct if requested
+                    if convert_to_acescct:
+                        try:
+                            # Convert to ACEScct using OIIO colorconvert
+                            img_array_acescct = colorconvert(img_path, "ACES2065-1", "ACEScct", strict=True)  # [H, W, 3]
+                            # Transpose to [C, H, W] for _crop_exr_array
+                            img_array_chw = img_array_acescct.transpose(2, 0, 1)
+                            exr_data, crop_meta = _crop_exr_array(img_array_chw, crop_size, rng)
+                        except Exception as e:
+                            print(f"⚠️ Warning: Failed to convert {img_path}: {e}")
+                            continue
+                    else:
+                        exr_data, crop_meta = _read_and_crop_exr_bytes(img_path, crop_size, rng)
                     
                     # Store each image ONCE with metadata
                     # During training, WebDataset.repeat(patches_per_image) will loop through the stream
@@ -222,6 +305,7 @@ def bake_webdataset(
                             "source": str(img_path),
                             "split": row.split,
                             "crop": crop_meta,
+                            "color_space": "ACEScct" if convert_to_acescct else "ACES2065-1",
                         }).encode("utf-8")
                     }
                     sink.write(sample)
@@ -245,10 +329,14 @@ if __name__ == "__main__":
     parser.add_argument("--max_shard_size", default=3.0, type=float, help="Max shard size in GB")
     parser.add_argument("--crop_size", default=2048, type=int, help="Random crop size before packing (0 disables)")
     parser.add_argument("--crop_seed", default=42, type=int, help="Seed for reproducible random crops")
+    parser.add_argument("--convert-to-acescct", action="store_true", default=True, 
+                        help="Convert ACES2065-1 to ACEScct during baking (default: True)")
+    parser.add_argument("--no-convert-to-acescct", action="store_false", dest="convert_to_acescct",
+                        help="Disable ACEScct conversion (keep ACES2065-1)")
     
     args = parser.parse_args()
     
     if args.mode == "manifest":
         create_parquet_manifest(args.input_dir, args.output_parquet, max_samples=args.max_samples)
     elif args.mode == "bake":
-        bake_webdataset(args.manifest, args.output_dir, args.max_shard_size, args.crop_size, args.crop_seed)
+        bake_webdataset(args.manifest, args.output_dir, args.max_shard_size, args.crop_size, args.crop_seed, args.convert_to_acescct)

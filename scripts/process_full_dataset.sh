@@ -1,9 +1,60 @@
 #!/usr/bin/env bash
 # Process full dataset: Quality filter + ACES conversion + WebDataset baking
-# Processes both MIT-Adobe_5K and PPR10K datasets, consolidates to /dataset/full
+# Processes both MIT-Adobe_5K and PPR10K datasets, consolidates to /dataset/aces
 # SAFE: Can be interrupted and resumed - checkpoints after each phase
 
 set -e
+
+# Parse command-line arguments
+COLOR_SPACE="ACES2065-1"
+OUTPUT_FOLDER=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --color-space)
+            COLOR_SPACE="$2"
+            shift 2
+            ;;
+        --output-folder)
+            OUTPUT_FOLDER="$2"
+            shift 2
+            ;;
+        --help)
+            echo "Usage: $0 [--color-space {ACES2065-1|ACEScct}] [--output-folder FOLDERNAME]"
+            echo ""
+            echo "Options:"
+            echo "  --color-space       Color space for WebDataset shards (default: ACES2065-1)"
+            echo "  --output-folder     Custom folder name (default: same as color-space)"
+            echo "  --help              Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0 --color-space ACEScct                       # Bake to 'dataset/ACEScct/'"
+            echo "  $0 --color-space ACEScct --output-folder v2    # Bake to 'dataset/v2/'"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Run '$0 --help' for usage information."
+            exit 1
+            ;;
+    esac
+done
+
+# Set output folder name (default to color space name)
+if [ -z "$OUTPUT_FOLDER" ]; then
+    OUTPUT_FOLDER="$COLOR_SPACE"
+fi
+
+# Validate color space
+case "$COLOR_SPACE" in
+    ACES2065-1|ACEScct)
+        ;;
+    *)
+        echo "Error: Unsupported color space '$COLOR_SPACE'"
+        echo "Supported: ACES2065-1, ACEScct"
+        exit 1
+        ;;
+esac
 
 cd "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")" || exit 1
 PROJECT_ROOT=$(pwd)
@@ -47,7 +98,8 @@ build_webdataset_dataset() {
     local dataset_name="$1"
     local input_dir="$2"
     local output_dir="$3"
-    local sample_limit="${4:-}"
+    local color_space="$4"
+    local sample_limit="${5:-}"
     local manifest="$output_dir/training_metadata.parquet"
     local shards_dir="$output_dir/shards"
 
@@ -82,14 +134,26 @@ build_webdataset_dataset() {
     echo "      Output:   $shards_dir"
     echo "      Max shard size: 3.0 GB"
     echo "      Random crop: 2048x2048 (seed=42)"
+    echo "      Target color space: $color_space"
     echo ""
 
-    pixi run python scripts/generate_wds_shards.py --mode bake \
-      --manifest "$manifest" \
-      --output_dir "$shards_dir" \
-        --max_shard_size 3.0 \
-        --crop_size 2048 \
-        --crop_seed 42 || {
+    local bake_cmd=(
+        pixi run python scripts/generate_wds_shards.py --mode bake
+        --manifest "$manifest"
+        --output_dir "$shards_dir"
+        --max_shard_size 3.0
+        --crop_size 2048
+        --crop_seed 42
+    )
+    
+    # Add color space conversion flag based on target
+    if [ "$color_space" = "ACEScct" ]; then
+        bake_cmd+=(--convert-to-acescct)
+    else
+        bake_cmd+=(--no-convert-to-acescct)
+    fi
+    
+    "${bake_cmd[@]}" || {
         log_error "$dataset_name shard baking failed. Run the command again to resume from where it stopped."
         echo ""
         echo "Partial shards saved in: $shards_dir"
@@ -103,81 +167,49 @@ build_webdataset_dataset() {
 
 log_step "🚀 LuminaScale Full Dataset Pipeline (Resumable)"
 log_step "Project root: $PROJECT_ROOT"
+log_step "Color space: $COLOR_SPACE → Output folder: $OUTPUT_FOLDER"
 echo ""
 
 # Setup directories
-OUTPUT_FULL="$PROJECT_ROOT/dataset/full"
-OUTPUT_DEV="$PROJECT_ROOT/dataset/dev"
-ACES_DIR="$OUTPUT_FULL/aces"
+EXR_DIR="$PROJECT_ROOT/dataset/exr_ACES2065-1"
+OUTPUT_FULL="$PROJECT_ROOT/dataset/$OUTPUT_FOLDER/full"
+OUTPUT_DEV="$PROJECT_ROOT/dataset/$OUTPUT_FOLDER/dev"
 SHARDS_DIR="$OUTPUT_FULL/shards"
-MIT_LOG="$OUTPUT_FULL/quality_summary_MIT-Adobe_5K.log"
-PPR_LOG="$OUTPUT_FULL/quality_summary_PPR10K.log"
-COMBINED_LOG="$OUTPUT_FULL/quality_summary_combined.log"
+LOG_DIR="$PROJECT_ROOT/log"
+MIT_LOG="$LOG_DIR/quality_summary_MIT-Adobe_5K.log"
+PPR_LOG="$LOG_DIR/quality_summary_PPR10K.log"
+COMBINED_LOG="$LOG_DIR/quality_summary_combined.log"
 DEV_SAMPLE_COUNT=50
 
-mkdir -p "$ACES_DIR"
+# Verify source EXR directory exists
+if [ ! -d "$EXR_DIR" ]; then
+    log_error "Source ACES2065-1 EXR directory not found: $EXR_DIR"
+    echo "Please run quality_filtered_aces_conversion.py first to generate ACES2065-1 EXRs"
+    exit 1
+fi
+
 mkdir -p "$SHARDS_DIR"/{train,val,test}
+mkdir -p "$LOG_DIR"
 
-log_step "📁 Output directories:"
-echo "   ACES files: $ACES_DIR"
-echo "   Shards:     $SHARDS_DIR"
-echo "   MIT log:    $MIT_LOG"
-echo "   PPR log:    $PPR_LOG"
-echo "   Combined:   $COMBINED_LOG"
+log_step "📁 Directory structure:"
+echo "   Project root: $PROJECT_ROOT"
+echo "   Source EXRs:  $EXR_DIR"
+echo "   Full output:  $OUTPUT_FULL"
+echo "   Dev output:   $OUTPUT_DEV"
+echo "   Shards dir:   $SHARDS_DIR"
+echo "   Log dir:      $LOG_DIR"
 echo ""
 
 # =============================================================================
-# Phase 1: Quality Filter & Convert to ACES
+# Phase 1: Verify ACES2065-1 source files exist
 # =============================================================================
 log_step "=================================================="
-log_step "Phase 1: Quality Filter & ACES Conversion"
+log_step "Phase 1: Verify Source ACES2065-1 Files"
 log_step "=================================================="
 echo ""
 
-# MIT-Adobe_5K
-MIT_COUNT=$(find "$ACES_DIR" -name "MIT-Adobe_5K_*.exr" 2>/dev/null | wc -l)
-log_step "[1/2] Processing MIT-Adobe_5K (full dataset)..."
-echo "      Input:  ../dataset/MIT-Adobe_5K/raw"
-echo "      Prefix: MIT-Adobe_5K_"
-echo "      Current converted: $MIT_COUNT"
-echo ""
-
-pixi run python scripts/quality_filtered_aces_conversion.py \
-    --input-dir ../dataset/MIT-Adobe_5K/raw \
-    --output-dir "$ACES_DIR" \
-    --dataset-prefix "MIT-Adobe_5K_" \
-    --highlight-clip 2.0 \
-    --noise-floor 10.0 \
-    --summary-log "$MIT_LOG" || {
-        log_error "MIT-Adobe_5K conversion failed. Run the command again to resume."
-        exit 1
-}
-
-echo ""
-
-# PPR10K
-PPR_COUNT=$(find "$ACES_DIR" -name "PPR10K_*.exr" 2>/dev/null | wc -l)
-log_step "[2/2] Processing PPR10K (full dataset)..."
-echo "      Input:  ../dataset/PPR10K/raw"
-echo "      Prefix: PPR10K_"
-echo "      Current converted: $PPR_COUNT"
-echo ""
-
-pixi run python scripts/quality_filtered_aces_conversion.py \
-    --input-dir ../dataset/PPR10K/raw \
-    --output-dir "$ACES_DIR" \
-    --dataset-prefix "PPR10K_" \
-    --highlight-clip 2.0 \
-    --noise-floor 10.0 \
-    --summary-log "$PPR_LOG" || {
-        log_error "PPR10K conversion failed. Run the command again to resume."
-        exit 1
-}
-
-echo ""
-log_step "✓ Phase 1 complete!"
-TOTAL_ACES=$(find "$ACES_DIR" -name "*.exr" | wc -l)
-echo "📊 Total ACES files: $TOTAL_ACES"
+TOTAL_ACES=$(find "$EXR_DIR" -name "*.exr" | wc -l)
+log_step "✓ Found $TOTAL_ACES ACES2065-1 EXR files in $EXR_DIR"
 echo ""
 
 if [ "$TOTAL_ACES" -lt "$DEV_SAMPLE_COUNT" ]; then
@@ -193,90 +225,38 @@ log_step "Phase 2: WebDataset Manifest & Sharding"
 log_step "=================================================="
 echo ""
 
-build_webdataset_dataset "full" "$ACES_DIR" "$OUTPUT_FULL"
+build_webdataset_dataset "full" "$EXR_DIR" "$OUTPUT_FULL" "$COLOR_SPACE"
 TRAIN_SHARDS=$(ls "$SHARDS_DIR"/train/*.tar 2>/dev/null | wc -l)
 VAL_SHARDS=$(ls "$SHARDS_DIR"/val/*.tar 2>/dev/null | wc -l)
 TEST_SHARDS=$(ls "$SHARDS_DIR"/test/*.tar 2>/dev/null | wc -l)
 
-MIT_PASSED=$(extract_metric_from_log "$MIT_LOG" "Passed quality check")
-MIT_QFAILED=$(extract_metric_from_log "$MIT_LOG" "Failed quality check")
-MIT_CLIP=$(extract_metric_from_log "$MIT_LOG" "  - Failed due to clipping only")
-MIT_NOISE=$(extract_metric_from_log "$MIT_LOG" "  - Failed due to noise only")
-MIT_BOTH=$(extract_metric_from_log "$MIT_LOG" "  - Failed due to both")
-MIT_CONVERTED=$(extract_metric_from_log "$MIT_LOG" "Successfully converted")
-MIT_EXCLUDED=$(extract_metric_from_log "$MIT_LOG" "Excluded (no spectral data)")
-MIT_CFAILED=$(extract_metric_from_log "$MIT_LOG" "Conversion failures")
-
-PPR_PASSED=$(extract_metric_from_log "$PPR_LOG" "Passed quality check")
-PPR_QFAILED=$(extract_metric_from_log "$PPR_LOG" "Failed quality check")
-PPR_CLIP=$(extract_metric_from_log "$PPR_LOG" "  - Failed due to clipping only")
-PPR_NOISE=$(extract_metric_from_log "$PPR_LOG" "  - Failed due to noise only")
-PPR_BOTH=$(extract_metric_from_log "$PPR_LOG" "  - Failed due to both")
-PPR_CONVERTED=$(extract_metric_from_log "$PPR_LOG" "Successfully converted")
-PPR_EXCLUDED=$(extract_metric_from_log "$PPR_LOG" "Excluded (no spectral data)")
-PPR_CFAILED=$(extract_metric_from_log "$PPR_LOG" "Conversion failures")
-
-TOTAL_PASSED=$((MIT_PASSED + PPR_PASSED))
-TOTAL_QFAILED=$((MIT_QFAILED + PPR_QFAILED))
-TOTAL_CLIP=$((MIT_CLIP + PPR_CLIP))
-TOTAL_NOISE=$((MIT_NOISE + PPR_NOISE))
-TOTAL_BOTH=$((MIT_BOTH + PPR_BOTH))
-TOTAL_CONVERTED=$((MIT_CONVERTED + PPR_CONVERTED))
-TOTAL_EXCLUDED=$((MIT_EXCLUDED + PPR_EXCLUDED))
-TOTAL_CFAILED=$((MIT_CFAILED + PPR_CFAILED))
-
+# Log the baking summary
 cat >> "$COMBINED_LOG" << EOF
 
 ================================================================================
 Run timestamp: $(date '+%Y-%m-%d %H:%M:%S')
-Report type: Combined quality + conversion summary
+Report type: WebDataset shard baking summary
+Source directory: $EXR_DIR
+Target color space: $COLOR_SPACE (output folder: $OUTPUT_FOLDER)
 Output directory: $OUTPUT_FULL
-Thresholds: highlight_clip <= 2.0%, noise_floor <= 10.0
+Notes: $COLOR_SPACE conversion happens during WebDataset shard baking
 --------------------------------------------------------------------------------
-MIT-Adobe_5K:
-    Passed quality check: $MIT_PASSED
-    Failed quality check: $MIT_QFAILED
-        - Failed due to clipping only: $MIT_CLIP
-        - Failed due to noise only: $MIT_NOISE
-        - Failed due to both: $MIT_BOTH
-    Successfully converted: $MIT_CONVERTED
-    Excluded (no spectral data): $MIT_EXCLUDED
-    Conversion failures: $MIT_CFAILED
-
-PPR10K:
-    Passed quality check: $PPR_PASSED
-    Failed quality check: $PPR_QFAILED
-        - Failed due to clipping only: $PPR_CLIP
-        - Failed due to noise only: $PPR_NOISE
-        - Failed due to both: $PPR_BOTH
-    Successfully converted: $PPR_CONVERTED
-    Excluded (no spectral data): $PPR_EXCLUDED
-    Conversion failures: $PPR_CFAILED
-
-TOTAL:
-    ACES files present: $TOTAL_ACES
-    Passed quality check: $TOTAL_PASSED
-    Failed quality check: $TOTAL_QFAILED
-        - Failed due to clipping only: $TOTAL_CLIP
-        - Failed due to noise only: $TOTAL_NOISE
-        - Failed due to both: $TOTAL_BOTH
-    Successfully converted: $TOTAL_CONVERTED
-    Excluded (no spectral data): $TOTAL_EXCLUDED
-    Conversion failures: $TOTAL_CFAILED
+FULL DATASET:
+    Source ACES2065-1 files: $TOTAL_ACES
     Train shards: $TRAIN_SHARDS
     Val shards: $VAL_SHARDS
     Test shards: $TEST_SHARDS
 ================================================================================
 EOF
 
-echo "   Combined log:          $COMBINED_LOG"
+echo "   Log file:              $COMBINED_LOG"
 echo ""
 log_step "=================================================="
 log_step "Phase 3: Dev Dataset (50 images)"
 log_step "=================================================="
 echo ""
 
-build_webdataset_dataset "dev" "$ACES_DIR" "$OUTPUT_DEV" "$DEV_SAMPLE_COUNT"
+build_webdataset_dataset "dev" "$EXR_DIR" "$OUTPUT_DEV" "$COLOR_SPACE" "$DEV_SAMPLE_COUNT"
 
 DEV_SHARDS_DIR="$OUTPUT_DEV/shards"
 DEV_TRAIN_SHARDS=$(ls "$DEV_SHARDS_DIR"/train/*.tar 2>/dev/null | wc -l)
@@ -289,22 +269,19 @@ log_step "✅ Dataset Builds Complete!"
 log_step "=================================================="
 echo ""
 echo "📊 Full dataset:"
-echo "   ACES files:            $TOTAL_ACES"
-echo "   Train shards:          $TRAIN_SHARDS files"
-echo "   Val shards:            $VAL_SHARDS files"
-echo "   Test shards:           $TEST_SHARDS files"
+echo "   ACES2065-1 files:      $TOTAL_ACES (stored in $EXR_DIR)"
+echo "   Train shards:          $TRAIN_SHARDS files ($COLOR_SPACE encoded)"
+echo "   Val shards:            $VAL_SHARDS files ($COLOR_SPACE encoded)"
+echo "   Test shards:           $TEST_SHARDS files ($COLOR_SPACE encoded)"
 echo ""
 echo "📊 Dev dataset:"
-echo "   Source ACES files:     first $DEV_SAMPLE_COUNT from $ACES_DIR"
-echo "   Train shards:          $DEV_TRAIN_SHARDS files"
-echo "   Val shards:            $DEV_VAL_SHARDS files"
-echo "   Test shards:           $DEV_TEST_SHARDS files"
+echo "   Source ACES2065-1 files: first $DEV_SAMPLE_COUNT from $EXR_DIR"
+echo "   Train shards:          $DEV_TRAIN_SHARDS files ($COLOR_SPACE encoded)"
+echo "   Val shards:            $DEV_VAL_SHARDS files ($COLOR_SPACE encoded)"
+echo "   Test shards:           $DEV_TEST_SHARDS files ($COLOR_SPACE encoded)"
 echo ""
-echo "📁 Full output structure:"
-tree -L 2 "$OUTPUT_FULL" 2>/dev/null || find "$OUTPUT_FULL" -type d | sed 's|'$OUTPUT_FULL'||' | sort
-echo ""
-echo "📁 Dev output structure:"
-tree -L 2 "$OUTPUT_DEV" 2>/dev/null || find "$OUTPUT_DEV" -type d | sed 's|'$OUTPUT_DEV'||' | sort
+echo "📁 Output directory structure:"
+tree -L 2 "$PROJECT_ROOT/dataset" 2>/dev/null || find "$PROJECT_ROOT/dataset" -maxdepth 2 -type d | sed "s|$PROJECT_ROOT/dataset|dataset|" | sort
 echo ""
 echo "📝 Next: Use datasets with WebDataset loader:"
 echo "   Full: import webdataset as wds"

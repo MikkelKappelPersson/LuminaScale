@@ -573,7 +573,6 @@ class ACESColorTransformer(nn.Module):
             import sys
             msg = f"[ACESColorTransformer] Loading ACES LUT on device {self.device}..."
             logger.debug(msg)
-            sys.stderr.write(msg + "\n")
             sys.stderr.flush()
 
             config_path = Path(lut_config_path).resolve() if lut_config_path else (
@@ -609,7 +608,6 @@ class ACESColorTransformer(nn.Module):
             
             msg = f"[ACESColorTransformer] ✓ LUT loaded successfully"
             logger.debug(msg)
-            sys.stderr.write(msg + "\n")
             sys.stderr.flush()
         else:
             self.lut_interpolator = None

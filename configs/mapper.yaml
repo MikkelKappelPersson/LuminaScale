@@ -6,7 +6,7 @@ defaults:
   - _self_
 
 # Training parameters
-batch_size: 1
+batch_size: 4
 epochs: 10  
 learning_rate: 1e-4  
 checkpoint_freq: 5        # Checkpoint every 5 epochs
@@ -53,7 +53,7 @@ trainer:
     target_color_space: "ACEScct"  # Target color space for loss computation. Shards contain ACEScct data.
 
 # Image processing
-crop_size: 1024
+crop_size: 512
 
 # dataset
 shard_path: "dataset/ACEScct/full/shards/train"  # WebDataset shards in ACEScct color space

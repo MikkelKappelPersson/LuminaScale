@@ -42,6 +42,7 @@ if src_path not in sys.path:
 from luminascale.training.aces_trainer import ACESMapperTrainer
 from luminascale.data.wds_dataset import LuminaScaleWebDataset
 from luminascale.training.logger import CustomTensorBoardLogger
+from luminascale.training.progress_bar import CustomRichProgressBar
 from luminascale.utils.aces_mapper_inference import build_look
 from luminascale.utils.aces_mapper_inference import close_figure, run_aces_mapper_inference
 
@@ -269,6 +270,9 @@ def main(cfg: DictConfig) -> None:
     # 1. Performance Optimizations
     torch.set_float32_matmul_precision('high')
     
+    # Enable memory-efficient allocation
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    
     # 2. Precision handling
     precision = cfg.get("precision", "16-mixed")
     task_name = str(cfg.get("task_name") or "mapper")
@@ -388,7 +392,7 @@ def main(cfg: DictConfig) -> None:
         ),
         LearningRateMonitor(logging_interval="step"),
         RichModelSummary(max_depth=2),
-        RichProgressBar(),
+        CustomRichProgressBar(batch_size=int(cfg.get("batch_size", 4))),
         HparamsMetricsCallback(hparams_dict),
         PeriodicACESMapperInferenceCallback(
             aces_input_path=inference_vis_input_path,

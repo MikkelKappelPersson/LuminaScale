@@ -67,6 +67,7 @@ class OutputCatalog:
 		aces_tensor_chw: torch.Tensor,
 		output_path: Path | str,
 		device: torch.device,
+		input_cs: str = "ACES2065-1",
 		quality: int = 95,
 	) -> Path:
 		"""Convert ACES [C, H, W] tensor to sRGB JPG.
@@ -89,7 +90,7 @@ class OutputCatalog:
 		
 		aces_hwc = aces_tensor_chw.permute(1, 2, 0).to(device=device, dtype=torch.float32)
 		transformer = ACESColorTransformer(device=device, use_lut=True)
-		srgb_hwc = transformer.aces_to_srgb_32f(aces_hwc.unsqueeze(0)).squeeze(0)
+		srgb_hwc = transformer.aces_to_srgb_32f(aces_hwc.unsqueeze(0), input_cs=input_cs).squeeze(0)
 		srgb_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
 		
 		# Save as JPG
@@ -125,6 +126,7 @@ class OutputCatalog:
 		exr_filename: str,
 		srgb_jpg_filename: str,
 		device: torch.device,
+		input_cs: str = "ACES2065-1",
 		quality: int = 95,
 	) -> tuple[str, str]:
 		"""Add an ACES output with both EXR and sRGB JPG variants.
@@ -147,7 +149,11 @@ class OutputCatalog:
 		
 		# Save sRGB JPG variant
 		srgb_jpg_path = self._aces_tensor_to_srgb_jpg(
-			aces_tensor_chw, self.output_dir / srgb_jpg_filename, device, quality=quality
+			aces_tensor_chw,
+			self.output_dir / srgb_jpg_filename,
+			device,
+			input_cs=input_cs,
+			quality=quality,
 		)
 		self.catalog[f"{name}(srgb)"] = str(srgb_jpg_path)
 		
@@ -159,6 +165,7 @@ class OutputCatalog:
 		exr_filename: str,
 		srgb_jpg_filename: str,
 		device: torch.device,
+		input_cs: str = "ACES2065-1",
 		quality: int = 95,
 	) -> tuple[str, str]:
 		"""Add reference ACES output (EXR + sRGB JPG).
@@ -179,6 +186,7 @@ class OutputCatalog:
 			exr_filename,
 			srgb_jpg_filename,
 			device,
+			input_cs=input_cs,
 			quality=quality,
 		)
 	

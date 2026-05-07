@@ -116,24 +116,30 @@ def _catalog_download_defaults(outputs_catalog: dict[str, str]) -> list[str]:
 	return [name for name in DEFAULT_DOWNLOAD_SELECTIONS if name in outputs_catalog]
 
 
-def _catalog_slider_defaults(outputs_catalog: dict[str, str]) -> tuple[str, str]:
-	"""Choose valid default dropdown values for the slider from the current catalog."""
-	available_names = _catalog_display_names(outputs_catalog)
-	if not available_names:
-		return "", ""
-
-	left_default, right_default = DEFAULT_SLIDER_SELECTIONS
-	left_value = left_default if left_default in outputs_catalog else available_names[0]
-	if right_default in outputs_catalog:
-		right_value = right_default
-	elif len(available_names) > 1:
-		right_value = available_names[1]
-	else:
-		right_value = available_names[0]
-	return left_value, right_value
+def _get_model_target_color_space(model: torch.nn.Module) -> str:
+    """Infer the mapper output color space from the loaded model."""
+    forward_model = model.model if hasattr(model, "model") and isinstance(model.model, torch.nn.Module) else model
+    return str(getattr(forward_model, "target_color_space", getattr(model, "target_color_space", "ACEScct")))
 
 
-def _sync_output_controls(outputs_catalog: dict[str, str]) -> tuple[object, object, tuple[str, str], object, list[str]]:
+def _catalog_slider_defaults(outputs_catalog: dict[str, str]) -> tuple[str | None, str | None]:
+    """Choose valid default dropdown values for the slider from the current catalog."""
+    available_names = _catalog_display_names(outputs_catalog)
+    if not available_names:
+        return None, None
+
+    left_default, right_default = DEFAULT_SLIDER_SELECTIONS
+    left_value = left_default if left_default in outputs_catalog else available_names[0]
+    if right_default in outputs_catalog:
+        right_value = right_default
+    elif len(available_names) > 1:
+        right_value = available_names[1]
+    else:
+        right_value = available_names[0]
+    return left_value, right_value
+
+
+def _sync_output_controls(outputs_catalog: dict[str, str]) -> tuple[object, object, object, object, list[str]]:
 	"""Update dropdown choices/defaults and refresh the image slider after inference."""
 	choices = _catalog_display_names(outputs_catalog)
 	left_value, right_value = _catalog_slider_defaults(outputs_catalog)
@@ -163,7 +169,7 @@ def run_pipeline(
     # Defaulted internal parameters (removed from UI)
     dequant_output_name: str = "",
     save_dequant: bool = False,
-    mapper_checkpoint: str = "checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
+    mapper_checkpoint: str = "checkpoints/aces-mapper-20260507_164021-epoch=18.ckpt",
     dequant_checkpoint: str = "checkpoints/last.ckpt",
     look_mode: str = "random",
     slope: str = "1.0,1.0,1.0",
@@ -251,7 +257,10 @@ def run_pipeline(
             transformer = rfi.ACESColorTransformer(device=device, use_lut=True)
 
             # Always compute clean reference (ungraded ACES to sRGB)
-            clean_srgb_hwc = transformer.aces_to_srgb_32f(aces_hwc.unsqueeze(0)).squeeze(0)
+            clean_srgb_hwc = transformer.aces_to_srgb_32f(
+                aces_hwc.unsqueeze(0),
+                input_cs="ACES2065-1",
+            ).squeeze(0)
             clean_srgb_hwc = torch.clamp(clean_srgb_hwc, 0.0, 1.0)
             clean_reference_chw = clean_srgb_hwc.permute(2, 0, 1).detach().cpu()
 
@@ -260,7 +269,10 @@ def run_pipeline(
                 look = rfi.build_look(look_mode, slope, offset, power, saturation)
                 cdl_processor = rfi.GPUCDLProcessor(device=device)
                 aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
-                srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
+                srgb_hwc = transformer.aces_to_srgb_32f(
+                    aces_graded_hwc.unsqueeze(0),
+                    input_cs="ACES2065-1",
+                ).squeeze(0)
                 srgb_hwc = torch.clamp(srgb_hwc, 0.0, 1.0)
                 dequant_reference_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
             else:
@@ -323,7 +335,9 @@ def run_pipeline(
 			num_lap=num_lap,
 			num_residual_blocks=num_residual_blocks,
 		)
+        mapper_target_color_space = _get_model_target_color_space(mapper_model)
         LOGGER.info("Loaded mapper model")
+        LOGGER.info("Mapper target color space=%s", mapper_target_color_space)
         # Keep the mapper in float32: the spatial-frequency transformer uses
         # complex ops that fail under ComplexHalf autocast on CUDA.
 
@@ -345,6 +359,7 @@ def run_pipeline(
 			f"{input_stem}_out.exr",
 			f"{input_stem}_out_srgb.jpg",
 			device,
+            input_cs=mapper_target_color_space,
 			quality=95,
 		)
         LOGGER.info("Captured mapper ACES output to catalog")
@@ -364,6 +379,7 @@ def run_pipeline(
 				f"{input_stem}_reference.exr",
 				f"{input_stem}_reference_srgb.jpg",
 				device,
+                input_cs="ACES2065-1",
 				quality=95,
 			)
             LOGGER.info("Captured reference ACES output to catalog")
@@ -397,6 +413,7 @@ def run_pipeline(
 			f"Dashboard saved: {'yes' if plot_path else 'no'}",
 			f"CDL look used: {'yes' if look is not None else 'no'}",
 			f"Device: {device}",
+            f"Mapper target color space: {mapper_target_color_space}",
 			f"AMP: {'enabled' if use_amp else 'disabled'} ({amp_dtype_name})",
 		]
         if save_plot and not input_is_aces:
@@ -422,48 +439,35 @@ def run_pipeline(
 
 
 def _warmup_pipeline(
-	mapper_checkpoint: str,
-	dequant_checkpoint: str,
-	device_name: str = "cuda",
+    mapper_checkpoint: str,
+    dequant_checkpoint: str,
+    device_name: str = "cuda",
 ) -> None:
-	"""Run a dummy pass to initialize CUDA kernels and prevent the first-run crash."""
-	try:
-		if device_name == "cuda" and not torch.cuda.is_available():
-			return
+    """Run a dummy pass to initialize CUDA kernels and prevent the first-run crash."""
+    try:
+        if device_name == "cuda" and not torch.cuda.is_available():
+            return
 
-		LOGGER.info("Warming up pipeline with dummy data...")
-		device = torch.device(device_name)
+        LOGGER.info("Warming up pipeline with dummy data...")
+        device = torch.device(device_name)
 
-		# 1. Load models
-		mapper_ckpt = Path(mapper_checkpoint).expanduser().resolve()
-		dequant_ckpt = Path(dequant_checkpoint).expanduser().resolve()
-		if not mapper_ckpt.exists() or not dequant_ckpt.exists():
-			LOGGER.warning("Warmup skipped: Checkpoints not found at default paths.")
-			return
+        mapper_ckpt = Path(mapper_checkpoint).expanduser().resolve()
+        dequant_ckpt = Path(dequant_checkpoint).expanduser().resolve()
+        if not mapper_ckpt.exists() or not dequant_ckpt.exists():
+            LOGGER.warning("Warmup skipped: Checkpoints not found at default paths.")
+            return
 
-		dequant_model = rfi.load_dequant_model_from_checkpoint(dequant_ckpt, device, channels=32)
-		mapper_model = rfi.load_model_from_checkpoint(
-			mapper_ckpt,
-			device,
-			num_luts=3,
-			lut_dim=33,
-			num_lap=3,
-			num_residual_blocks=5,
-		)
+        dequant_model = rfi.load_dequant_model_from_checkpoint(dequant_ckpt, device, channels=32)
 
-		# 2. Run dummy dequant (128x128)
-		dummy_input = torch.zeros((1, 3, 128, 128), device=device)
-		with torch.no_grad():
-			_ = dequant_model(dummy_input)
-			LOGGER.info("Dequant warmup complete.")
+        dummy_input = torch.zeros((1, 3, 128, 128), device=device)
+        with torch.no_grad():
+            _ = dequant_model(dummy_input)
+            LOGGER.info("Dequant warmup complete.")
 
-			# 3. Run dummy mapper
-			_ = mapper_model(dummy_input)
-			LOGGER.info("Mapper warmup complete.")
-
-		LOGGER.info("Pipeline warmup successful.")
-	except Exception as e:
-		LOGGER.warning("Warmup failed (this is usually non-fatal): %s", e)
+        LOGGER.info("Skipping mapper dummy warmup; only dequant kernels are pre-initialized.")
+        LOGGER.info("Pipeline warmup successful.")
+    except Exception as e:
+        LOGGER.warning("Warmup failed (this is usually non-fatal): %s", e)
 
 
 def _generate_exr_thumbnail(exr_path: str) -> str:
@@ -544,30 +548,39 @@ def _run_pipeline_from_ui(
 
 
 def _get_slider_images(
-	dropdown1_value: str,
-	dropdown2_value: str,
-	outputs_catalog: dict[str, str],
-) -> tuple[str, str]:
-	"""Get image paths for slider based on dropdown selections.
-	
-	Args:
-		dropdown1_value: Display name of first comparison image.
-		dropdown2_value: Display name of second comparison image.
-		outputs_catalog: Catalog dict from inference outputs.
-		
-	Returns:
-		Tuple of (image_path_1, image_path_2) for slider display.
-		Returns ("", "") if catalog is empty.
-	"""
-	if not outputs_catalog:
-		LOGGER.warning("Outputs catalog is empty, cannot populate slider")
-		return "", ""
-	
-	path1 = outputs_catalog.get(dropdown1_value, "")
-	path2 = outputs_catalog.get(dropdown2_value, "")
-	
-	LOGGER.info("Slider images: %s -> %s, %s -> %s", dropdown1_value, path1, dropdown2_value, path2)
-	return path1, path2
+    dropdown1_value: str | None,
+    dropdown2_value: str | None,
+    outputs_catalog: dict[str, str],
+) -> object:
+    """Get image paths for slider based on dropdown selections.
+
+    Args:
+        dropdown1_value: Display name of first comparison image.
+        dropdown2_value: Display name of second comparison image.
+        outputs_catalog: Catalog dict from inference outputs.
+
+    Returns:
+        A slider update with a valid filepath pair when possible.
+        Returns an empty slider state when catalog is empty or selections are invalid.
+    """
+    if not outputs_catalog or not dropdown1_value or not dropdown2_value:
+        LOGGER.warning("Outputs catalog is empty, cannot populate slider")
+        return gr.update(value=None)
+
+    path1 = outputs_catalog.get(dropdown1_value, "")
+    path2 = outputs_catalog.get(dropdown2_value, "")
+    if not path1 or not path2:
+        LOGGER.warning(
+            "Slider selection missing files: %s -> %s, %s -> %s",
+            dropdown1_value,
+            path1,
+            dropdown2_value,
+            path2,
+        )
+        return gr.update(value=None)
+
+    LOGGER.info("Slider images: %s -> %s, %s -> %s", dropdown1_value, path1, dropdown2_value, path2)
+    return gr.update(value=(path1, path2))
 
 
 def _get_download_zip(
@@ -798,7 +811,7 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
     )
 
     # Wire slider dropdown changes to update slider images
-    def _update_slider(dropdown1: str, dropdown2: str, catalog: dict[str, str]) -> tuple[str, str]:
+    def _update_slider(dropdown1: str | None, dropdown2: str | None, catalog: dict[str, str]) -> object:
         """Callback to update slider when dropdowns change."""
         return _get_slider_images(dropdown1, dropdown2, catalog)
 

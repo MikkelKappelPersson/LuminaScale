@@ -164,8 +164,16 @@ def run_mapper_inference_on_srgb(
     if not keep_aligned_output and align_multiple > 1:
         pred_aces_chw = pred_aces_chw[:, :out_h, :out_w]
 
+    target_color_space = getattr(
+        forward_model,
+        "target_color_space",
+        getattr(model, "target_color_space", "ACEScct"),
+    )
     transformer = ACESColorTransformer(device=device, use_lut=True)
-    pred_srgb_hwc = transformer.aces_to_srgb_32f(pred_aces_chw.permute(1, 2, 0).unsqueeze(0)).squeeze(0)
+    pred_srgb_hwc = transformer.aces_to_srgb_32f(
+        pred_aces_chw.permute(1, 2, 0).unsqueeze(0),
+        input_cs=target_color_space,
+    ).squeeze(0)
     pred_srgb_chw = pred_srgb_hwc.permute(2, 0, 1).detach().cpu()
     return pred_aces_chw.detach().cpu(), pred_srgb_chw
 
@@ -568,12 +576,18 @@ def main() -> None:
         transformer = ACESColorTransformer(device=device, use_lut=True)
 
         # Clean reference for final dashboard panel: ACES -> sRGB, no look.
-        clean_srgb_hwc = transformer.aces_to_srgb_32f(aces_hwc.unsqueeze(0)).squeeze(0)
+        clean_srgb_hwc = transformer.aces_to_srgb_32f(
+            aces_hwc.unsqueeze(0),
+            input_cs="ACES2065-1",
+        ).squeeze(0)
         clean_srgb_hwc = torch.clamp(clean_srgb_hwc, 0.0, 1.0)
         clean_reference_chw = clean_srgb_hwc.permute(2, 0, 1).detach().cpu()
 
         aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
-        srgb_hwc = transformer.aces_to_srgb_32f(aces_graded_hwc.unsqueeze(0)).squeeze(0)
+        srgb_hwc = transformer.aces_to_srgb_32f(
+            aces_graded_hwc.unsqueeze(0),
+            input_cs="ACES2065-1",
+        ).squeeze(0)
         srgb_hwc = torch.clamp(srgb_hwc, 0.0, 1.0)
         dequant_reference_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
         srgb_hwc = torch.round(srgb_hwc * 255.0) / 255.0

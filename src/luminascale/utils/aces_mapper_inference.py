@@ -110,14 +110,17 @@ def load_model_from_checkpoint(
     num_residual_blocks: int,
 ) -> ACESMapper:
     """Load an ACESMapper checkpoint into an inference model."""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    hyper_parameters = checkpoint.get("hyper_parameters", {}) if isinstance(checkpoint, dict) else {}
+    target_color_space = hyper_parameters.get("target_color_space", "ACEScct")
+
     model = ACESMapper(
         num_luts=num_luts,
         lut_dim=lut_dim,
         num_lap=num_lap,
         num_residual_blocks=num_residual_blocks,
+        target_color_space=target_color_space,
     ).to(device)
-
-    checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
     assert isinstance(state_dict, dict), "Checkpoint state_dict is not a dictionary"
 

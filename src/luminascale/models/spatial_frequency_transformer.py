@@ -117,7 +117,22 @@ class WindowAttention(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=0.02)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, q, kv=None, mask=None):
+    def _get_relative_position_index(self, window_size: tuple[int, int]) -> torch.Tensor:
+        if tuple(window_size) == tuple(self.window_size):
+            return getattr(self, "relative_position_index")
+
+        coords_h = torch.arange(window_size[0], device=self.relative_position_bias_table.device)
+        coords_w = torch.arange(window_size[1], device=self.relative_position_bias_table.device)
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
+        coords_flatten = torch.flatten(coords, 1)
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+        relative_coords[:, :, 0] += self.window_size[0] - 1
+        relative_coords[:, :, 1] += self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        return relative_coords.sum(-1)
+
+    def forward(self, q, kv=None, mask=None, window_size_override=None):
         kv = q if kv is None else kv
         B_q, N1, C = q.shape
         B_kv, N2, C_kv = kv.shape
@@ -147,7 +162,8 @@ class WindowAttention(nn.Module):
 
         # Fix: Access buffer directly instead of calling it
         # Cast to Tensor for Pylance if it's confused about buffer vs callable
-        idx = getattr(self, "relative_position_index").view(-1)
+        effective_window_size = self.window_size if window_size_override is None else tuple(window_size_override)
+        idx = self._get_relative_position_index(effective_window_size).view(-1)
         relative_position_bias = self.relative_position_bias_table[idx].view(
             N1, N2, -1
         ).permute(2, 0, 1).contiguous()
@@ -204,16 +220,31 @@ class FourierWindowAttention(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=0.02)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x, mask=None):
+    def _get_relative_position_index(self, window_size: tuple[int, int]) -> torch.Tensor:
+        if tuple(window_size) == tuple(self.window_size):
+            return getattr(self, "relative_position_index")
+
+        coords_h = torch.arange(window_size[0], device=self.relative_position_bias_table.device)
+        coords_w = torch.arange(window_size[1], device=self.relative_position_bias_table.device)
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
+        coords_flatten = torch.flatten(coords, 1)
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+        relative_coords[:, :, 0] += self.window_size[0] - 1
+        relative_coords[:, :, 1] += self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        return relative_coords.sum(-1)
+
+    def forward(self, x, mask=None, window_size_override=None):
         B, N, C = x.shape
-        window_size = self.window_size
+        window_size = self.window_size if window_size_override is None else tuple(window_size_override)
         
         # Spatial Attention
         qkv_spatial = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv_spatial[0], qkv_spatial[1], qkv_spatial[2]
         attn = (q @ k.transpose(-2, -1)) * self.scale
         
-        idx = getattr(self, "relative_position_index").view(-1)
+        idx = self._get_relative_position_index(window_size).view(-1)
         relative_position_bias = self.relative_position_bias_table[idx].view(
             N, N, -1).permute(2, 0, 1).contiguous()
         attn = attn + relative_position_bias.unsqueeze(0)
@@ -339,7 +370,7 @@ class EncoderTransformerBlock(nn.Module):
         x_windows = window_partition(shifted_x, window_size)
         x_windows = x_windows.view(-1, window_size[0] * window_size[1], C)
 
-        attn_windows = self.attn(x_windows, mask=attn_mask)[0]
+        attn_windows = self.attn(x_windows, mask=attn_mask, window_size_override=window_size)[0]
 
         attn_windows = attn_windows.view(-1, window_size[0], window_size[1], C)
         shifted_x = window_reverse(attn_windows, window_size, B, Hp, Wp)
@@ -411,9 +442,9 @@ class DecoderTransformerBlock(nn.Module):
         enc_windows = window_partition(enc_feat, window_size).view(-1, window_size[0] * window_size[1], C)
         
         # Self-attention on decoder features
-        x_windows = self.attn1(x_windows)[0]
+        x_windows = self.attn1(x_windows, window_size_override=window_size)[0]
         # Cross-attention using encoder features as KV
-        x_windows = self.attn2(x_windows, kv=enc_windows)[0]
+        x_windows = self.attn2(x_windows, kv=enc_windows, window_size_override=window_size)[0]
         
         # Put back together
         x = window_reverse(x_windows.view(-1, window_size[0], window_size[1], C), window_size, B, Hp, Wp)

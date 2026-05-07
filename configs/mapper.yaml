@@ -12,7 +12,7 @@ learning_rate: 1e-4
 checkpoint_freq: 5        # Checkpoint every 5 epochs
 save_top_k: 3             # Keep best 3 performers (PSNR)
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
-precision: "32"
+precision: "bf16-mixed"
 inference_vis_input_path: dataset/exr_ACES2065-1/MIT-Adobe_5K_a0001-jmac_DSC1459.exr  # Reference image (ACES2065-1); will be converted to target_color_space at runtime
 inference_vis_downsample_size: 1024 
 

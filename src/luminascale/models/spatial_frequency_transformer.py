@@ -250,34 +250,46 @@ class FourierWindowAttention(nn.Module):
         # Ref implementation usually has a separate Linear for spectral path.
         # Since I can't easily add a module now without changing __init__, I will chunk.
         
-        # Standard approach for this architecture: 
+        # Standard approach for this architecture:
         # Apply qkv to each half (real/imag) or project.
-        # Let's project real/imag separately using the same qkv weights to maintain parameter count logic
-        qkv_real = self.qkv(x_f.real.view(B_f, N_f, C)).reshape(B_f, N_f, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        qkv_imag = self.qkv(x_f.imag.view(B_f, N_f, C)).reshape(B_f, N_f, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        
-        q_f = torch.complex(qkv_real[0], qkv_imag[0])
-        k_f = torch.complex(qkv_real[1], qkv_imag[1])
-        v_f = torch.complex(qkv_real[2], qkv_imag[2])
-        
-        attn_f = (q_f @ k_f.transpose(-2, -1)) * self.scale
-        # Softmax on Complex numbers is not standard, traditionally use magnitude
-        # or separate branches. We use magnitude to define importance.
-        attn_mag = attn_f.abs()
-        attn_mag = self.softmax(attn_mag)
-        attn_mag = self.attn_drop(attn_mag)
-        
-        # We need to project the attenuation back to the complex domain or 
-        # just apply the real-valued attention to the complex values.
-        # Here we apply the attention weights to the complex values v_f.
-        # attn_mag: [B_f, heads, N_f, N_f] (float)
-        # v_f: [B_f, heads, N_f, head_dim] (complex)
-        # Result should be complex.
-        x_f_res = (attn_mag.to(v_f.dtype) @ v_f).transpose(1, 2).reshape(B_f, H_f, W_f, C)
-        
-        # Inverse 2D FFT
-        x_f = torch.fft.irfftn(x_f_res, s=(H, W), dim=(1, 2), norm='ortho')
-        x_f = x_f.reshape(B, N, C)
+        # Let's project real/imag separately using the same qkv weights to maintain parameter count logic.
+        #
+        # Force the entire spectral attention block to run in fp32:
+        # ComplexHalf (complex16) is not supported by CUDA bmm/baddbmm kernels.
+        # autocast must be explicitly disabled here — casting inputs to fp32 is not enough
+        # because autocast will still downcast the nn.Linear output back to fp16.
+        spectral_dtype = x_f.real.dtype  # original dtype (may be float16 under autocast)
+        with torch.autocast(device_type="cuda", enabled=False):
+            real_fp32 = x_f.real.float().view(B_f, N_f, C)
+            imag_fp32 = x_f.imag.float().view(B_f, N_f, C)
+
+            # Cast qkv weights to fp32 in case they were moved to fp16 by the autocast context
+            qkv_w = self.qkv.weight.float()
+            qkv_b = self.qkv.bias.float() if self.qkv.bias is not None else None
+
+            qkv_real = torch.nn.functional.linear(real_fp32, qkv_w, qkv_b).reshape(B_f, N_f, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+            qkv_imag = torch.nn.functional.linear(imag_fp32, qkv_w, qkv_b).reshape(B_f, N_f, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+
+            q_f = torch.complex(qkv_real[0], qkv_imag[0])
+            k_f = torch.complex(qkv_real[1], qkv_imag[1])
+            v_f = torch.complex(qkv_real[2], qkv_imag[2])
+
+            attn_f = (q_f @ k_f.transpose(-2, -1)) * self.scale
+            # Softmax on Complex numbers is not standard, traditionally use magnitude
+            # or separate branches. We use magnitude to define importance.
+            attn_mag = attn_f.abs()
+            attn_mag = self.softmax(attn_mag)
+            attn_mag = self.attn_drop(attn_mag)
+
+            # attn_mag: [B_f, heads, N_f, N_f] (float32)
+            # v_f: [B_f, heads, N_f, head_dim] (complex64)
+            x_f_res = (attn_mag.to(v_f.dtype) @ v_f).transpose(1, 2).reshape(B_f, H_f, W_f, C)
+
+            # Inverse 2D FFT
+            x_f = torch.fft.irfftn(x_f_res, s=(H, W), dim=(1, 2), norm='ortho')
+
+        # Cast back to the original precision before merging with the spatial path
+        x_f = x_f.to(spectral_dtype).reshape(B, N, C)
 
         x = x_spatial + x_f
         x = self.proj(x)

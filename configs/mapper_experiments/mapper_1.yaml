@@ -1,0 +1,4 @@
+
+batch_size: 4
+
+precision: "bf16-mixed"

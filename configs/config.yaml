@@ -34,4 +34,7 @@ hydra:
     chdir: false
   run:
     dir: .  # Prevent Hydra from creating timestamped output directories
+  sweep:
+    dir: .  # Prevent Hydra from creating multirun/<date>/<time> directories
+    subdir: ""  # Keep multirun jobs in current working directory
   output_subdir: null  # Disable .hydra/ subdirectory creation

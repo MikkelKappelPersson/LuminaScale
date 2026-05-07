@@ -1,3 +1,5 @@
+# @package _global_
+
 batch_size: 16
 
 precision: "bf16-mixed"

@@ -8,10 +8,11 @@ Based on: https://github.com/PyTorchLightning/pytorch-lightning/issues/5584
 
 from __future__ import annotations
 
+from argparse import Namespace
 from typing import Any
 
+from lightning_fabric.utilities.rank_zero import rank_zero_only
 from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.utilities.rank_zero import rank_zero_only
 
 
 class CustomTensorBoardLogger(TensorBoardLogger):
@@ -24,13 +25,19 @@ class CustomTensorBoardLogger(TensorBoardLogger):
     explicitly when we're ready (on_train_start and on_train_epoch_end).
     """
 
-    def log_hyperparams(self, params: dict[str, Any], metrics: dict[str, Any] | None = None) -> None:
+    def log_hyperparams(
+        self,
+        params: dict[str, Any] | Namespace,
+        metrics: dict[str, Any] | None = None,
+        step: int | None = None,
+    ) -> None:
         """Override to disable automatic hparams logging.
         
         PyTorch Lightning calls this too early (before metrics exist).
         We'll use log_hyperparams_metrics instead.
         """
-        pass
+        _ = (params, metrics, step)
+        return
 
     @rank_zero_only
     def log_hyperparams_metrics(

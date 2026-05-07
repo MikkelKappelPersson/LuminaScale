@@ -28,6 +28,11 @@ For a full run instead of dev:
 pixi run python scripts/train_aces_mapper.py --config-name=mapper
 ```
 
+To run multiple mapper experiments in parallel (e.g., mapper_2 and mapper_3):
+```bash
+pixi run python scripts/train_aces_mapper.py --config-name=mapper --multirun mapper_experiments=mapper_1,mapper_2,mapper_3,mapper_4
+```
+
 ### Start TensorBoard 
 
 ```bash

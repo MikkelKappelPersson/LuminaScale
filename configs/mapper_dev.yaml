@@ -4,10 +4,12 @@
 defaults:
   - mapper
   - _self_
+#  - optional mapper_experiments: null
 
-epochs: 10 
+epochs: 30 
 
 batch_size: 4
+precision: "bf16-mixed"
 
 # Override crop size for dev to save memory
 crop_size: 512

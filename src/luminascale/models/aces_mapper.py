@@ -62,19 +62,21 @@ class ACESMapper(nn.Module):
         
         self.num_luts = num_luts
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             x: Input image of shape [B, 3, H, W] in display-referred sRGB space.
             
         Returns:
-            Mapped image in target color space (self.target_color_space) of shape [B, 3, H, W].
-            Color space is typically ACEScct or ACES2065-1, as configured.
+            Tuple of:
+              - Mapped image in target color space of shape [B, 3, H, W].
+              - point_weights tensor [B, num_luts] used for LUT regularization
+                (returned so the trainer can reuse them without a second SFT pass).
         """
-        # 1. Predict weights via SFT
-        # We need a low-res version for the SFT as per LLF-LUT
-        # Note: the SFT forward automatically handles downsampling/pooling internally in our implementation
-        weights = self.sft(x) # [B, num_luts * 2]
+        # 1. Predict weights via SFT on low-resolution pyramid input (LLF-LUT style)
+        pyr_input = self.refiner.lap_pyramid.pyramid_decom(x)
+        pyr_input_low = pyr_input[-1]
+        weights = self.sft(pyr_input_low)  # [B, num_luts * 2]
         
         # Split weights for global and point-wise logic
         global_weights = weights[:, :self.num_luts]
@@ -105,4 +107,6 @@ class ACESMapper(nn.Module):
         # Reconstruct the final image from the refined pyramid
         out = self.refiner.reconstruct(pyr_refined)
         
-        return out
+        # Return output and point_weights so the trainer can compute LUT regularization
+        # without a second SFT forward pass (matches original LLF-LUT design).
+        return out, point_weights

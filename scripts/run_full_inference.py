@@ -158,7 +158,8 @@ def run_mapper_inference_on_srgb(
     amp_ctx = nullcontext()
 
     with torch.inference_mode(), amp_ctx:
-        pred_aces_chw = forward_model(model_input).squeeze(0)
+        pred_aces_chw, _ = forward_model(model_input)
+        pred_aces_chw = pred_aces_chw.squeeze(0)
 
     if not keep_aligned_output and align_multiple > 1:
         pred_aces_chw = pred_aces_chw[:, :out_h, :out_w]

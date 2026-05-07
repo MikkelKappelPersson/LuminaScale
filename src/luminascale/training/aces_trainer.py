@@ -68,7 +68,7 @@ class ACESMapperTrainer(L.LightningModule):
         # 3. Data Processing (GPU-accelerated)
         self.pair_generator = None
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(x)
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
@@ -91,10 +91,15 @@ class ACESMapperTrainer(L.LightningModule):
         )
         return x, y
 
-    def _compute_losses(self, pred_img: torch.Tensor, target_img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _compute_losses(
+        self,
+        pred_img: torch.Tensor,
+        target_img: torch.Tensor,
+        point_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         loss_l1 = self.loss_l1(pred_img, target_img)
         perceptual_loss = self.lpips_loss(pred_img, target_img, normalize=True).mean()
-        lut_loss = self._compute_lut_regularization(pred_img)
+        lut_loss = self._compute_lut_regularization(point_weights, device=pred_img.device, dtype=pred_img.dtype)
         total_loss = (
             self.hparams.lambda_l1 * loss_l1
             + self.hparams.lambda_lpips * perceptual_loss
@@ -131,13 +136,22 @@ class ACESMapperTrainer(L.LightningModule):
         )
         return tv, mono
 
-    def _compute_lut_regularization(self, input_img: torch.Tensor) -> torch.Tensor:
-        weights = self.model.sft(input_img)
-        pred_weight = weights[:, : self.model.num_luts]
-        weights_norm = torch.mean(pred_weight ** 2)
+    def _compute_lut_regularization(
+        self,
+        point_weights: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Compute LUT regularization losses.
 
-        tv_cons = torch.zeros((), device=input_img.device, dtype=input_img.dtype)
-        mn_cons = torch.zeros((), device=input_img.device, dtype=input_img.dtype)
+        Matches original LLF-LUT design: weights_norm reuses point_weights
+        already computed during the model forward pass (no second SFT pass).
+        TV / monotonicity losses operate purely on the LUT parameter tensors.
+        """
+        weights_norm = torch.mean(point_weights ** 2)
+
+        tv_cons = torch.zeros((), device=device, dtype=dtype)
+        mn_cons = torch.zeros((), device=device, dtype=dtype)
         for lut_module in self.model.luts:
             tv_term, mono_term = self._lut_tv_and_mono(lut_module.lut)
             tv_cons = tv_cons + tv_term
@@ -161,10 +175,10 @@ class ACESMapperTrainer(L.LightningModule):
         if input_img.shape[0] == 0:
             return None
         
-        # Forward pass
-        pred_img = self(input_img)
+        # Forward pass — returns (output_image, point_weights)
+        pred_img, point_weights = self(input_img)
         
-        loss_l1, perceptual_loss, lut_loss, total_loss = self._compute_losses(pred_img, target_img)
+        loss_l1, perceptual_loss, lut_loss, total_loss = self._compute_losses(pred_img, target_img, point_weights)
         
         # Log metrics
         self.log("loss_l1/train", loss_l1, batch_size=input_img.shape[0])
@@ -187,9 +201,9 @@ class ACESMapperTrainer(L.LightningModule):
         if input_img.shape[0] == 0:
             return
 
-        pred_img = self(input_img)
+        pred_img, point_weights = self(input_img)
         
-        loss_l1, perceptual_loss, lut_loss, total_loss = self._compute_losses(pred_img, target_img)
+        loss_l1, perceptual_loss, lut_loss, total_loss = self._compute_losses(pred_img, target_img, point_weights)
         
         # PSNR & MSE for evaluation
         mse = F.mse_loss(pred_img, target_img)

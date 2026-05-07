@@ -396,6 +396,16 @@ class DecoderTransformerBlock(nn.Module):
         shortcut = x
         x = self.norm1(x)
 
+        # Ensure feature maps are divisible by window size before partitioning.
+        # This mirrors EncoderTransformerBlock behavior and avoids shape errors
+        # for low-resolution inputs (e.g. 5x8 with window 4x4).
+        pad_b = (window_size[0] - H % window_size[0]) % window_size[0]
+        pad_r = (window_size[1] - W % window_size[1]) % window_size[1]
+        if pad_r > 0 or pad_b > 0:
+            x = F.pad(x, (0, 0, 0, pad_r, 0, pad_b, 0, 0))
+            enc_feat = F.pad(enc_feat, (0, 0, 0, pad_r, 0, pad_b, 0, 0))
+        _, Hp, Wp, _ = x.shape
+
         # Partition both main feature and skip feature into identical window grids
         x_windows = window_partition(x, window_size).view(-1, window_size[0] * window_size[1], C)
         enc_windows = window_partition(enc_feat, window_size).view(-1, window_size[0] * window_size[1], C)
@@ -406,7 +416,9 @@ class DecoderTransformerBlock(nn.Module):
         x_windows = self.attn2(x_windows, kv=enc_windows)[0]
         
         # Put back together
-        x = window_reverse(x_windows.view(-1, window_size[0], window_size[1], C), window_size, B, H, W)
+        x = window_reverse(x_windows.view(-1, window_size[0], window_size[1], C), window_size, B, Hp, Wp)
+        if pad_r > 0 or pad_b > 0:
+            x = x[:, :H, :W, :].contiguous()
         
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))

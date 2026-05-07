@@ -381,7 +381,8 @@ def run_aces_mapper_inference(
     amp_ctx = torch.autocast(device_type="cuda", dtype=model_dtype) if use_autocast else nullcontext()
 
     with torch.inference_mode(), amp_ctx:
-        pred_aces_chw = forward_model(model_input).squeeze(0)
+        pred_aces_chw, _ = forward_model(model_input)
+        pred_aces_chw = pred_aces_chw.squeeze(0)
 
     pred_aces_hwc = pred_aces_chw.permute(1, 2, 0)
     # Model output is in ACEScct (working space); use OCIO-backed conversion

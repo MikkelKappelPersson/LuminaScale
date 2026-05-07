@@ -46,7 +46,8 @@
 			"/^python -c \"from hydra import initialize, compose; from omegaconf import OmegaConf; initialize\\(config_path='configs', version_base='1\\.1'\\); cfg = compose\\(config_name='mapper_dev'\\); print\\('✓ Config loaded successfully'\\); print\\('Model params:', OmegaConf\\.to_container\\(cfg\\.model\\.params\\)\\)\"$/": {
 				"approve": true,
 				"matchCommandLine": true
-			}
+			},
+			"ssh": true
 		}
 	}
 }

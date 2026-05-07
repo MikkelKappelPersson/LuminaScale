@@ -1,0 +1,10 @@
+# Entry config for ACES Mapper training (development mode).
+# Inherits from mapper.yaml with overrides for quick iteration.
+
+defaults:
+  - mapper
+  - _self_
+
+batch_size: 4
+
+precision: "bf16-mixed"

@@ -176,37 +176,29 @@ class HparamsMetricsCallback(Callback):
             trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
 
 
-class CheckpointRenameCallback(Callback):
-    """Rename checkpoint files to replace dots with hyphens in metric values.
-    
-    Transforms: `aces-mapper-20260507_164021-18_psnr30.45.ckpt`
-    To:         `aces-mapper-20260507_164021-18_psnr30-45.ckpt`
+class SanitizedModelCheckpoint(ModelCheckpoint):
+    """ModelCheckpoint that sanitizes PSNR token formatting in checkpoint filenames.
+
+    Transforms generated names like:
+      `...-00_psnr16.15.ckpt`
+    into:
+      `...-00_psnr16-15.ckpt`
     """
-    
-    def __init__(self, checkpoint_dir: str | Path) -> None:
-        super().__init__()
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.processed_files = set()
-    
-    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
-        """Check for new checkpoint files and rename them after each epoch."""
-        if not self.checkpoint_dir.exists():
-            return
-        
-        for ckpt_file in self.checkpoint_dir.glob("*.ckpt"):
-            if ckpt_file.name in self.processed_files:
-                continue
-            
-            # Replace dots with hyphens in metric values (pattern: _psnr30.45 → _psnr30-45)
-            new_name = re.sub(r"(_psnr\d+)\.(\d+)", r"\1-\2", ckpt_file.name)
-            
-            if new_name != ckpt_file.name:
-                new_path = ckpt_file.parent / new_name
-                ckpt_file.rename(new_path)
-                logger.debug(f"Renamed checkpoint: {ckpt_file.name} → {new_name}")
-                self.processed_files.add(new_name)
-            else:
-                self.processed_files.add(ckpt_file.name)
+
+    def format_checkpoint_name(
+        self,
+        metrics: dict[str, torch.Tensor],
+        filename: str | None = None,
+        ver: int | None = None,
+        prefix: str | None = None,
+    ) -> str:
+        checkpoint_name = super().format_checkpoint_name(
+            metrics=metrics,
+            filename=filename,
+            ver=ver,
+            prefix=prefix,
+        )
+        return re.sub(r"(_psnr\d+)\.(\d+)", r"\1-\2", checkpoint_name)
 
 
 class PeriodicACESMapperInferenceCallback(Callback):
@@ -424,14 +416,14 @@ def main(cfg: DictConfig) -> None:
     inference_output_dir = Path(logger_tb.log_dir)
     checkpoint_dir = os.path.join(logger_tb.log_dir, "checkpoints")
     callbacks = [
-        ModelCheckpoint(
+        SanitizedModelCheckpoint(
             dirpath=checkpoint_dir,
             filename=f"{checkpoint_name_prefix}-{run_version}-{{epoch:02d}}_psnr{{psnr/val:.2f}}",
             monitor="psnr/val",
             mode="max",
-            save_top_k=3,
+            save_top_k=int(cfg.get("save_top_k", 3)),
+            auto_insert_metric_name=False,
         ),
-        CheckpointRenameCallback(checkpoint_dir=checkpoint_dir),
         LearningRateMonitor(logging_interval="step"),
         RichModelSummary(max_depth=2),
         CustomRichProgressBar(batch_size=int(cfg.get("batch_size", 4))),

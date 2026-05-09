@@ -1,6 +1,5 @@
-
 # @package _global_
 
-batch_size: 1
+batch_size: 16
 
 precision: "32"

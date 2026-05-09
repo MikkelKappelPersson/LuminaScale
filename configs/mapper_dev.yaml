@@ -6,7 +6,7 @@ defaults:
   - _self_
 #  - optional mapper_experiments: null
 
-epochs: 30 
+epochs: 3 
 
 batch_size: 4
 precision: "bf16-mixed"

@@ -176,6 +176,39 @@ class HparamsMetricsCallback(Callback):
             trainer.logger.log_hyperparams_metrics(self.hparams_dict, metrics_dict)
 
 
+class CheckpointRenameCallback(Callback):
+    """Rename checkpoint files to replace dots with hyphens in metric values.
+    
+    Transforms: `aces-mapper-20260507_164021-18_psnr30.45.ckpt`
+    To:         `aces-mapper-20260507_164021-18_psnr30-45.ckpt`
+    """
+    
+    def __init__(self, checkpoint_dir: str | Path) -> None:
+        super().__init__()
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.processed_files = set()
+    
+    def on_train_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        """Check for new checkpoint files and rename them after each epoch."""
+        if not self.checkpoint_dir.exists():
+            return
+        
+        for ckpt_file in self.checkpoint_dir.glob("*.ckpt"):
+            if ckpt_file.name in self.processed_files:
+                continue
+            
+            # Replace dots with hyphens in metric values (pattern: _psnr30.45 → _psnr30-45)
+            new_name = re.sub(r"(_psnr\d+)\.(\d+)", r"\1-\2", ckpt_file.name)
+            
+            if new_name != ckpt_file.name:
+                new_path = ckpt_file.parent / new_name
+                ckpt_file.rename(new_path)
+                logger.debug(f"Renamed checkpoint: {ckpt_file.name} → {new_name}")
+                self.processed_files.add(new_name)
+            else:
+                self.processed_files.add(ckpt_file.name)
+
+
 class PeriodicACESMapperInferenceCallback(Callback):
     """Save and log ACES mapper comparison dashboards every N epochs.
     
@@ -269,6 +302,8 @@ class PeriodicACESMapperInferenceCallback(Callback):
 def main(cfg: DictConfig) -> None:
     # 1. Performance Optimizations
     torch.set_float32_matmul_precision('high')
+    torch.backends.cudnn.benchmark = False
+    logger.info("[MAIN] cuDNN benchmark disabled to avoid benchmark cache teardown crashes")
     
     # Enable memory-efficient allocation
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -346,7 +381,10 @@ def main(cfg: DictConfig) -> None:
         lambda_lpips=cfg.trainer.params.get("lambda_lpips", 0.1),
         lambda_smooth=cfg.trainer.params.get("lambda_smooth", 1e-4),
         lambda_mono=cfg.trainer.params.get("lambda_mono", 1e-4),
-        crop_size=cfg.get("crop_size", 512)
+        crop_size=cfg.get("crop_size", 512),
+        crop_mode=str(cfg.data.crop_mode),
+        lr_scheduler_eta_min=float(cfg.trainer.params.lr_scheduler_eta_min),
+        max_epochs=int(cfg.epochs),
     )
 
     # 4. Logger & Callbacks
@@ -371,6 +409,9 @@ def main(cfg: DictConfig) -> None:
         "lambda_lpips": float(cfg.trainer.params.get("lambda_lpips", 0.1)),
         "lambda_smooth": float(cfg.trainer.params.get("lambda_smooth", 1e-4)),
         "lambda_mono": float(cfg.trainer.params.get("lambda_mono", 1e-4)),
+        "lr_scheduler_eta_min": float(cfg.trainer.params.lr_scheduler_eta_min),
+        "gradient_clip_val": float(cfg.trainer.params.gradient_clip_val),
+        "crop_mode": str(cfg.data.crop_mode),
         "num_luts": int(cfg.model.params.num_luts),
         "lut_dim": int(cfg.model.params.lut_dim),
         "num_lap": int(cfg.model.params.num_lap),
@@ -385,11 +426,12 @@ def main(cfg: DictConfig) -> None:
     callbacks = [
         ModelCheckpoint(
             dirpath=checkpoint_dir,
-            filename=f"{checkpoint_name_prefix}-{run_version}-{{epoch:02d}}",
-            monitor="loss_total/val" if val_loader else "loss_total/train",
-            mode="min",
+            filename=f"{checkpoint_name_prefix}-{run_version}-{{epoch:02d}}_psnr{{psnr/val:.2f}}",
+            monitor="psnr/val",
+            mode="max",
             save_top_k=3,
         ),
+        CheckpointRenameCallback(checkpoint_dir=checkpoint_dir),
         LearningRateMonitor(logging_interval="step"),
         RichModelSummary(max_depth=2),
         CustomRichProgressBar(batch_size=int(cfg.get("batch_size", 4))),
@@ -408,18 +450,21 @@ def main(cfg: DictConfig) -> None:
 
     # 5. Trainer setup
     trainer = L.Trainer(
-        max_epochs=cfg.get("epochs", 100),
+        max_epochs=int(cfg.epochs),
         accelerator="gpu",
         devices=1,  # Adjust for multi-GPU if needed
         logger=logger_tb,
         callbacks=callbacks,
         precision=precision, 
-        gradient_clip_val=1.0,
+        gradient_clip_val=float(cfg.trainer.params.gradient_clip_val),
     )
 
     # 6. Start Training
     print(f"[MAIN] Starting fit...")
     trainer.fit(trainer_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    completion_message = "[MAIN] Training loop completed successfully. If the process crashes after this point, the failure happened during teardown/shutdown."
+    print(completion_message, flush=True)
+    logger.info(completion_message)
 
 
 if __name__ == "__main__":

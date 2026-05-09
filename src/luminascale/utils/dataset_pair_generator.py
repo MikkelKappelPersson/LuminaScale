@@ -33,15 +33,22 @@ class DatasetPairGenerator:
     def __init__(
         self,
         device: torch.device,
+        crop_mode: str = "center",
         timing_tracker: dict[str, list] | None = None,
     ) -> None:
         """Initialize GPU transformer for WebDataset batches.
         
         Args:
             device: GPU device (e.g., torch.device('cuda:0'))
+            crop_mode: Crop strategy for patch extraction ("center" or "random")
             timing_tracker: Optional dict to collect performance metrics
         """
+        if crop_mode not in {"center", "random"}:
+            raise ValueError(
+                f"Invalid crop_mode='{crop_mode}'. Supported modes are 'center' and 'random'."
+            )
         self.device = device
+        self.crop_mode = crop_mode
         self.timing_tracker = timing_tracker or {}
         
         # PyTorch ACES transformer
@@ -330,9 +337,19 @@ class DatasetPairGenerator:
                 h, w, c = spec.height, spec.width, spec.nchannels
                 
                 # ROI Decode
-                if crop_size > 0 and (h >= crop_size and w >= crop_size):
-                    top = (h - crop_size) // 2
-                    left = (w - crop_size) // 2
+                if crop_size > 0:
+                    if h < crop_size or w < crop_size:
+                        raise ValueError(
+                            f"crop_size={crop_size} is out of bounds for sample {idx} with image size ({h}, {w})."
+                        )
+
+                    if self.crop_mode == "random":
+                        top = int(np.random.randint(0, h - crop_size + 1))
+                        left = int(np.random.randint(0, w - crop_size + 1))
+                    else:
+                        top = (h - crop_size) // 2
+                        left = (w - crop_size) // 2
+
                     # The correct signature for read_region is often:
                     # read_region(subimage, miplevel, xbegin, xend, ybegin, yend, zbegin, zend, chans)
                     # and sometimes takes a type hint like "float" as first arg
@@ -372,6 +389,8 @@ class DatasetPairGenerator:
                 tensors_ldr.append(srgb_input.permute(2, 0, 1))
                 tensors_aces.append(aces_target.permute(2, 0, 1))
                 
+            except ValueError:
+                raise
             except Exception as e:
                 logger.error(f"Error in ACES Mapper generator: {e}")
                 continue

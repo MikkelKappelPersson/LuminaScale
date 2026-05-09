@@ -45,7 +45,9 @@ trainer:
   module: luminascale.training.aces_trainer.ACESMapperTrainer
   params:
     lr: 1e-4
+    lr_scheduler_eta_min: 1e-6
     weight_decay: 1e-4
+    gradient_clip_val: 0.3
     lambda_l1: 1.0
     lambda_lpips: 0.1
     lambda_smooth: 1e-4
@@ -56,6 +58,9 @@ trainer:
 crop_size: 512
 
 # dataset
+data:
+  crop_mode: "random"
+
 shard_path: "dataset/ACEScct/full/shards/train"  # WebDataset shards in ACEScct color space
 val_shard_path: "dataset/ACEScct/full/shards/val"  # Validation shards (ACEScct)
 metadata_parquet: "dataset/ACEScct/full/training_metadata.parquet"

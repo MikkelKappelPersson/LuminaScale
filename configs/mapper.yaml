@@ -7,7 +7,7 @@ defaults:
   - optional mapper_experiments: null
 
 # Training parameters
-batch_size: 4
+batch_size: 1
 epochs: 30  
 checkpoint_freq: 5        # Checkpoint every 5 epochs
 save_top_k: 3             # Keep best 3 performers (PSNR)

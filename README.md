@@ -68,8 +68,17 @@ srun --mem=16G singularity exec luminascale.sif tensorboard --logdir=outputs/tra
 ```
 ### Training with config file
 ```bash
-sbatch scripts/train_aces_mapper.sh --config-name=mapper```
-### Training with params
+sbatch scripts/train_aces_mapper.sh --config-name=mapper
+```
+or
+```bash
+sbatch scripts/train_aces_mapper.sh mapper_experiments=mapper_1
+```
+### Training multiple
+```bash
+sbatch scripts/train_aces_mapper.sh --multirun mapper_experiments=mapper_1,mapper_2,mapper_3,mapper_4
+```
+### Training with config overrides
 ```bash
 sbatch scripts/train_dequant_net.sh loss.l1_weight=1.0 loss.l2_weight=0.0 loss.charbonnier_weight=2.0 loss.grad_match_weight=0.0
 ```

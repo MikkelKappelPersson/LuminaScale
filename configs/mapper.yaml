@@ -8,8 +8,8 @@ defaults:
 
 # Training parameters
 batch_size: 1
-epochs: 30  
-checkpoint_freq: 5        # Checkpoint every 5 epochs
+epochs: 100  
+checkpoint_freq: 10        # Checkpoint every 10 epochs
 save_top_k: 3             # Keep best 3 performers (PSNR)
 resume_ckpt_path: null #/mnt/MKP01/med8_project/LuminaScale/outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt  # Path to checkpoint to resume from (e.g., outputs/training/20260412_143228/checkpoints/dequant-epoch=49.ckpt)
 precision: "32"

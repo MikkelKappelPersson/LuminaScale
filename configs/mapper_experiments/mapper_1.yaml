@@ -1,6 +1,4 @@
 
 # @package _global_
 
-batch_size: 1
-
-precision: "bf16-mixed"
+resume_ckpt_path: /home/student.aau.dk/fs62fb/projects/LuminaScale/outputs/training/mapper/20260509_232648/checkpoints/aces-mapper-20260509_232648-29_psnr30-40.ckpt

@@ -20,7 +20,7 @@ precision: "32"
 
 # Loss weights (tuned for smooth dequantization)
 loss:
-  l1_weight: 0.1
+  l1_weight: 1.0
   l2_weight: 0.0
   charbonnier_weight: 0.0
   grad_match_weight: 0.0
@@ -34,10 +34,15 @@ target_blur:
   anneal_epochs: ${epochs}    # Gradually reduce blur over the full training duration
 
 # Image processing specific to dequantization
-crop_size: 2048
+crop_size: 1024
 val_crop_size: 1024  # Validation crop size
 bit_crunch_contrast_min: 1.0
 bit_crunch_contrast_max: 1.0
 
+shard_path: "dataset/ACEScct/full/shards/train"  # WebDataset shards in ACEScct color space
+val_shard_path: "dataset/ACEScct/full/shards/val"  # Validation shards (ACEScct)
+metadata_parquet: "dataset/ACEScct/full/training_metadata.parquet"
+
+
 # Output scoping
-output_dir: ./outputs/training
+output_dir: ./outputs/training/dequant

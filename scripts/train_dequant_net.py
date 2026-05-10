@@ -72,6 +72,20 @@ logging.basicConfig(
     force=True
 )
 
+
+def resolve_python_executable() -> str:
+    """Resolve the Python executable for callback subprocesses.
+
+    Priority:
+    1. `LUMINASCALE_PYTHON_EXECUTABLE` override for explicit HPC/container control
+    2. Current interpreter (`sys.executable`) for pixi/venv/container parity
+    3. Plain `python` as a last-resort fallback
+    """
+    override = os.environ.get("LUMINASCALE_PYTHON_EXECUTABLE")
+    if override:
+        return override
+    return sys.executable or "python"
+
 # List of hyperparameters to keep at the top of the TensorBoard/HParams list for visibility
 DEFAULT_LOGGED_HPARAMS = [
     "config_name",
@@ -117,6 +131,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
         self.width = width
         self.height = height
         self.base_channels = base_channels
+        self.python_executable = resolve_python_executable()
         self.run_dequant_inference_script = project_root / "scripts" / "run_dequant_inference.py"
     
     def on_fit_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
@@ -191,7 +206,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
             
             # Run run_dequant_inference.py
             cmd = [
-                "python",
+                self.python_executable,
                 str(self.run_dequant_inference_script),
                 "--checkpoint",
                 str(temp_checkpoint),
@@ -204,6 +219,9 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 str(self.base_channels),
                 "--output",
                 str(output_exr),
+                "--save-plot",
+                "--plot-output",
+                str(output_png),
                 "--device",
                 str(str(pl_module.device).split(":")[0]),
                 "--apply-contrast-to-output",
@@ -273,7 +291,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
         
         except Exception as e:
             logger.error(f"Error during synthetic inference visualization: {e}", exc_info=True)
-            # Best effort cleanup
+        finally:
             if temp_checkpoint is not None:
                 try:
                     temp_checkpoint.unlink(missing_ok=True)
@@ -293,9 +311,9 @@ class SyntheticInferenceVisualizerCallback(Callback):
         Run every 5 epochs (plus at training start).
         
         Images:
-        - assets/grinder_01.jpg
-        - assets/mountains_01.jpg
-        - assets/woods_1.jpg
+        - assets/imgs/grinder_01.jpg
+        - assets/imgs/mountains_01.jpg
+        - assets/imgs/woods_1.jpg
         
         Args:
             trainer: PyTorch Lightning trainer
@@ -311,9 +329,9 @@ class SyntheticInferenceVisualizerCallback(Callback):
             return
         
         test_images = [
-            project_root / "assets" / "grinder_01.jpg",
-            project_root / "assets" / "mountains_01.jpg",
-            project_root / "assets" / "woods_1.jpg",
+            project_root / "assets/imgs" / "grinder_01.jpg",
+            project_root / "assets/imgs" / "mountains_01.jpg",
+            project_root / "assets/imgs" / "woods_1.jpg",
         ]
         
         temp_checkpoint: Path | None = None
@@ -342,7 +360,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 
                 # Run run_dequant_inference.py (no PNG comparison needed)
                 cmd = [
-                    "python",
+                    self.python_executable,
                     str(self.run_dequant_inference_script),
                     "--checkpoint",
                     str(temp_checkpoint),
@@ -382,13 +400,11 @@ class SyntheticInferenceVisualizerCallback(Callback):
                     logger.warning(f"Output EXR not found: {output_exr}")
             
             # Cleanup temporary checkpoint
-            if temp_checkpoint and temp_checkpoint.exists():
-                temp_checkpoint.unlink()
             logger.debug(f"✓ Real image inference logged: {epoch_label} (3 images)")
         
         except Exception as e:
             logger.error(f"Error during real image inference: {e}", exc_info=True)
-            # Best effort cleanup
+        finally:
             if temp_checkpoint is not None:
                 try:
                     temp_checkpoint.unlink(missing_ok=True)
@@ -564,6 +580,25 @@ class HparamsMetricsCallback(Callback):
         return metrics_dict
 
 
+class SanitizedModelCheckpoint(ModelCheckpoint):
+    """ModelCheckpoint that sanitizes floating metric tokens in checkpoint filenames."""
+
+    def format_checkpoint_name(
+        self,
+        metrics: dict[str, torch.Tensor],
+        filename: str | None = None,
+        ver: int | None = None,
+        prefix: str | None = None,
+    ) -> str:
+        checkpoint_name = super().format_checkpoint_name(
+            metrics=metrics,
+            filename=filename,
+            ver=ver,
+            prefix=prefix,
+        )
+        return re.sub(r"(_psnr\d+)\.(\d+)", r"\1-\2", checkpoint_name)
+
+
 class CustomRichProgressBar(RichProgressBar):
     """Rich progress bar with custom batch metrics (GPU time and loss).
     
@@ -640,7 +675,7 @@ def main(cfg: DictConfig) -> None:
     
     # Run directory setup
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    task_name = cfg.get("task_name", "unknown")
+    task_name = str(cfg.get("task_name") or "dequant")
     print(f"[MAIN] Run ID: {run_id} (Task: {task_name})")
 
     # 1. Create WebDataset Loaders
@@ -757,12 +792,9 @@ def main(cfg: DictConfig) -> None:
         f"CB={charbonnier_weight}_EA={grad_match_weight}_TV-{total_variation_variant}={total_variation_weight}"
     )
 
-    # Append a sanitized version of the loss formula to the TensorBoard/run directory name
-    run_dir_suffix = re.sub(r"[^A-Za-z0-9._=-]+", "_", loss_fn_str).strip("_")
-    
     # Task-specific output scoping from config (e.g., outputs/dequant_runs/training)
     base_output_dir = Path(cfg.get("output_dir", "./outputs/training")).resolve()
-    run_dir = base_output_dir / f"{run_id}_{run_dir_suffix}"
+    run_dir = base_output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[MAIN] Run directory: {run_dir}")
@@ -783,15 +815,16 @@ def main(cfg: DictConfig) -> None:
     )
     
     # Task-specific checkpoint naming
-    task_label = cfg.get("task_name", "model")
-    checkpoint_callback = ModelCheckpoint(
+    task_label = str(cfg.get("task_name") or "dequant")
+    checkpoint_callback = SanitizedModelCheckpoint(
         dirpath=str(run_dir / "checkpoints"),
-        filename=f"{task_label}-{{epoch:02d}}",
+        filename=f"{task_label}-{run_id}-{{epoch:02d}}_psnr{{metric_psnr/val:.2f}}",
         every_n_epochs=cfg.get("checkpoint_freq", 1),
         save_top_k=cfg.get("save_top_k", 3),  # Keep track of top performers (PSNR)
         monitor="metric_psnr/val",
         mode="max",
-        save_last=True,  # ALWAYS save the latest state as last.ckpt
+        save_last=False,  # Keep only the monitored top-k checkpoints
+        auto_insert_metric_name=False,
     )
     
     # Create dynamic optimizer string showing the actual optimizer and learning rate
@@ -895,16 +928,6 @@ def main(cfg: DictConfig) -> None:
     print(f"\n{'='*80}")
     print(f"[MAIN] ✓ Training completed!")
     print(f"{'='*80}\n")
-    
-    # Explicitly save final state_dict as a standard .pt file (easier for inference/redistribution)
-    final_model_path = run_dir / "dequant_net_final.pt"
-    model_to_save = ls_module.model
-    # Unwrap torch.compile if needed
-    if hasattr(model_to_save, '_orig_mod'):
-        model_to_save = model_to_save._orig_mod
-    
-    torch.save(model_to_save.state_dict(), final_model_path)
-    print(f"[MAIN] ✓ Final model weights saved to: {final_model_path}")
 
 if __name__ == "__main__":
     main()

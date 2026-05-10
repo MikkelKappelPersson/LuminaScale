@@ -2,3 +2,9 @@
 # @package _global_
 
 resume_ckpt_path: /home/student.aau.dk/fs62fb/projects/LuminaScale/outputs/training/mapper/20260509_232648/checkpoints/aces-mapper-20260509_232648-29_psnr30-40.ckpt
+
+trainer:
+  module: luminascale.training.aces_trainer.ACESMapperTrainer
+  params:
+    lr: 1e-5
+    lr_scheduler_eta_min: 1e-7

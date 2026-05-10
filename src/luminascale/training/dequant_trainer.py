@@ -529,7 +529,7 @@ class DequantTrainer(L.LightningModule):
             self.log("loss_total/train", loss, prog_bar=False, sync_dist=True)
             
             # Log the mask periodically for debugging (first batch of every epoch)
-            if batch_idx == 0:
+            if batch_idx == 0 and edge_mask.shape[0] > 0:
                 self.logger.experiment.add_image("masks/edge_aware", edge_mask[0].mean(dim=0, keepdim=True), global_step=self.global_step)
             
             self.last_batch_gpu_ms = total_batch_ms

@@ -198,7 +198,7 @@ class DatasetPairGenerator:
                 
                 # === ACES TRANSFORM ===
                 t_aces_start = time.perf_counter()
-                srgb_32f = self.pytorch_transformer.aces_to_srgb_32f(aces_graded.unsqueeze(0)).squeeze(0)
+                srgb_32f = self.pytorch_transformer.aces_to_srgb_32f(aces_graded.unsqueeze(0), input_cs="ACEScct").squeeze(0)
                 t_aces = time.perf_counter()
                 aces_times.append((t_aces - t_aces_start) * 1000)
                 

@@ -33,6 +33,9 @@ To run multiple mapper experiments in parallel (e.g., mapper_2 and mapper_3):
 pixi run python scripts/train_aces_mapper.py --config-name=mapper --multirun mapper_experiments=mapper_1,mapper_2,mapper_3,mapper_4
 ```
 
+```bash
+sbatch scripts/train_aces_mapper.sh mapper_experiments=mapper_1
+```
 ### Start TensorBoard 
 
 ```bash
@@ -86,4 +89,11 @@ Run inference on a 2K synthetic sky gradient using `srun`:
 
 ```bash
 srun --gres=gpu:1 --mem=16G singularity exec --nv luminascale.sif python3 scripts/run_dequant_inference.py --checkpoint dataset/temp/test_run/20260331_164330_dequant_net_epoch_1.pt --synthetic --width 2048 --height 1024 --output outputs/inference/sky_2k.exr
+```
+
+### File management
+copying files from HPC to local:
+
+```bash
+rsync -avz --progress aicloud:~/projects/LuminaScale/outputs/training/ /run/media/mikkelkp/MKP01/med8_project/LuminaScale/outputs/training/
 ```

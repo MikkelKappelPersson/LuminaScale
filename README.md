@@ -14,33 +14,33 @@ Machine learning model for bit-depth expansion and ACES color space normalizatio
 
 For local development and training on your workstation.
 
-### Train ACES mapper (Pixi)
 
-From the project root:
 
-```bash
-pixi run python scripts/train_aces_mapper.py --config-name=mapper_dev
-```
-
-For a full run instead of dev:
-
-```bash
-pixi run python scripts/train_aces_mapper.py --config-name=mapper
-```
-
-To run multiple mapper experiments in parallel (e.g., mapper_2 and mapper_3):
-```bash
-pixi run python scripts/train_aces_mapper.py --config-name=mapper --multirun mapper_experiments=mapper_1,mapper_2,mapper_3,mapper_4
-```
-
-```bash
-sbatch scripts/train_aces_mapper.sh mapper_experiments=mapper_1
-```
 ### Start TensorBoard 
 
 ```bash
 pixi run tensorboard --logdir outputs/training/mapper
 ```
+### Train ACES mapper (Pixi)
+
+From the project root:
+
+```bash
+pixi run python scripts/train_aces_mapper.py --config-name=mapper
+
+pixi run python scripts/train_aces_mapper.py --config-name=mapper --multirun mapper_experiments=mapper_1,mapper_2,mapper_3,mapper_4
+
+```
+
+### Train Deqaunt (Pixi)
+```bash
+pixi run python scripts/train_dequant_net.py --config-name=dequant
+
+pixi run python scripts/train_dequant_net.py --config-name=dequant dequant_experiments=dequant_1
+
+pixi run python scripts/train_dequant_net.py --config-name=dequant --multirun dequant_experiments=dequant_1,dequant_2
+```
+
 
 Examples:
 
@@ -69,18 +69,16 @@ ssh aicloud
 ```bash
 srun --mem=16G singularity exec luminascale.sif tensorboard --logdir=outputs/training --port=6006 --bind_all
 ```
-### Training with config file
+### Training with config file mapper
 ```bash
 sbatch scripts/train_aces_mapper.sh --config-name=mapper
+
+sbatch scripts/train_aces_mapper.sh --config-name=mapper mapper_experiments=mapper_1
+
+sbatch scripts/train_aces_mapper.sh --config-name=mapper --multirun mapper_experiments=mapper_1,mapper_2,mapper_3,mapper_4
 ```
-or
-```bash
-sbatch scripts/train_aces_mapper.sh mapper_experiments=mapper_1
-```
-### Training multiple
-```bash
-sbatch scripts/train_aces_mapper.sh --multirun mapper_experiments=mapper_1,mapper_2,mapper_3,mapper_4
-```
+
+
 ### Training with config overrides
 ```bash
 sbatch scripts/train_dequant_net.sh loss.l1_weight=1.0 loss.l2_weight=0.0 loss.charbonnier_weight=2.0 loss.grad_match_weight=0.0

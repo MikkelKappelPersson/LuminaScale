@@ -452,8 +452,26 @@ def main(cfg: DictConfig) -> None:
     )
 
     # 6. Start Training
+    resume_ckpt_path = cfg.get("resume_ckpt_path", None)
+    if resume_ckpt_path:
+        resume_ckpt_path_obj = Path(str(resume_ckpt_path))
+        if not resume_ckpt_path_obj.exists():
+            raise FileNotFoundError(
+                "[MAIN] resume_ckpt_path is set but checkpoint file does not exist: "
+                f"{resume_ckpt_path_obj}"
+            )
+        logger.info(f"[MAIN] Resuming from checkpoint: {resume_ckpt_path_obj}")
+        resume_ckpt_path = str(resume_ckpt_path_obj)
+    else:
+        logger.info("[MAIN] No resume checkpoint configured; starting from scratch")
+
     print(f"[MAIN] Starting fit...")
-    trainer.fit(trainer_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.fit(
+        trainer_module,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+        ckpt_path=resume_ckpt_path,
+    )
     completion_message = "[MAIN] Training loop completed successfully. If the process crashes after this point, the failure happened during teardown/shutdown."
     print(completion_message, flush=True)
     logger.info(completion_message)

@@ -753,9 +753,14 @@ def main(cfg: DictConfig) -> None:
         print(f"[MAIN] Model compilation disabled (enable_compile=False)")
     
     print(f"[MAIN] Creating DequantTrainer...")
+    scheduler_cfg = dict(cfg.get("scheduler", {}))
+    scheduler_learning_rate = scheduler_cfg["learning_rate"]
+    scheduler_t_max = scheduler_cfg.get("t_max", cfg.epochs)
+    scheduler_eta_min = scheduler_cfg.get("eta_min", 1e-6)
+
     ls_module = DequantTrainer(
         model=model,
-        learning_rate=cfg.learning_rate,
+        learning_rate=scheduler_learning_rate,
         loss_weights=dict(cfg.get("loss", {})),
         crop_size=cfg.get("crop_size", 512),
         val_crop_size=cfg.get("val_crop_size"),  # Can differ from training crop size
@@ -768,6 +773,8 @@ def main(cfg: DictConfig) -> None:
         target_blur_start_sigma=cfg.get("target_blur", {}).get("start_sigma", 0.0),
         target_blur_end_sigma=cfg.get("target_blur", {}).get("end_sigma", 0.0),
         target_blur_anneal_epochs=cfg.get("target_blur", {}).get("anneal_epochs", 0),
+        scheduler_t_max=scheduler_t_max,
+        scheduler_eta_min=scheduler_eta_min,
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
@@ -828,21 +835,21 @@ def main(cfg: DictConfig) -> None:
     )
     
     # Create dynamic optimizer string showing the actual optimizer and learning rate
-    optimizer_str = f"Adam(lr={cfg.learning_rate})"
+    optimizer_str = f"Adam(lr={scheduler_learning_rate})"
     
     # Create dynamic scheduler string showing the actual scheduler and parameters
-    num_epochs = cfg.epochs
-    eta_min = 1e-6
-    scheduler_str = f"CosineAnnealingLR(T_max={num_epochs}, eta_min={eta_min})"
+    scheduler_str = f"CosineAnnealingLR(T_max={scheduler_t_max}, eta_min={scheduler_eta_min})"
     
     # Create full hparams dict for logging
     hparams_dict = {
         "config_name": config_name,
-        "learning_rate": cfg.learning_rate,
+        "learning_rate": scheduler_learning_rate,
         "batch_size": cfg.get("batch_size", 32),
         "epochs": cfg.epochs,
         "optimizer": optimizer_str,
         "scheduler": scheduler_str,
+        "scheduler_t_max": scheduler_t_max,
+        "scheduler_eta_min": scheduler_eta_min,
         "loss_fn": loss_fn_str,
         "weight_l1": l1_weight,
         "weight_l2": l2_weight,
@@ -915,8 +922,17 @@ def main(cfg: DictConfig) -> None:
     # Resume from checkpoint if specified
     resume_ckpt_path = cfg.get("resume_ckpt_path", None)
     if resume_ckpt_path:
+        resume_ckpt_path_obj = Path(str(resume_ckpt_path))
+        if not resume_ckpt_path_obj.exists():
+            raise FileNotFoundError(
+                "[MAIN] resume_ckpt_path is set but checkpoint file does not exist: "
+                f"{resume_ckpt_path_obj}"
+            )
+        resume_ckpt_path = str(resume_ckpt_path_obj)
         print(f"[MAIN] Resuming from checkpoint: {resume_ckpt_path}")
-        logger.debug(f"Resuming from checkpoint: {resume_ckpt_path}")
+        logger.info(f"[MAIN] Resuming from checkpoint: {resume_ckpt_path}")
+    else:
+        logger.info("[MAIN] No resume checkpoint configured; starting from scratch")
     
     trainer.fit(
         ls_module,

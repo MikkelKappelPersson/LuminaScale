@@ -54,6 +54,8 @@ class DequantTrainer(L.LightningModule):
         target_blur_start_sigma: float = 0.0,
         target_blur_end_sigma: float = 0.0,
         target_blur_anneal_epochs: int = 0,
+        scheduler_t_max: int | None = None,
+        scheduler_eta_min: float = 1e-6,
     ) -> None:
         super().__init__()
         print(f"[DequantTrainer] Initializing LightningModule...")
@@ -67,6 +69,8 @@ class DequantTrainer(L.LightningModule):
         self.target_blur_end_sigma = target_blur_end_sigma
         self.target_blur_anneal_epochs = target_blur_anneal_epochs
         self.current_target_blur_sigma = target_blur_start_sigma
+        self.scheduler_t_max = scheduler_t_max
+        self.scheduler_eta_min = scheduler_eta_min
         
         # Loss weights for three-term loss
         if loss_weights is None:
@@ -703,19 +707,24 @@ class DequantTrainer(L.LightningModule):
         num_epochs = 5  # Default fallback
         if hasattr(self, "trainer") and self.trainer is not None and hasattr(self.trainer, "max_epochs"):
             num_epochs = self.trainer.max_epochs or 5
+
+        t_max = self.scheduler_t_max if self.scheduler_t_max is not None else num_epochs
+        assert t_max > 0, "scheduler_t_max must be > 0"
+        assert self.scheduler_eta_min >= 0.0, "scheduler_eta_min must be >= 0"
         
         print(f"\n[configure_optimizers] Scheduler Setup:")
         print(f"  Base LR: {self.learning_rate}")
         print(f"  Total Epochs: {num_epochs}")
+        print(f"  T_max: {t_max}")
         print(f"  Scheduler: CosineAnnealingLR")
-        print(f"  Target LR (eta_min): 1e-6")
+        print(f"  Target LR (eta_min): {self.scheduler_eta_min}")
         
         # Create standard PyTorch CosineAnnealingLR scheduler
-        # Decays from base_lr to eta_min=1e-6 over num_epochs
+        # Decays from base_lr to eta_min over T_max epochs
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=num_epochs,
-            eta_min=1e-6,
+            T_max=t_max,
+            eta_min=self.scheduler_eta_min,
         )
         
         return {

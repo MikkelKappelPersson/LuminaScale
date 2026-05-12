@@ -98,6 +98,9 @@ DEFAULT_LOGGED_HPARAMS = [
     "weight_tv",
     "bit_crunch_min",
     "bit_crunch_max",
+    "target_blur_start_sigma",
+    "target_blur_end_sigma",
+    "target_blur_anneal_epochs",
 ]
 
 # Configure all luminascale loggers to use minimal format
@@ -754,6 +757,7 @@ def main(cfg: DictConfig) -> None:
     
     print(f"[MAIN] Creating DequantTrainer...")
     scheduler_cfg = dict(cfg.get("scheduler", {}))
+    target_blur_cfg = dict(cfg.get("target_blur", {}))
     scheduler_learning_rate = scheduler_cfg["learning_rate"]
     scheduler_t_max = scheduler_cfg.get("t_max", cfg.epochs)
     scheduler_eta_min = scheduler_cfg.get("eta_min", 1e-6)
@@ -770,9 +774,9 @@ def main(cfg: DictConfig) -> None:
         enable_profiling=cfg.get("enable_profiling", False),  # Disable CUDA sync by default for speed
         bit_crunch_contrast_min=cfg.get("bit_crunch_contrast_min", 1.0),
         bit_crunch_contrast_max=cfg.get("bit_crunch_contrast_max", 1.0),
-        target_blur_start_sigma=cfg.get("target_blur", {}).get("start_sigma", 0.0),
-        target_blur_end_sigma=cfg.get("target_blur", {}).get("end_sigma", 0.0),
-        target_blur_anneal_epochs=cfg.get("target_blur", {}).get("anneal_epochs", 0),
+        target_blur_start_sigma=target_blur_cfg.get("start_sigma", 0.0),
+        target_blur_end_sigma=target_blur_cfg.get("end_sigma", 0.0),
+        target_blur_anneal_epochs=target_blur_cfg.get("anneal_epochs", 0),
         scheduler_t_max=scheduler_t_max,
         scheduler_eta_min=scheduler_eta_min,
     )
@@ -859,6 +863,9 @@ def main(cfg: DictConfig) -> None:
         "tv_variant": total_variation_variant,
         "bit_crunch_min": cfg.get("bit_crunch_contrast_min", 1.0),
         "bit_crunch_max": cfg.get("bit_crunch_contrast_max", 1.0),
+        "target_blur_start_sigma": target_blur_cfg.get("start_sigma", 0.0),
+        "target_blur_end_sigma": target_blur_cfg.get("end_sigma", 0.0),
+        "target_blur_anneal_epochs": target_blur_cfg.get("anneal_epochs", 0),
         "model_base_channels": cfg.model.base_channels,
         "crop_size": 512,
         "shuffle_buffer": cfg.get("shuffle_buffer", 10),

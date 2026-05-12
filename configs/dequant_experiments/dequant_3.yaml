@@ -11,4 +11,4 @@ target_blur:
   anneal_epochs: ${eval:'${epochs} // 2'} 
 
 bit_crunch_contrast_min: 1.0
-bit_crunch_contrast_max: 1.0
+bit_crunch_contrast_max: 1.3

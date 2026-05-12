@@ -6,7 +6,7 @@ epochs: 10
 
 # Target blurring for clean gradient learning
 target_blur:
-  start_sigma: 0.0      # Start with blur to focus on core gradients
+  start_sigma: 1.0      # Start with blur to focus on core gradients
   end_sigma: 0.0        # End on real images
   anneal_epochs: ${eval:'${epochs} // 2'} 
 

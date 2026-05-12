@@ -404,13 +404,13 @@ def main() -> None:
         "--mapper-checkpoint",
         dest="mapper_checkpoint",
         type=str,
-        default="outputs/training/mapper/20260425_231537/checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
+        default="checkpoints/aces-mapper-20260511_214649-96_psnr30-72.ckpt",
         help="Path to model checkpoint (.ckpt/.pt)",
     )
     parser.add_argument(
         "--dequant-checkpoint",
         type=str,
-        default="outputs/training/dequant/20260422_120606_L1=1.0_L2=0.0_CB=1.0_EA=0.0_TV-huber=0.0/checkpoints/last.ckpt",
+        default="checkpoints/last.ckpt",
         help="Path to dequant model checkpoint (.ckpt/.pt)",
     )
     parser.add_argument(

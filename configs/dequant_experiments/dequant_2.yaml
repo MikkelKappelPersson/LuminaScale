@@ -4,8 +4,8 @@ epochs: 50
 
 # Learning-rate scheduler (CosineAnnealingLR)
 scheduler:
-  learning_rate: 1e-5 
-  t_max: ${epochs}      # Cosine cycle length in epochs
+  learning_rate: 1e-4 
+  t_max: 50      # Cosine cycle length in epochs
   eta_min: 1e-6         # Minimum LR at end of cosine anneal
   
 # Target blurring for clean gradient learning
@@ -18,7 +18,7 @@ bit_crunch_contrast_min: 1.0
 bit_crunch_contrast_max: 1.5
 
 resume_ckpt_path: outputs/training/dequant/20260513_221919/checkpoints/dequant-20260513_221919-19_psnr59-88.ckpt
-
+reset_scheduler_on_resume: true
 loss:
   l1_weight: 1.0
   l2_weight: 0.0

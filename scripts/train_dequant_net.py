@@ -415,9 +415,37 @@ class SyntheticInferenceVisualizerCallback(Callback):
                     pass
 
 
+class SchedulerResetCallback(Callback):
+    """Resets CosineAnnealingLR after checkpoint restore, using current epoch as last_epoch.
+
+    This allows a full resume (preserving TensorBoard epoch continuity) while replacing
+    a stale scheduler (e.g., trained with wrong T_max) with the correct one.
+    """
+
+    def __init__(self, t_max: int, eta_min: float) -> None:
+        self.t_max = t_max
+        self.eta_min = eta_min
+
+    def on_train_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        for lr_scheduler_config in trainer.lr_scheduler_configs:
+            optimizer = lr_scheduler_config.scheduler.optimizer
+            new_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=self.t_max,
+                eta_min=self.eta_min,
+                last_epoch=trainer.current_epoch,
+            )
+            lr_scheduler_config.scheduler = new_scheduler
+        print(
+            f"[SchedulerResetCallback] Scheduler reset: "
+            f"CosineAnnealingLR(T_max={self.t_max}, eta_min={self.eta_min}, "
+            f"last_epoch={trainer.current_epoch})"
+        )
+
+
 class TensorBoardFlushCallback(Callback):
     """Callback to explicitly flush TensorBoard logger after each batch and epoch."""
-    
+
     def on_train_batch_end(
         self, trainer: L.Trainer, pl_module: L.LightningModule,
         outputs: Any, batch: Any, batch_idx: int
@@ -761,6 +789,7 @@ def main(cfg: DictConfig) -> None:
     scheduler_learning_rate = scheduler_cfg["learning_rate"]
     scheduler_t_max = scheduler_cfg.get("t_max", cfg.epochs)
     scheduler_eta_min = scheduler_cfg.get("eta_min", 1e-6)
+    scheduler_last_epoch = cfg.get("scheduler_last_epoch", -1)
 
     ls_module = DequantTrainer(
         model=model,
@@ -779,6 +808,7 @@ def main(cfg: DictConfig) -> None:
         target_blur_anneal_epochs=target_blur_cfg.get("anneal_epochs", 0),
         scheduler_t_max=scheduler_t_max,
         scheduler_eta_min=scheduler_eta_min,
+        scheduler_last_epoch=scheduler_last_epoch,
     )
     # Store estimated batches for progress bar
     ls_module.estimated_total_batches = train_dataset.get_estimated_batches()  # type: ignore
@@ -897,6 +927,11 @@ def main(cfg: DictConfig) -> None:
                 height=cfg.get("inference_height", 64),
                 base_channels=cfg.model.base_channels
             ),
+            # Scheduler reset: fixes stale T_max from old checkpoint while keeping epoch counter
+            *([SchedulerResetCallback(
+                t_max=scheduler_t_max,
+                eta_min=scheduler_eta_min,
+            )] if cfg.get("reset_scheduler_on_resume", False) else []),
             # Weight scheduler (if configured)
             *([WeightSchedulerCallback(
                 loss_config=dict(cfg.get("loss", {})),
@@ -928,6 +963,8 @@ def main(cfg: DictConfig) -> None:
     
     # Resume from checkpoint if specified
     resume_ckpt_path = cfg.get("resume_ckpt_path", None)
+    resume_weights_only = cfg.get("resume_weights_only", False)
+    fit_ckpt_path: str | None = None
     if resume_ckpt_path:
         resume_ckpt_path_obj = Path(str(resume_ckpt_path))
         if not resume_ckpt_path_obj.exists():
@@ -935,9 +972,16 @@ def main(cfg: DictConfig) -> None:
                 "[MAIN] resume_ckpt_path is set but checkpoint file does not exist: "
                 f"{resume_ckpt_path_obj}"
             )
-        resume_ckpt_path = str(resume_ckpt_path_obj)
-        print(f"[MAIN] Resuming from checkpoint: {resume_ckpt_path}")
-        logger.info(f"[MAIN] Resuming from checkpoint: {resume_ckpt_path}")
+        if resume_weights_only:
+            # Load only model weights; optimizer and scheduler start fresh
+            print(f"[MAIN] Loading weights only from checkpoint (fresh optimizer/scheduler): {resume_ckpt_path_obj}")
+            logger.info(f"[MAIN] Loading weights only from: {resume_ckpt_path_obj}")
+            ckpt = torch.load(str(resume_ckpt_path_obj), map_location="cpu", weights_only=True)
+            ls_module.load_state_dict(ckpt["state_dict"])
+        else:
+            fit_ckpt_path = str(resume_ckpt_path_obj)
+            print(f"[MAIN] Resuming from checkpoint (full state): {fit_ckpt_path}")
+            logger.info(f"[MAIN] Resuming from checkpoint: {fit_ckpt_path}")
     else:
         logger.info("[MAIN] No resume checkpoint configured; starting from scratch")
     
@@ -945,7 +989,7 @@ def main(cfg: DictConfig) -> None:
         ls_module,
         train_dataloaders=train_loader,
         val_dataloaders=val_loader,  # Validation during training (if configured)
-        ckpt_path=resume_ckpt_path
+        ckpt_path=fit_ckpt_path
     )
     
     print(f"\n{'='*80}")

@@ -56,6 +56,7 @@ class DequantTrainer(L.LightningModule):
         target_blur_anneal_epochs: int = 0,
         scheduler_t_max: int | None = None,
         scheduler_eta_min: float = 1e-6,
+        scheduler_last_epoch: int = -1,
     ) -> None:
         super().__init__()
         print(f"[DequantTrainer] Initializing LightningModule...")
@@ -71,6 +72,7 @@ class DequantTrainer(L.LightningModule):
         self.current_target_blur_sigma = target_blur_start_sigma
         self.scheduler_t_max = scheduler_t_max
         self.scheduler_eta_min = scheduler_eta_min
+        self.scheduler_last_epoch = scheduler_last_epoch
         
         # Loss weights for three-term loss
         if loss_weights is None:
@@ -725,6 +727,7 @@ class DequantTrainer(L.LightningModule):
             optimizer,
             T_max=t_max,
             eta_min=self.scheduler_eta_min,
+            last_epoch=self.scheduler_last_epoch,
         )
         
         return {

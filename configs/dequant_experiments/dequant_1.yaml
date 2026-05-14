@@ -1,12 +1,12 @@
 
 # @package _global_
 
-epochs: 50
+epochs: 50  # Remaining epochs (20-49 of original 50-epoch schedule)
 
 # Learning-rate scheduler (CosineAnnealingLR)
 scheduler:
-  learning_rate: 1e-5 
-  t_max: ${epochs}      # Cosine cycle length in epochs
+  learning_rate: 1e-4 
+  t_max: 50             # Full cosine cycle length (original total epochs)
   eta_min: 1e-6         # Minimum LR at end of cosine anneal
 
 # Target blurring for clean gradient learning
@@ -19,6 +19,9 @@ bit_crunch_contrast_min: 1.0
 bit_crunch_contrast_max: 1.5
 
 resume_ckpt_path: outputs/training/dequant/20260513_221919/checkpoints/dequant-20260513_221919-19_psnr59-88.ckpt
+# Full resume: PL restores current_epoch=19 so TensorBoard shows epochs 20-49
+# SchedulerResetCallback replaces the stale T_max=10 scheduler with CosineAnnealingLR(T_max=50, last_epoch=19)
+reset_scheduler_on_resume: true
 
 loss:
   l1_weight: 1.0

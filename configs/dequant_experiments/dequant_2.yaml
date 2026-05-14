@@ -1,14 +1,22 @@
-
 # @package _global_
 
-
-epochs: 10
+epochs: 50
 
 # Target blurring for clean gradient learning
 target_blur:
-  start_sigma: 1.0      # Start with blur to focus on core gradients
+  start_sigma: 0.5      # Start with blur to focus on core gradients
   end_sigma: 0.0        # End on real images
   anneal_epochs: ${eval:'${epochs} // 2'} 
 
 bit_crunch_contrast_min: 1.0
-bit_crunch_contrast_max: 1.0
+bit_crunch_contrast_max: 1.5
+
+resume_ckpt_path: outputs/training/dequant/20260513_221919/checkpoints/dequant-20260513_221919-19_psnr59-88.ckpt
+
+loss:
+  l1_weight: 1.0
+  l2_weight: 0.0
+  charbonnier_weight: 0.0
+  grad_match_weight: 0.1
+  total_variation_weight: 0.0
+  total_variation_variant: "huber"

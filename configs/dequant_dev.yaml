@@ -5,9 +5,11 @@ defaults:
   - dequant
   - _self_
 
-epochs: 4
+epochs: 12
 checkpoint_freq: 1
 
 shard_path: "dataset/ACEScct/dev/shards/train"  # Dev shards in ACEScct (smaller dataset)
 val_shard_path: "dataset/ACEScct/dev/shards/val"  # Dev validation shards (ACEScct)
 metadata_parquet: "dataset/ACEScct/dev/training_metadata.parquet"
+
+resume_ckpt_path: outputs/training/dequant/20260513_165335/checkpoints/dequant-20260513_165335-09_psnr59-76.ckpt

@@ -38,7 +38,7 @@ pixi run python scripts/train_dequant_net.py --config-name=dequant
 
 pixi run python scripts/train_dequant_net.py --config-name=dequant dequant_experiments=dequant_1
 
-pixi run python scripts/train_dequant_net.py --config-name=dequant --multirun dequant_experiments=dequant_1,dequant_2
+pixi run python scripts/train_dequant_net.py --config-name=dequant --multirun dequant_experiments=dequant_1,dequant_2,dequant_3,dequant_4
 ```
 
 

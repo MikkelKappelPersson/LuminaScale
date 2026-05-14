@@ -2,6 +2,12 @@
 
 epochs: 50
 
+# Learning-rate scheduler (CosineAnnealingLR)
+scheduler:
+  learning_rate: 1e-5 
+  t_max: ${epochs}      # Cosine cycle length in epochs
+  eta_min: 1e-6         # Minimum LR at end of cosine anneal
+  
 # Target blurring for clean gradient learning
 target_blur:
   start_sigma: 0.0      # Start with blur to focus on core gradients

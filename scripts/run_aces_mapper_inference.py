@@ -34,7 +34,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint", 
         type=str, 
-        default="outputs/training/mapper/20260425_231537/checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
+        default="checkpoints/aces-mapper-20260511_214649-96_psnr30-72.ckpt",
         help="Path to model checkpoint (.ckpt/.pt)",
     )
     parser.add_argument(

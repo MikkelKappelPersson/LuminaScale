@@ -410,7 +410,7 @@ def main() -> None:
     parser.add_argument(
         "--dequant-checkpoint",
         type=str,
-        default="checkpoints/last.ckpt",
+        default="checkpoints/dequant-20260515_073550-49_psnr60-14.ckpt",
         help="Path to dequant model checkpoint (.ckpt/.pt)",
     )
     parser.add_argument(

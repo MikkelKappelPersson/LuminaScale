@@ -169,8 +169,8 @@ def run_pipeline(
     # Defaulted internal parameters (removed from UI)
     dequant_output_name: str = "",
     save_dequant: bool = False,
-    mapper_checkpoint: str = "checkpoints/aces-mapper-20260507_164021-epoch=18.ckpt",
-    dequant_checkpoint: str = "checkpoints/last.ckpt",
+    mapper_checkpoint: str = "checkpoints/aces-mapper-20260511_214649-96_psnr30-72.ckpt",
+    dequant_checkpoint: str = "checkpoints/dequant-20260515_073550-49_psnr60-14.ckpt",
     look_mode: str = "random",
     slope: str = "1.0,1.0,1.0",
     offset: str = "0.0,0.0,0.0",
@@ -873,7 +873,7 @@ with gr.Blocks(title="LuminaScale Full Inference") as demo:
 if __name__ == "__main__":
 	# Run warmup before launching the UI to ensure CUDA kernels are initialized
 	_warmup_pipeline(
-		mapper_checkpoint="checkpoints/aces-mapper-20260425_231537-epoch=09.ckpt",
-		dequant_checkpoint="checkpoints/last.ckpt"
+        mapper_checkpoint="checkpoints/aces-mapper-20260511_214649-96_psnr30-72.ckpt",
+        dequant_checkpoint="checkpoints/dequant-20260515_073550-49_psnr60-14.ckpt"
 	)
 	demo.launch(server_name="127.0.0.1", server_port=7860, share=True)

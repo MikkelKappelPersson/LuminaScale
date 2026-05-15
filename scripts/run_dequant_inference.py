@@ -368,7 +368,7 @@ def save_comparison(ldr, model_out, gt, save_path: Path, strength: float = 10.0,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run dequant inference and save comparison dashboard.")
-    parser.add_argument("--checkpoint", type=str, default="", help="Path to model checkpoint (.ckpt/.pt)")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/dequant-20260515_073550-49_psnr60-14.ckpt", help="Path to model checkpoint (.ckpt/.pt)")
     parser.add_argument(
         "--input",
         dest="input_path",
@@ -475,7 +475,7 @@ def main() -> None:
         plot_output.parent.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Model
-    assert args.checkpoint, "--checkpoint is required"
+    assert args.checkpoint, "--checkpoint is required"  # noqa: S101
     print(f"Loading model on {device}...")
     model = create_dequant_net(device=device, base_channels=args.channels)
     if amp_enabled:

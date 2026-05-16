@@ -5,6 +5,10 @@
 		},
 		{
 			"path": "/run/media/mikkelkp/MKP01/med8_project/refs/LLF-LUT"
+		},
+		{
+			"name": "MED8_project_report",
+			"path": "../MED8_project_report"
 		}
 	],
 	"settings": {

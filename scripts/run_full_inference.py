@@ -417,7 +417,7 @@ def main() -> None:
         "--input",
         dest="input_path",
         type=str,
-        default="dataset/full/aces/MIT-Adobe_5K_a0001-jmac_DSC1459.exr",
+        default="assets/imgs/MIT-Adobe_5K_a0001-jmac_DSC1459.exr",
         help="Path to regular (non-ACES) input image by default",
     )
     parser.add_argument(

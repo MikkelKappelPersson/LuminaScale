@@ -134,18 +134,29 @@ class DatasetPairGenerator:
                 
                 # Get image spec for ROI calculation (fast, no decode yet)
                 spec = buf_input.spec()
-                h, w, c = spec.height, spec.width, spec.nchannels
-                
+                data_h, data_w, c = spec.height, spec.width, spec.nchannels
+                # Use display window (full_*) for canonical image dimensions; fall back to data window
+                dw_h = spec.full_height if spec.full_height > 0 else data_h
+                dw_w = spec.full_width if spec.full_width > 0 else data_w
+                # Offset of display window origin within the data window array
+                row_off = spec.full_y - spec.y
+                col_off = spec.full_x - spec.x
+
                 # Calculate crop region to minimize OIIO decode overhead
                 # Instead of reading full image and cropping, read only the ROI
-                if crop_size > 0 and (h > crop_size or w > crop_size):
-                    top = max(0, (h - crop_size) // 2)
-                    left = max(0, (w - crop_size) // 2)
+                if crop_size > 0 and (dw_h > crop_size or dw_w > crop_size):
+                    top = max(0, (dw_h - crop_size) // 2)
+                    left = max(0, (dw_w - crop_size) // 2)
                     # ROI decode: only read the crop region from disk
                     # This avoids decoding and loading full image data
+                    # read_region uses data-window-relative (0-based) coordinates
                     try:
                         # OIIO read_region: (xbegin, xend, ybegin, yend)
-                        pixels = buf_input.read_region("float", left, left + crop_size, top, top + crop_size)
+                        pixels = buf_input.read_region(
+                            "float",
+                            col_off + left, col_off + left + crop_size,
+                            row_off + top, row_off + top + crop_size,
+                        )
                         if pixels is not None:
                             # Returned shape is (crop_size, crop_size, nchannels)
                             pixels = pixels.reshape((crop_size, crop_size, c))
@@ -154,19 +165,26 @@ class DatasetPairGenerator:
                         # Fallback: read full image if ROI fails
                         pixels = buf_input.read_image("float")
                         if pixels is not None and pixels.ndim == 1:
-                            pixels = pixels.reshape((h, w, c))
+                            pixels = pixels.reshape((data_h, data_w, c))
                         elif pixels is not None and pixels.shape[0] == 3:
                             pixels = pixels.transpose(1, 2, 0)
-                        # Crop in memory
+                        # Crop in memory, offset into display window
                         if pixels is not None:
-                            pixels = pixels[top:top+crop_size, left:left+crop_size, :]
+                            pixels = pixels[
+                                row_off + top : row_off + top + crop_size,
+                                col_off + left : col_off + left + crop_size,
+                                :,
+                            ]
                 else:
-                    # Image smaller than crop size or no crop needed - read full
+                    # Image smaller than crop size or no crop needed - read full display window
                     pixels = buf_input.read_image("float")
                     if pixels is not None and pixels.ndim == 1:
-                        pixels = pixels.reshape((h, w, c))
+                        pixels = pixels.reshape((data_h, data_w, c))
                     elif pixels is not None and pixels.shape[0] == 3:
                         pixels = pixels.transpose(1, 2, 0)
+                    # Crop to display window
+                    if pixels is not None:
+                        pixels = pixels[row_off : row_off + dw_h, col_off : col_off + dw_w, :]
                 
                 buf_input.close()
                 
@@ -334,35 +352,42 @@ class DatasetPairGenerator:
                 if not buf_input: continue
                 
                 spec = buf_input.spec()
-                h, w, c = spec.height, spec.width, spec.nchannels
-                
+                data_h, data_w, c = spec.height, spec.width, spec.nchannels
+                # Use display window (full_*) for canonical image dimensions; fall back to data window
+                dw_h = spec.full_height if spec.full_height > 0 else data_h
+                dw_w = spec.full_width if spec.full_width > 0 else data_w
+                # Offset of display window origin within the data window array
+                row_off = spec.full_y - spec.y
+                col_off = spec.full_x - spec.x
+
                 # ROI Decode
                 if crop_size > 0:
-                    if h < crop_size or w < crop_size:
+                    if dw_h < crop_size or dw_w < crop_size:
                         raise ValueError(
-                            f"crop_size={crop_size} is out of bounds for sample {idx} with image size ({h}, {w})."
+                            f"crop_size={crop_size} is out of bounds for sample {idx} with image size ({dw_h}, {dw_w})."
                         )
 
                     if self.crop_mode == "random":
-                        top = int(np.random.randint(0, h - crop_size + 1))
-                        left = int(np.random.randint(0, w - crop_size + 1))
+                        top = int(np.random.randint(0, dw_h - crop_size + 1))
+                        left = int(np.random.randint(0, dw_w - crop_size + 1))
                     else:
-                        top = (h - crop_size) // 2
-                        left = (w - crop_size) // 2
+                        top = (dw_h - crop_size) // 2
+                        left = (dw_w - crop_size) // 2
 
-                    # The correct signature for read_region is often:
-                    # read_region(subimage, miplevel, xbegin, xend, ybegin, yend, zbegin, zend, chans)
-                    # and sometimes takes a type hint like "float" as first arg
-                    # To be safe and handle API variations, we'll try read_image with manual crop first 
-                    # as it's more universal across OIIO versions if read_region fails
                     pixels = buf_input.read_image("float")
                     if pixels is not None:
-                        pixels = pixels.reshape((h, w, c))
-                        pixels = pixels[top:top+crop_size, left:left+crop_size, :]
+                        pixels = pixels.reshape((data_h, data_w, c))
+                        pixels = pixels[
+                            row_off + top : row_off + top + crop_size,
+                            col_off + left : col_off + left + crop_size,
+                            :,
+                        ]
                 else:
                     pixels = buf_input.read_image("float")
                     if pixels is not None:
-                        pixels = pixels.reshape((h, w, c))
+                        pixels = pixels.reshape((data_h, data_w, c))
+                        # Crop to display window
+                        pixels = pixels[row_off : row_off + dw_h, col_off : col_off + dw_w, :]
                 
                 buf_input.close()
                 

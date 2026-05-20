@@ -18,18 +18,34 @@ import OpenImageIO as oiio
 
 
 def read_exr(path: Path | str) -> np.ndarray:
-    """Read an EXR file and return as [C, H, W] numpy array."""
+    """Read an EXR file and return as [C, H, W] numpy array.
+
+    Crops to the display window (full_roi) when it differs from the data window,
+    which is common for camera RAW-derived EXRs that carry sensor overscan pixels.
+    """
     buf = oiio.ImageBuf(str(path))
     if not buf.initialized:
         raise FileNotFoundError(f"Could not load EXR file: {path}")
-    
+
+    spec = buf.spec()
+    display_roi = oiio.ROI(
+        spec.full_x,
+        spec.full_x + spec.full_width,
+        spec.full_y,
+        spec.full_y + spec.full_height,
+    )
+    data_roi = buf.roi
+
+    if display_roi != data_roi:
+        buf = oiio.ImageBufAlgo.crop(buf, display_roi)
+
     # Get pixels as float32 [H, W, C]
-    array = np.asarray(buf.get_pixels(), dtype=np.float32)
-    
+    array = np.asarray(buf.get_pixels(oiio.FLOAT), dtype=np.float32)
+
     # Ensure RGB
     if array.shape[2] > 3:
         array = array[:, :, :3]
-        
+
     # Transpose to [C, H, W]
     return array.transpose(2, 0, 1)
 
@@ -189,20 +205,10 @@ def image_to_tensor(image_path: Path | str) -> torch.Tensor:
     """
     image_path = Path(image_path)
     
-    # Handle EXR using OpenImageIO
+    # Handle EXR using OpenImageIO (respects display window)
     if image_path.suffix.lower() == ".exr":
-        buf = oiio.ImageBuf(str(image_path))
-        assert buf.initialized, f"Could not load EXR file: {image_path}"
-        
-        # OpenImageIO returns [H, W, C]
-        array = np.asarray(buf.get_pixels(), dtype=np.float32)
-        
-        # Ensure RGB
-        if array.shape[2] > 3:
-            array = array[:, :, :3]
-            
-        tensor = torch.from_numpy(array).float()
-        return tensor.permute(2, 0, 1)
+        array = read_exr(image_path)  # [C, H, W] float32
+        return torch.from_numpy(array).float()
 
     # Standard formats via PIL
     with Image.open(image_path) as img:

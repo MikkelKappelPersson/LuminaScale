@@ -19,6 +19,7 @@ assets/srgb_8u/
 assets/srgb_32f/
 assets/aces_32f/
 assets/luts/
+assets/example_images/
 
 # aim
 .aim/

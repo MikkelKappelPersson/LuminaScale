@@ -8,6 +8,7 @@ import os
 import random
 import sys
 import tempfile
+from datetime import datetime
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -396,6 +397,195 @@ def save_full_inference_dashboard(
     plt.close(fig)
 
 
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".exr", ".bmp", ".webp"}
+
+
+def _run_single_input(
+    args: argparse.Namespace,
+    input_path: Path,
+    device: torch.device,
+    amp_dtype: torch.dtype,
+    amp_enabled: bool,
+    dequant_model: torch.nn.Module,
+    mapper_model: torch.nn.Module,
+) -> None:
+    is_exr_reference = bool(args.input_is_aces)
+    if is_exr_reference:
+        assert input_path.suffix.lower() == ".exr", "--input-is-aces expects an EXR input"
+
+    default_output_base = project_root / "outputs" / "inference"
+    input_stem = input_path.stem
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_folder_name = f"{input_stem}_{timestamp}"
+
+    input_is_dir = Path(args.input_path).is_dir()
+    if args.output:
+        output_candidate = Path(args.output)
+        # If directory input and output has no extension, treat as output directory
+        if input_is_dir and output_candidate.suffix == '':
+            output_dir = output_candidate
+            pred_aces_name = f"{input_stem}_output.exr"
+        # If single image, use output as filename
+        elif not input_is_dir:
+            output_dir = (
+                output_candidate.parent
+                if str(output_candidate.parent) not in {"", "."}
+                else default_output_base / run_folder_name
+            )
+            pred_aces_name = output_candidate.name
+        else:
+            # Directory input with filename output: fallback to default
+            output_dir = default_output_base / run_folder_name
+            pred_aces_name = f"{input_stem}_output.exr"
+    else:
+        output_dir = default_output_base / run_folder_name
+        pred_aces_name = f"{input_stem}_output.exr"
+
+    dequant_name = Path(args.dequant_output).name if (args.dequant_output and not input_is_dir) else f"{input_stem}_dequant.exr"
+    plot_name = f"{input_stem}_plot.png"
+    input_jpg_name = f"{input_stem}_input.jpg"
+    output_srgb_jpg_name = f"{input_stem}_output_srgb.jpg"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_dequant_output = output_dir / dequant_name
+    resolved_pred_aces_output = output_dir / pred_aces_name
+    resolved_plot_output = output_dir / plot_name
+    resolved_input_jpg = output_dir / input_jpg_name
+    resolved_output_srgb_jpg = output_dir / output_srgb_jpg_name
+
+    look = None
+    dequant_input_override_chw: torch.Tensor | None = None
+    clean_reference_chw: torch.Tensor | None = None
+    dequant_reference_chw: torch.Tensor | None = None
+    if is_exr_reference:
+        print(f"Creating CDL look for inference: {args.look_mode}")
+        look = build_look(args.look_mode, args.slope, args.offset, args.power, args.saturation)
+
+        print("Preparing dequant input from ACES reference (apply look -> ACES to sRGB -> 8-bit quantize)")
+        aces_chw = image_to_tensor(input_path).to(device=device, dtype=torch.float32)
+        aces_hwc = aces_chw.permute(1, 2, 0)
+        cdl_processor = GPUCDLProcessor(device=device)
+        transformer = ACESColorTransformer(device=device, use_lut=True)
+
+        clean_srgb_hwc = transformer.aces_to_srgb_32f(
+            aces_hwc.unsqueeze(0),
+            input_cs="ACES2065-1",
+        ).squeeze(0)
+        clean_srgb_hwc = torch.clamp(clean_srgb_hwc, 0.0, 1.0)
+        clean_reference_chw = clean_srgb_hwc.permute(2, 0, 1).detach().cpu()
+
+        aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
+        srgb_hwc = transformer.aces_to_srgb_32f(
+            aces_graded_hwc.unsqueeze(0),
+            input_cs="ACES2065-1",
+        ).squeeze(0)
+        srgb_hwc = torch.clamp(srgb_hwc, 0.0, 1.0)
+        dequant_reference_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
+        srgb_hwc = torch.round(srgb_hwc * 255.0) / 255.0
+        dequant_input_override_chw = srgb_hwc.permute(2, 0, 1)
+
+    temporary_dequant_path: Path | None = None
+    if args.save_dequant:
+        dequant_stage_output = resolved_dequant_output
+        temporary_dequant_path = None
+    else:
+        temporary_dequant_path = Path(
+            tempfile.NamedTemporaryFile(
+                suffix="_dequant_tmp.exr",
+                dir=output_dir,
+                delete=False,
+            ).name
+        )
+        dequant_stage_output = temporary_dequant_path
+
+    print(f"Running dequant inference for {input_path}...")
+    dequant_input_for_mapper, dequant_input_chw_cpu, dequant_output_chw_cpu = run_dequant_inference(
+        model=dequant_model,
+        input_path=input_path,
+        output_path=dequant_stage_output,
+        device=device,
+        align_multiple=args.align_multiple,
+        amp_enabled=amp_enabled,
+        amp_dtype=amp_dtype,
+        quantize_input=False,
+        input_chw_override=dequant_input_override_chw,
+    )
+
+    if args.save_dequant:
+        print(f"Saved dequantized intermediate: {dequant_input_for_mapper}")
+
+    print("Running ACES mapper inference on dequant output...")
+    if args.keep_padding:
+        print("Keeping aligned padded output dimensions (--keep-padding set)")
+    else:
+        print("Removing alignment padding from generated outputs (default behavior)")
+
+    pred_aces_chw_cpu, mapper_srgb_chw_cpu = run_mapper_inference_on_srgb(
+        model=mapper_model,
+        input_srgb_chw=dequant_output_chw_cpu,
+        crop_size=args.crop_size,
+        align_multiple=args.align_multiple,
+        max_side=args.max_side,
+        keep_aligned_output=args.keep_padding,
+        device=device,
+    )
+
+    if not args.no_save_output:
+        write_exr(resolved_pred_aces_output, pred_aces_chw_cpu.numpy())
+
+    out_h, out_w = mapper_srgb_chw_cpu.shape[1], mapper_srgb_chw_cpu.shape[2]
+    input_jpg_chw = resize_chw_to(dequant_input_chw_cpu, out_h, out_w)
+    input_jpg_hwc = (torch.clamp(input_jpg_chw, 0.0, 1.0).permute(1, 2, 0).numpy() * 255.0).round().astype("uint8")
+    Image.fromarray(input_jpg_hwc).save(resolved_input_jpg, quality=95)
+
+    output_srgb_jpg_hwc = (torch.clamp(mapper_srgb_chw_cpu, 0.0, 1.0).permute(1, 2, 0).numpy() * 255.0).round().astype("uint8")
+    Image.fromarray(output_srgb_jpg_hwc).save(resolved_output_srgb_jpg, quality=95)
+
+    try:
+        if args.save_plot:
+            reference_for_dashboard = clean_reference_chw if is_exr_reference else None
+            assert dequant_reference_chw is not None, (
+                "Dequant reference (look-applied sRGB) is required for dashboard metrics; "
+                "run with --input-is-aces to generate it"
+            )
+            save_full_inference_dashboard(
+                input_srgb_chw=dequant_input_chw_cpu,
+                dequant_srgb_chw=dequant_output_chw_cpu,
+                mapper_srgb_chw=mapper_srgb_chw_cpu,
+                reference_srgb_chw=reference_for_dashboard,
+                dequant_reference_srgb_chw=dequant_reference_chw,
+                save_path=resolved_plot_output,
+            )
+    finally:
+        if not args.save_dequant and temporary_dequant_path is not None and temporary_dequant_path.exists():
+            temporary_dequant_path.unlink()
+
+    if look is not None:
+        print(f"CDL look used: {look}")
+    else:
+        print("CDL look skipped: only used for ACES validation with --input-is-aces")
+
+    print("===========================================================================")
+
+    if args.no_save_output:
+        print("Predicted ACES EXR not saved (--no-save-output set)")
+    else:
+        print(f"Saved predicted ACES EXR:      {resolved_pred_aces_output}")
+
+    print(f"Saved input sRGB JPG:          {resolved_input_jpg}")
+    print(f"Saved output sRGB JPG:         {resolved_output_srgb_jpg}")
+
+    if args.save_dequant:
+        print(f"Saved dequantized intermediate: {resolved_dequant_output}")
+    else:
+        print("Dequantized intermediate not saved (use --save-dequant to keep it)")
+
+    if args.save_plot:
+        print(f"Saved comparison dashboard: {resolved_plot_output}")
+    else:
+        print("Comparison dashboard not saved (--save-plot not set)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run full inference (dequant -> ACES mapper) and save comparison dashboard.",
@@ -418,7 +608,7 @@ def main() -> None:
         dest="input_path",
         type=str,
         default="assets/imgs/MIT-Adobe_5K_a0001-jmac_DSC1459.exr",
-        help="Path to regular (non-ACES) input image by default",
+        help="Path to a single input image or a directory of images",
     )
     parser.add_argument(
         "--input-is-aces",
@@ -461,7 +651,7 @@ def main() -> None:
     parser.add_argument(
         "--max-side",
         type=int,
-        default=1024,
+        default=0,
         help="Cap longest image side before inference to reduce VRAM use (<=0 disables)",
     )
     parser.add_argument(
@@ -527,85 +717,29 @@ def main() -> None:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    device = torch.device(args.device)
+    if args.device == "cuda" and not torch.cuda.is_available():
+        print("WARNING: CUDA requested but not available, falling back to CPU")
+        device = torch.device("cpu")
+    else:
+        device = torch.device(args.device)
     amp_dtype = torch.float16 if args.amp_dtype == "fp16" else torch.bfloat16
     amp_enabled = bool(args.amp and device.type == "cuda")
 
-    input_path = Path(args.input_path)
-    assert input_path.exists(), f"Input does not exist: {input_path}"
-    is_exr_reference = bool(args.input_is_aces)
-    if is_exr_reference:
-        assert input_path.suffix.lower() == ".exr", "--input-is-aces expects an EXR input"
     assert args.dequant_checkpoint, "--dequant-checkpoint is required"
 
     ocio_config = project_root / "config" / "aces" / "studio-config.ocio"
     if ocio_config.exists():
         os.environ["OCIO"] = str(ocio_config)
 
-    default_output_dir = project_root / "outputs" / "inference"
-    input_stem = input_path.stem
+    input_path = Path(args.input_path)
+    assert input_path.exists(), f"Input does not exist: {input_path}"
 
-    if args.output:
-        output_candidate = Path(args.output)
-        output_dir = output_candidate.parent if str(output_candidate.parent) not in {"", "."} else default_output_dir
-        pred_aces_name = output_candidate.name
+    if input_path.is_dir():
+        input_paths = sorted(p for p in input_path.iterdir() if p.is_file() and p.suffix.lower() in _IMAGE_EXTENSIONS)
+        assert input_paths, f"No supported images found in directory: {input_path}"
+        print(f"Found {len(input_paths)} image(s) in {input_path}")
     else:
-        output_dir = default_output_dir
-        pred_aces_name = f"{input_stem}_out.exr"
-
-    dequant_name = Path(args.dequant_output).name if args.dequant_output else f"{input_stem}_dequant.exr"
-    plot_name = f"{input_stem}_plot.png"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    resolved_dequant_output = output_dir / dequant_name
-    resolved_pred_aces_output = output_dir / pred_aces_name
-    resolved_plot_output = output_dir / plot_name
-
-    look = None
-    dequant_input_override_chw: torch.Tensor | None = None
-    clean_reference_chw: torch.Tensor | None = None
-    dequant_reference_chw: torch.Tensor | None = None
-    if is_exr_reference:
-        print(f"Creating CDL look for inference: {args.look_mode}")
-        look = build_look(args.look_mode, args.slope, args.offset, args.power, args.saturation)
-
-        print("Preparing dequant input from ACES reference (apply look -> ACES to sRGB -> 8-bit quantize)")
-        aces_chw = image_to_tensor(input_path).to(device=device, dtype=torch.float32)
-        aces_hwc = aces_chw.permute(1, 2, 0)
-        cdl_processor = GPUCDLProcessor(device=device)
-        transformer = ACESColorTransformer(device=device, use_lut=True)
-
-        # Clean reference for final dashboard panel: ACES -> sRGB, no look.
-        clean_srgb_hwc = transformer.aces_to_srgb_32f(
-            aces_hwc.unsqueeze(0),
-            input_cs="ACES2065-1",
-        ).squeeze(0)
-        clean_srgb_hwc = torch.clamp(clean_srgb_hwc, 0.0, 1.0)
-        clean_reference_chw = clean_srgb_hwc.permute(2, 0, 1).detach().cpu()
-
-        aces_graded_hwc = cdl_processor.apply_cdl_gpu(aces_hwc, look)
-        srgb_hwc = transformer.aces_to_srgb_32f(
-            aces_graded_hwc.unsqueeze(0),
-            input_cs="ACES2065-1",
-        ).squeeze(0)
-        srgb_hwc = torch.clamp(srgb_hwc, 0.0, 1.0)
-        dequant_reference_chw = srgb_hwc.permute(2, 0, 1).detach().cpu()
-        srgb_hwc = torch.round(srgb_hwc * 255.0) / 255.0
-        dequant_input_override_chw = srgb_hwc.permute(2, 0, 1)
-
-    temporary_dequant_path: Path | None = None
-    if args.save_dequant:
-        dequant_stage_output = resolved_dequant_output
-        temporary_dequant_path = None
-    else:
-        temporary_dequant_path = Path(
-            tempfile.NamedTemporaryFile(
-                suffix="_dequant_tmp.exr",
-                dir=output_dir,
-                delete=False,
-            ).name
-        )
-        dequant_stage_output = temporary_dequant_path
+        input_paths = [input_path]
 
     print(f"Loading dequant model on {device}...")
     dequant_model = load_dequant_model_from_checkpoint(
@@ -615,23 +749,6 @@ def main() -> None:
     )
     if amp_enabled:
         dequant_model = dequant_model.to(dtype=amp_dtype)
-
-    print(f"Running dequant inference for {input_path}...")
-
-    dequant_input_for_mapper, dequant_input_chw_cpu, dequant_output_chw_cpu = run_dequant_inference(
-        model=dequant_model,
-        input_path=input_path,
-        output_path=dequant_stage_output,
-        device=device,
-        align_multiple=args.align_multiple,
-        amp_enabled=amp_enabled,
-        amp_dtype=amp_dtype,
-        quantize_input=False,
-        input_chw_override=dequant_input_override_chw,
-    )
-
-    if args.save_dequant:
-        print(f"Saved dequantized intermediate: {dequant_input_for_mapper}")
 
     print(f"Loading ACES mapper model on {device}...")
     mapper_model = load_model_from_checkpoint(
@@ -645,65 +762,10 @@ def main() -> None:
     # Keep the mapper in float32: its spatial-frequency transformer uses
     # complex operators that fail under ComplexHalf on CUDA.
 
-    print("Running ACES mapper inference on dequant output...")
-    if args.keep_padding:
-        print("Keeping aligned padded output dimensions (--keep-padding set)")
-    else:
-        print("Removing alignment padding from generated outputs (default behavior)")
-
-    pred_aces_chw_cpu, mapper_srgb_chw_cpu = run_mapper_inference_on_srgb(
-        model=mapper_model,
-        input_srgb_chw=dequant_output_chw_cpu,
-        crop_size=args.crop_size,
-        align_multiple=args.align_multiple,
-        max_side=args.max_side,
-        keep_aligned_output=args.keep_padding,
-        device=device,
-    )
-
-    if not args.no_save_output:
-        write_exr(resolved_pred_aces_output, pred_aces_chw_cpu.numpy())
-
-    try:
-        if args.save_plot:
-            reference_for_dashboard = clean_reference_chw if is_exr_reference else None
-            assert dequant_reference_chw is not None, (
-                "Dequant reference (look-applied sRGB) is required for dashboard metrics; "
-                "run with --input-is-aces to generate it"
-            )
-            save_full_inference_dashboard(
-                input_srgb_chw=dequant_input_chw_cpu,
-                dequant_srgb_chw=dequant_output_chw_cpu,
-                mapper_srgb_chw=mapper_srgb_chw_cpu,
-                reference_srgb_chw=reference_for_dashboard,
-                dequant_reference_srgb_chw=dequant_reference_chw,
-                save_path=resolved_plot_output,
-            )
-    finally:
-        if not args.save_dequant and temporary_dequant_path is not None and temporary_dequant_path.exists():
-            temporary_dequant_path.unlink()
-
-    if look is not None:
-        print(f"CDL look used: {look}")
-    else:
-        print("CDL look skipped: only used for ACES validation with --input-is-aces")
-
-    print("===========================================================================")
-
-    if args.no_save_output:
-        print("Predicted ACES EXR not saved (--no-save-output set)")
-    else:
-        print(f"Saved predicted ACES EXR: {resolved_pred_aces_output}")
-
-    if args.save_dequant:
-        print(f"Saved dequantized intermediate: {resolved_dequant_output}")
-    else:
-        print("Dequantized intermediate not saved (use --save-dequant to keep it)")
-
-    if args.save_plot:
-        print(f"Saved comparison dashboard: {resolved_plot_output}")
-    else:
-        print("Comparison dashboard not saved (--save-plot not set)")
+    for i, ip in enumerate(input_paths):
+        if len(input_paths) > 1:
+            print(f"\n[{i + 1}/{len(input_paths)}] Processing {ip.name}")
+        _run_single_input(args, ip, device, amp_dtype, amp_enabled, dequant_model, mapper_model)
 
 
 if __name__ == "__main__":

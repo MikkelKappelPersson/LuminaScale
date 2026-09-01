@@ -259,3 +259,6 @@ __marimo__/
 *.exr
 *.log
 checkpoints/
+
+# Apptainer/Singularity local build artifacts
+.apptainer-build/

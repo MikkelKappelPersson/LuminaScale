@@ -45,6 +45,18 @@ sniffio = ">=1.3.1,<2"
 pytz = ">=2026.2,<2027"
 
 
+# Pixitainer (optional companion, see singularity/luminascale.def header):
+#   pixi global install -c https://prefix.dev/raphaelribes pixitainer-singularity
+#   pixi containerize-singularity          # quick throwaway image (no rawtoaces)
+#   pixi containerize-singularity --dry-run --keep-def   # inspect generated .def
+# Production image is built from singularity/luminascale.def instead.
+[tool.pixitainer]
+base-image = "pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel"
+output = "luminascale-pixitainer.sif"
+manual = true          # raw shell entrypoint, not the seamless pixi-run wrapper
+no-install = true      # no baked env: install at runtime into writable storage
+pixi-version = "0.78.0"
+
 [pypi-dependencies]
 openimageio = ">=3.1.11.0, <4"
 opencolorio = ">=2.5.1, <3"

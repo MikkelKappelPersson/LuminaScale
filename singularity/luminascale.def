@@ -1,8 +1,34 @@
 Bootstrap: docker
 From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
 
+# ---------------------------------------------------------------------------
+# LuminaScale container with pixi-based package management.
+#
+# Pattern (inspired by the NAISS "pixi in a container" case study):
+#   - pixi (pinned version) is baked into the image at /opt/pixi
+#   - pixi.toml + pixi.lock are baked in at /opt/luminascale
+#   - the conda/pypi environment is NOT baked into the image; it is installed
+#     at runtime into writable storage (default: $HOME/.lumina-env) with
+#     `pixi install --locked`, giving the exact same environment as local dev
+#   - before the env exists, the base image python (PyTorch from the devel
+#     image) is used; after installation the pixi env shadows it via PATH
+#
+# Package management is done in pixi.toml on the host:
+#     pixi add <package> && pixi lock
+# then rebuild the image to ship the new lockfile.
+# ---------------------------------------------------------------------------
+
+%files
+    pixi.toml /opt/luminascale/pixi.toml
+    pixi.lock /opt/luminascale/pixi.lock
+
 %post
-    apt-get update && apt-get install -y \
+    export LC_ALL=C
+    export DEBIAN_FRONTEND=noninteractive
+
+    # --no-install-recommends: skips GUI/icon-theme packages (humanity-icon-theme
+    # breaks dpkg unpack under fakeroot/userns) that a headless container never uses
+    apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
         cmake \
@@ -18,104 +44,181 @@ From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
         liblensfun-dev \
         libglib2.0-dev \
         libtiff-dev \
-        libpng-dev \
-        python3-venv
+        libpng-dev
 
-    # Create Python virtual environment with system packages (PyTorch from base image)
-    python3 -m venv /opt/venv --system-site-packages
-    
-    # Activate venv and install dependencies
-    . /opt/venv/bin/activate
-    pip install --upgrade pip wheel
-    pip install --no-cache-dir "setuptools==81.*"
-    pip install --no-cache-dir \
-        hydra-core \
-        omegaconf \
-        scikit-image \
-        imageio \
-        tqdm \
-        nanobind \
-        matplotlib \
-        jupyter \
-        scipy \
-        numpy \
-        torchvision \
-        tensorboard \
-        torch-tb-profiler \
-        pytorch-lightning \
-        pytest \
-        kornia \
-        timm \
-        gradio \
-        gradio-client \
-        pandas \
-        pillow \
-        pydantic \
-        anyio \
-        sniffio \
-        pytz \
-        openimageio \
-        opencolorio \
-        antlr4-python3-runtime \
-        webdataset \
-        pyarrow \
-        fastparquet \
-        lpips
+    # pixi ==========================================================
+    # Pinned version, installed to /opt/pixi (NAISS case-study pattern).
+    export PIXI_HOME=/opt/pixi
+    export PIXI_NO_PATH_UPDATE=1
+    export PIXI_CACHE_DIR=/tmp/pixi_cache
+    export PIXI_VERSION=0.78.0
+    mkdir -p /opt/pixi
+    curl -fsSL https://pixi.sh/install.sh | bash
+    export PATH="/opt/pixi/bin:${PATH}"
+    pixi --version
 
+    # Helper scripts ================================================
+    mkdir -p /opt/luminascale/bin /opt/luminascale/shims
+
+    # lumina-env: manage the runtime pixi environment.
+    cat > /opt/luminascale/bin/lumina-env <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ENV_HOME="${LUMINA_ENV_HOME:-$HOME/.lumina-env}"
+BAKED=/opt/luminascale
+mkdir -p "$ENV_HOME"
+if [ ! -f "$ENV_HOME/pixi.toml" ]; then
+    echo "lumina-env: copying baked manifests to $ENV_HOME"
+    cp "$BAKED/pixi.toml" "$BAKED/pixi.lock" "$ENV_HOME/"
+fi
+cd "$ENV_HOME"
+case "${1:-install}" in
+    install)
+        pixi install --locked
+        echo "lumina-env: environment ready at $ENV_HOME/.pixi/envs/default"
+        ;;
+    update)
+        cp "$BAKED/pixi.toml" "$BAKED/pixi.lock" .
+        pixi install --locked
+        echo "lumina-env: environment updated at $ENV_HOME/.pixi/envs/default"
+        ;;
+    *)
+        echo "usage: lumina-env [install|update]" >&2
+        exit 1
+        ;;
+esac
+EOF
+
+    # lumina-activate: ensure the env exists, then exec a command in it.
+    cat > /opt/luminascale/bin/lumina-activate <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ENV_HOME="${LUMINA_ENV_HOME:-$HOME/.lumina-env}"
+BIN="$ENV_HOME/.pixi/envs/default/bin"
+if [ ! -x "$BIN/python" ]; then
+    echo "lumina-activate: pixi environment not found, installing (one-time, several minutes)" >&2
+    lumina-env install
+fi
+export PATH="$BIN:$PATH"
+exec "$@"
+EOF
+
+    chmod +x /opt/luminascale/bin/lumina-env /opt/luminascale/bin/lumina-activate
+
+    # Shims: resolve at command-invocation time, so the pixi env is picked up
+    # correctly even though apptainer applies user env vars (--env) AFTER
+    # sourcing the baked %environment scripts. They shadow the base-image
+    # python whenever the runtime env exists, and fall back to it otherwise.
+    cat > /opt/luminascale/shims/.dispatch <<'EOF'
+#!/bin/sh
+NAME=$(basename "$0")
+BIN="${LUMINA_ENV_HOME:-$HOME/.lumina-env}/.pixi/envs/default/bin"
+if [ -x "$BIN/$NAME" ]; then
+    exec "$BIN/$NAME" "$@"
+fi
+case "$NAME" in
+    python|python3) exec /usr/bin/python3 "$@" ;;
+    pip|pip3)       exec /usr/local/bin/pip3 "$@" ;;
+    *)
+        echo "luminascale: '$NAME' is not available: the pixi environment is not installed." >&2
+        echo "  Run once: apptainer exec <sif> lumina-env install" >&2
+        exit 127
+        ;;
+esac
+EOF
+    chmod +x /opt/luminascale/shims/.dispatch
+    for name in python python3 pip pip3 pytest tensorboard jupyter ipython; do
+        ln -sf .dispatch /opt/luminascale/shims/$name
+    done
 
     # Build and install rawtoaces (CPU-based, no CUDA support needed)
-    cd /tmp
-    git clone https://github.com/AcademySoftwareFoundation/rawtoaces.git
+    # nanobind is required at build time for rawtoaces' python bindings
+    # (at runtime it comes from the pixi environment instead).
+    # Remove the PEP 668 marker (as the base image Dockerfile does) so pip
+    # can install into the system python inside the container.
+    rm -f /usr/lib/python*/EXTERNALLY-MANAGED
+    pip3 install --no-cache-dir --break-system-packages nanobind
+    # Build in a container-internal path: Apptainer bind-mounts host /tmp
+    # into the build environment, so /tmp would leak into and out of the image
+    mkdir -p /opt/build-tmp
+    cd /opt/build-tmp
+    git clone --depth 1 https://github.com/AcademySoftwareFoundation/rawtoaces.git
     cd rawtoaces
     cmake -S . -B build
     cmake --build build -j$(nproc)
     cmake --install build
-    cd /tmp && rm -rf rawtoaces
-
-    # Create working directory
-    mkdir -p /opt/project
+    cd / && rm -rf /opt/build-tmp
 
     # Clean up to reduce image size
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+    apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/pixi_cache
 
 %environment
     export LC_ALL=C
     export PYTHONUNBUFFERED=1
-    export PATH="/opt/venv/bin:${PATH}"
-    export VIRTUAL_ENV="/opt/venv"
-    export PIP_PYTHON_VERSION="3.12"
+
+    # pixi itself (baked)
+    export PIXI_HOME=/opt/pixi
+    export PATH="/opt/luminascale/shims:/opt/pixi/bin:/opt/luminascale/bin:${PATH}"
+
+    # Runtime pixi environment (installed to writable storage on first use)
+    export LUMINA_ENV_HOME="${LUMINA_ENV_HOME:-$HOME/.lumina-env}"
+    if [ -x "$LUMINA_ENV_HOME/.pixi/envs/default/bin/python" ]; then
+        export PATH="$LUMINA_ENV_HOME/.pixi/envs/default/bin:${PATH}"
+    fi
 
 %runscript
+    # Interactive/default entry: make sure the environment exists, then shell.
+    if [ ! -x "$LUMINA_ENV_HOME/.pixi/envs/default/bin/python" ]; then
+        echo "LuminaScale: one-time pixi environment setup -> $LUMINA_ENV_HOME" >&2
+        lumina-env install
+    fi
     exec bash "$@"
 
 %test
-    python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
-    python -c "import hydra; print('Hydra available')"
+    pixi --version
+    test -f /opt/luminascale/pixi.toml
+    test -f /opt/luminascale/pixi.lock
+    test -x /opt/luminascale/bin/lumina-env
     rawtoaces --version
-    python -c "import sys; print(f'Python: {sys.executable}')"
-    python -c "import platform; print(f'Platform: {platform.system()} {platform.release()}')"
+    # base image python (used until the pixi env is installed at runtime)
+    python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+    cmake --version | head -1
 
 %labels
     Author Mikkel Kappel Persson
-    Version v0.2.0
+    Version v0.3.0
     Project LuminaScale
-    Description "Neural Bit-Depth Expansion & ACES Color Space Normalization"
+    Description "Neural Bit-Depth Expansion & ACES Color Space Normalization (pixi-managed environment)"
 
 %help
     LuminaScale: Neural Bit-Depth Expansion & ACES Color Space Normalization
 
-    A containerized research environment for training and evaluating neural models
-    that expand bit-depth and normalize color to ACES working space.
+    pixi-managed container: the environment is created at runtime from the
+    baked pixi.toml + pixi.lock (identical to the local dev environment).
 
-    Pre-installed packages: PyTorch 2.10, CUDA 12.8, Hydra, SciPy, rawtoaces, and more
-    Python venv: /opt/venv (activated by default)
+    First-time setup (installs env into $HOME/.lumina-env, override the
+    location with LUMINA_ENV_HOME, e.g. point it at scratch for quota):
+      export LUMINA_ENV_HOME=/scratch/$USER/.lumina-env
+      singularity exec luminascale.sif lumina-env install
+      # apptainer/singularity sanitize the host environment, so pass it as:
+      apptainer exec --env LUMINA_ENV_HOME=... luminascale.sif lumina-env install
+      # or use APPTAINERENV_/SINGULARITYENV_ prefixed variables instead.
+    Use --nv when installing: pixi needs the GPU driver visible to detect
+    the CUDA >= 12.8 virtual package required by the manifest.
 
-    Quick start:
+    Typical use (after setup):
       srun singularity exec --nv luminascale.sif python scripts/train.py
-      srun singularity exec luminascale.sif python -c "import torch; print(torch.cuda.is_available())"
-    
-    Install additional packages (creates/updates local venv):
-      srun singularity exec luminascale.sif pip install new-package
-    
-    Interactive shell:
-      srun singularity shell --nv luminascale.sif
+      srun singularity exec --nv luminascale.sif lumina-activate python train.py
+
+    Interactive shell (auto-installs the env on first run):
+      singularity run --nv luminascale.sif
+
+    Check which python is active:
+      singularity exec luminascale.sif which python
+
+    Note: until the env is installed, `python` refers to the base image
+    PyTorch. After `lumina-env install` the pixi env shadows it. Install the
+    env once up front rather than letting parallel/array jobs race on setup.
+    Rebuild the image after changing pixi.toml on the host:
+      pixi add <package> && pixi lock
+      bash singularity/build_singularity.sh

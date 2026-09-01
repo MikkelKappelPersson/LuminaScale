@@ -16,4 +16,8 @@ input_def="singularity/luminascale.def"
 # The resulting container image
 output_sif="luminascale.sif"
 
+# Singularity prompts "[N/y]" when the target exists, which aborts in
+# non-interactive batch mode -- remove it up front instead.
+rm -f "$output_sif"
+
 singularity build --fakeroot $output_sif $input_def

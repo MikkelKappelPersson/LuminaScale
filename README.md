@@ -83,6 +83,13 @@ the lockfile into `~/.lumina-env` (override with `LUMINA_ENV_HOME`). Until that
 is done, `python` inside the container is the base-image PyTorch only — good
 enough for a smoke test, but training needs the environment below.
 
+> **CUDA version policy:** the stack is pinned to **CUDA 12.x** on purpose.
+> The cluster's V100 nodes (sm_70 / Volta) have local scratch storage we may
+> want to use, and CUDA 13 dropped Volta support — a cu13 image would fail
+> there with "no kernel image". If the V100s are ever abandoned, upgrade the
+> base image and the pixi `cuda-version` pin together (see the note at the
+> top of `singularity/luminascale.def`).
+
 ### One-time: install the container environment
 
 Run this once per cluster account, on a GPU node (`--nv` is required so pixi

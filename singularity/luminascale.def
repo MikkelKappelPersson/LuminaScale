@@ -1,6 +1,15 @@
 Bootstrap: docker
 From: pytorch/pytorch:2.10.0-cuda12.8-cudnn9-devel
 
+# NOTE on CUDA version: deliberately kept on CUDA 12.x. The AI-Cloud cluster
+# includes V100 (sm_70 / Volta) nodes with local scratch storage we may use;
+# CUDA 13 dropped Volta support, so a cu13 image would fail there with
+# "no kernel image". Driver survey 2026-09: T4/L40S 580.142, V100 580.159
+# (all r580, fine for CUDA <= 13.0). If the V100 nodes are ever abandoned,
+# a coordinated bump to e.g. pytorch 2.13.0-cuda13.0 + pixi cuda-version 13
+# is the next step. Keep the base-image CUDA in sync with pixi.toml's
+# `cuda-version` pin.
+
 # ---------------------------------------------------------------------------
 # LuminaScale container with pixi-based package management.
 #

@@ -127,6 +127,11 @@ def main() -> None:
         help="Model refiner residual blocks",
     )
     parser.add_argument(
+        "--no-refiner",
+        action="store_true",
+        help="Ablation: disable the Laplacian refinement head at inference (LUT-only forward path)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -180,6 +185,7 @@ def main() -> None:
         lut_dim=args.lut_dim,
         num_lap=args.num_lap,
         num_residual_blocks=args.num_residual_blocks,
+        use_refiner=not args.no_refiner,
     )
 
     look = None

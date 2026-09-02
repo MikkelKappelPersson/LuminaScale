@@ -108,6 +108,7 @@ def load_model_from_checkpoint(
     lut_dim: int,
     num_lap: int,
     num_residual_blocks: int,
+    use_refiner: bool = True,
 ) -> ACESMapper:
     """Load an ACESMapper checkpoint into an inference model."""
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -120,6 +121,7 @@ def load_model_from_checkpoint(
         num_lap=num_lap,
         num_residual_blocks=num_residual_blocks,
         target_color_space=target_color_space,
+        use_refiner=use_refiner,
     ).to(device)
     state_dict = checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint
     assert isinstance(state_dict, dict), "Checkpoint state_dict is not a dictionary"

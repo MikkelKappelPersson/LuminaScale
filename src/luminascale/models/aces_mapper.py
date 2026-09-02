@@ -34,9 +34,14 @@ class ACESMapper(nn.Module):
         sft_depths: list[int] = [1, 1, 1, 1, 1, 1, 1, 1],
         sft_num_heads: list[int] = [2, 4, 8, 16, 16, 8, 4, 2],
         target_color_space: str = "ACEScct",
+        use_refiner: bool = True,
     ) -> None:
         super().__init__()
         self.target_color_space = target_color_space
+        # Inference-time ablation switch (no effect on parameters): when False,
+        # forward() skips the Laplacian refinement head and returns the raw
+        # LUT-fused image directly ("LUT-only" mode). The refiner's weights are
+        # still constructed and loaded so checkpoints load with strict=True.
         
         # 1. Global Fitting Head: SFT Weight Predictor
         self.sft = SpatialFrequencyTransformer(
@@ -61,6 +66,7 @@ class ACESMapper(nn.Module):
         )
         
         self.num_luts = num_luts
+        self.use_refiner = use_refiner
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -100,7 +106,12 @@ class ACESMapper(nn.Module):
         # However, for simplicity in the unified module, we'll pass enhanced_full
         # and let the refiner handle the low-res extraction it needs.
         
-        # 3. Local Refinement
+        # 3. Local Refinement (skipped in LUT-only ablation mode)
+        if not self.use_refiner:
+            # Ablation: return the LUT-fused image directly, bypassing the
+            # Laplacian refinement head and its pyramid reconstruction.
+            return enhanced_full, point_weights
+        
         # The refiner uses the source image and the LUT-enhanced image to reconstruct details
         pyr_refined = self.refiner(x, enhanced_full)
         

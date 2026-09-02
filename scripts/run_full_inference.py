@@ -491,6 +491,11 @@ def main() -> None:
         help="Model refiner residual blocks",
     )
     parser.add_argument(
+        "--no-refiner",
+        action="store_true",
+        help="Ablation: disable the Laplacian refinement head at inference (LUT-only forward path)",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -634,6 +639,8 @@ def main() -> None:
         print(f"Saved dequantized intermediate: {dequant_input_for_mapper}")
 
     print(f"Loading ACES mapper model on {device}...")
+    if args.no_refiner:
+        print("Ablation mode: Laplacian refinement head DISABLED (LUT-only forward path)")
     mapper_model = load_model_from_checkpoint(
         checkpoint_path=args.mapper_checkpoint,
         device=device,
@@ -641,6 +648,7 @@ def main() -> None:
         lut_dim=args.lut_dim,
         num_lap=args.num_lap,
         num_residual_blocks=args.num_residual_blocks,
+        use_refiner=not args.no_refiner,
     )
     # Keep the mapper in float32: its spatial-frequency transformer uses
     # complex operators that fail under ComplexHalf on CUDA.

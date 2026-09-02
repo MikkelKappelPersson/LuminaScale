@@ -28,6 +28,19 @@ For a full run instead of dev:
 pixi run python scripts/train_aces_mapper.py --config-name=mapper
 ```
 
+### Adding or changing dependencies
+
+Edit `pixi.toml` (conda packages under `[dependencies]`, pip-only ones under
+`[pypi-dependencies]`), then:
+
+```bash
+pixi add <package>     # or edit pixi.toml by hand
+pixi lock              # re-resolve and update pixi.lock
+```
+
+Commit both `pixi.toml` and `pixi.lock` together — the lockfile pins the exact
+environment used locally **and** inside the HPC container, so they never drift.
+
 To run multiple mapper experiments in parallel (e.g., mapper_2 and mapper_3):
 ```bash
 pixi run python scripts/train_aces_mapper.py --config-name=mapper --multirun mapper_experiments=mapper_1,mapper_2,mapper_3,mapper_4
@@ -61,6 +74,35 @@ For advanced users running large-scale training on the AI-Cloud HPC cluster:
 ssh aicloud
 ```
 
+### How the container works
+
+`luminascale.sif` (built from `singularity/luminascale.def`, see
+`singularity/build_singularity.sh`) bakes pixi + `pixi.toml`/`pixi.lock` but
+**not** the Python environment. On first use it installs the environment from
+the lockfile into `~/.lumina-env` (override with `LUMINA_ENV_HOME`). Until that
+is done, `python` inside the container is the base-image PyTorch only — good
+enough for a smoke test, but training needs the environment below.
+
+### One-time: install the container environment
+
+Run this once per cluster account, on a GPU node (`--nv` is required so pixi
+can detect the CUDA driver):
+
+```bash
+srun --gpus=1 --time=0:30:00 --mem=8G \
+  singularity exec --nv luminascale.sif lumina-env install
+```
+
+Notes:
+
+- Apptainer/Singularity sanitize the host environment, so a plain
+  `export LUMINA_ENV_HOME=...` is **not** forwarded into the container. Pass it
+  as `--env LUMINA_ENV_HOME=...` or `SINGULARITYENV_LUMINA_ENV_HOME=...`.
+- Home storage is quota-limited (~11 GB for the environment). Point
+  `LUMINA_ENV_HOME` at a scratch/project path if needed.
+- Install once up front; don't let parallel/array jobs race on first install.
+- Update later with `singularity exec luminascale.sif lumina-env update`.
+
 ### Tensorboard
 
 ```bash
@@ -77,7 +119,7 @@ sbatch scripts/train_dequant_net.sh loss.l1_weight=1.0 loss.l2_weight=0.0 loss.c
 
 ### Training with srun
 ```bash
-srun --cpus-per-task=16 --mem=64G --gres=gpu:l40s:1 --time=1:00:00 singularity exec --nv luminascale.sif python3 scripts/train_dequant_net.py --config-name=dev
+srun --cpus-per-task=16 --mem=64G --gres=gpu:l40s:1 --time=1:00:00 singularity exec --nv luminascale.sif python scripts/train_dequant_net.py --config-name=dev
 ```
 
 ### Inference
@@ -85,5 +127,5 @@ srun --cpus-per-task=16 --mem=64G --gres=gpu:l40s:1 --time=1:00:00 singularity e
 Run inference on a 2K synthetic sky gradient using `srun`:
 
 ```bash
-srun --gres=gpu:1 --mem=16G singularity exec --nv luminascale.sif python3 scripts/run_dequant_inference.py --checkpoint dataset/temp/test_run/20260331_164330_dequant_net_epoch_1.pt --synthetic --width 2048 --height 1024 --output outputs/inference/sky_2k.exr
+srun --gres=gpu:1 --mem=16G singularity exec --nv luminascale.sif python scripts/run_dequant_inference.py --checkpoint dataset/temp/test_run/20260331_164330_dequant_net_epoch_1.pt --synthetic --width 2048 --height 1024 --output outputs/inference/sky_2k.exr
 ```

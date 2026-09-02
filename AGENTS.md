@@ -1,5 +1,12 @@
 # LuminaScale: Neural Bit-Depth Expansion & ACES Color Space Normalization
 
+## Agent Journal
+
+This repo is nested inside `med10-thesis`, which hosts the shared agent
+journal. Read `../journal/PROTOCOL.md` at session start and follow it
+(read `STATE.md` + latest daily entry; write session summaries back there).
+Never commit journal files as part of this repo — they live in the parent.
+
 ## Project Vision
 
 LuminaScale implements neural models for:

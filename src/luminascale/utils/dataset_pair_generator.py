@@ -164,15 +164,19 @@ class DatasetPairGenerator:
                         pixels = pixels.reshape((h, w, c))
                     elif pixels is not None and pixels.shape[0] == 3:
                         pixels = pixels.transpose(1, 2, 0)
-                    # Pad undersized images up to crop_size: the residual U-Net
-                    # needs spatially uniform, pooling-divisible inputs — a
-                    # variable-size full image breaks the residual add.
-                    if pixels is not None and crop_size > 0 and (h < crop_size or w < crop_size):
-                        pad_h, pad_w = crop_size - h, crop_size - w
-                        pad_mode = "reflect" if (h > pad_h and w > pad_w) else "edge"
-                        pixels = np.pad(pixels, ((0, pad_h), (0, pad_w), (0, 0)), mode=pad_mode)
-                
+
                 buf_input.close()
+
+                # Pad undersized images up to crop_size (applies after all crop
+                # paths — e.g. a 3040x2014 image requested at 2048 crops to
+                # 2014x2048 via the in-memory fallback): the residual U-Net
+                # needs spatially uniform, pooling-divisible inputs, so a
+                # variable-size image would break the residual add downstream.
+                if pixels is not None and crop_size > 0 and (pixels.shape[0] < crop_size or pixels.shape[1] < crop_size):
+                    pad_h = max(0, crop_size - pixels.shape[0])
+                    pad_w = max(0, crop_size - pixels.shape[1])
+                    pad_mode = "reflect" if (pixels.shape[0] > pad_h and pixels.shape[1] > pad_w) else "edge"
+                    pixels = np.pad(pixels, ((0, pad_h), (0, pad_w), (0, 0)), mode=pad_mode)
                 
                 t_decode = time.perf_counter()
                 decode_times.append((t_decode - t_open) * 1000)

@@ -282,12 +282,19 @@ class DequantTrainer(L.LightningModule):
             batch_target_blur = 0.0 if (is_validation or self.target_blur_start_sigma == 0) else self.current_target_blur_sigma
 
             # Decode full image(s) into graded sRGB pairs
+            # Per-sample input colour space comes from the shard metadata
+            # (json "color_space"); bake-time ACEScct conversion is declared there.
+            color_spaces = [
+                m.get("color_space", "ACES2065-1") if isinstance(m, dict) else "ACES2065-1"
+                for m in (metadata_list or [])
+            ]
             srgb_8u_batch, srgb_32f_batch, batch_timing_breakdown = self.pair_generator.generate_srgb_8u_32f_from_bytes(
-                exr_bytes_list, 
+                exr_bytes_list,
                 crop_size=crop_size,
                 bit_crunch_contrast_min=bit_crunch_min,
                 bit_crunch_contrast_max=bit_crunch_max,
                 target_blur_sigma=batch_target_blur,
+                color_spaces=color_spaces,
             )
             
             # Log current sigma to training logs periodically

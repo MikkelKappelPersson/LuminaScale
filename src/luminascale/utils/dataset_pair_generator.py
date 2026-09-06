@@ -51,21 +51,25 @@ class DatasetPairGenerator:
         self.cdl_processor = GPUCDLProcessor(device=device)
 
     def generate_srgb_8u_32f_from_bytes(
-        self, 
-        exr_bytes_list: list[bytes], 
+        self,
+        exr_bytes_list: list[bytes],
         crop_size: int = 512,
         bit_crunch_contrast_min: float = 1.0,
         bit_crunch_contrast_max: float = 1.0,
         target_blur_sigma: float = 0.0,
+        color_spaces: list[str] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict]:
         """Process a list of raw EXR bytes into graded sRGB 8u/32f pairs on GPU.
-        
+
         Args:
             exr_bytes_list: List of raw EXR bytes to process
             crop_size: Size of square crop to extract (512 default)
             bit_crunch_contrast_min: Minimum bit-crunching factor (1.0=no crunch, >1=aggressive)
             bit_crunch_contrast_max: Maximum bit-crunching factor
             target_blur_sigma: Gaussian blur sigma to apply to HBD target (0.0 = no blur)
+            color_spaces: Per-sample ACES input colour space (e.g. "ACES2065-1",
+                "ACEScct"). Must match the shard metadata; defaults to
+                "ACES2065-1" for every sample when omitted.
         
         Bit-crunching: Symmetric contrast reduction and expansion around 8-bit quantization.
         - Pre-quant: Reduce contrast by 1/bit_crunch_factor (crush data into 8-bit range)
@@ -191,7 +195,8 @@ class DatasetPairGenerator:
                 
                 # === ACES TRANSFORM ===
                 t_aces_start = time.perf_counter()
-                srgb_32f = self.pytorch_transformer.aces_to_srgb_32f(aces_graded.unsqueeze(0)).squeeze(0)
+                input_cs = color_spaces[idx] if color_spaces and idx < len(color_spaces) else "ACES2065-1"
+                srgb_32f = self.pytorch_transformer.aces_to_srgb_32f(aces_graded.unsqueeze(0), input_cs=input_cs).squeeze(0)
                 t_aces = time.perf_counter()
                 aces_times.append((t_aces - t_aces_start) * 1000)
                 
@@ -237,7 +242,7 @@ class DatasetPairGenerator:
                 processed_samples.append(idx)
                 
             except Exception as e:
-                logger.debug(f"Error processing sample {idx}: {e}")
+                logger.warning(f"Error processing sample {idx}: {e}")
                 continue
             finally:
                 if temp_file and os.path.exists(temp_file):
@@ -246,9 +251,13 @@ class DatasetPairGenerator:
         # Stack results (now much fewer intermediate tensors!)
         t_stack_start = time.perf_counter()
         if not tensors_8u:
-            # Fallback for empty batch
-            return torch.empty(0, 3, crop_size, crop_size, device=self.device), \
-                   torch.empty(0, 3, crop_size, crop_size, device=self.device), {}
+            # All samples failed — an empty batch would crash the trainer far
+            # from the real cause, so fail loudly here instead.
+            raise RuntimeError(
+                f"All {len(exr_bytes_list)} sample(s) failed to decode/grade. "
+                "Run with DEBUG logging on luminascale.utils.dataset_pair_generator "
+                "for per-sample errors."
+            )
         
         srgb_8u_batch = torch.stack(tensors_8u)
         srgb_32f_batch = torch.stack(tensors_32f)

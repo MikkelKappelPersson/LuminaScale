@@ -6,8 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
-# dataset
-dataset/
+# dataset — everything ignored except the layout README
+dataset/*
+!dataset/README.md
 /outputs/
 !/outputs/training/
 /outputs/training/*/

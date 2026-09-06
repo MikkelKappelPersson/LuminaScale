@@ -11,8 +11,8 @@ Options:
     --max-images N           Max images to process (default: all)
     --highlight-clip PCT    Max highlight clipping % (default: 3.0)
     --noise-floor STD       Max shadow noise std (default: 15.0)
-    --input-dir DIR         Input directory for RAW images (default: dataset/temp/raw)
-    --output-dir DIR        Output directory for ACES2065-1 files (default: dataset/temp/aces)
+    --input-dir DIR         Input directory for RAW images (default: dataset/raw)
+    --output-dir DIR        Output directory for ACES2065-1 files (default: dataset/exr/ACES2065-1)
     --dataset-prefix STR    Prefix for output filenames (e.g., PPR10K_, MIT-Adobe_5K_)
     --help                  Show this help message
 """
@@ -66,14 +66,14 @@ def main() -> int:
     parser.add_argument(
         "--input-dir",
         type=str,
-        default=str(script_dir.parent / "dataset" / "temp" / "raw"),
-        help="Input directory for RAW images (default: dataset/temp/raw)",
+        default=str(script_dir.parent / "dataset" / "raw"),
+        help="Input directory for RAW images (default: dataset/raw)",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=str(script_dir.parent / "dataset" / "temp" / "aces"),
-        help="Output directory for ACES files (default: dataset/temp/aces)",
+        default=str(script_dir.parent / "dataset" / "exr" / "ACES2065-1"),
+        help="Output directory for ACES files (default: dataset/exr/ACES2065-1)",
     )
     parser.add_argument(
         "--dataset-prefix",

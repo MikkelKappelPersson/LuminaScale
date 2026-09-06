@@ -19,7 +19,7 @@ CONTAINER=luminascale.sif
 mkdir -p outputs/training
 
 echo "🚀 Starting Dequant Training (WebDataset Pipeline)"
-echo "Using Shards in: dataset/temp/shards/train/"
+echo "Using Shards in: dataset/shards/ACEScct/full/shards/train/ (or as overridden)"
 
 # Run the training script via Singularity
 # Overriding shuffle_buffer slightly if needed

@@ -18,7 +18,7 @@ import logging
 logging.basicConfig(level=logging.WARNING)
 
 # Test image
-image_path = Path('dataset/temp/aces') / '1000_0.exr'
+image_path = Path('dataset/exr/ACES2065-1') / '1000_0.exr'
 print(f"Analyzing: {image_path.name}\n")
 
 # Load

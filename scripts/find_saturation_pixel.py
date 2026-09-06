@@ -18,7 +18,7 @@ import logging
 logging.basicConfig(level=logging.WARNING)
 
 # Load and process image
-image_path = Path('dataset/temp/aces') / '1000_0.exr'
+image_path = Path('dataset/exr/ACES2065-1') / '1000_0.exr'
 aces_image = benchmark_module.load_aces_image(image_path)
 
 # Get outputs

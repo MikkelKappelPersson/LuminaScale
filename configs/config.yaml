@@ -7,10 +7,11 @@ defaults:
 config_name: config
 task_name: null # Provided by task/ module
 
-# Data paths
-shard_path: "dataset/temp/shards/train"
-val_shard_path: "dataset/temp/shards/val"
-metadata_parquet: "dataset/temp/training_metadata.parquet"
+# Data paths — ACEScct/full is the HPC training variant (user decision
+# 2026-09-06); override for other colour spaces or the dev smoke sets
+shard_path: "dataset/shards/ACEScct/full/shards/train"
+val_shard_path: "dataset/shards/ACEScct/full/shards/val"
+metadata_parquet: "dataset/shards/ACEScct/full/training_metadata.parquet"
 
 # Data loading
 prefetch_size: 2

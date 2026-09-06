@@ -10,7 +10,7 @@
 set -e
 
 echo "Starting dataset extraction..."
-cd /home/student.aau.dk/fs62fb/projects/LuminaScale/dataset/temp
+cd /home/student.aau.dk/fs62fb/projects/LuminaScale/dataset/raw
 
 echo "Extracting dataset.tar.gz..."
 tar -xzf dataset.tar.gz

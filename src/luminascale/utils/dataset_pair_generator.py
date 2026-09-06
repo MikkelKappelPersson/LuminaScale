@@ -164,6 +164,13 @@ class DatasetPairGenerator:
                         pixels = pixels.reshape((h, w, c))
                     elif pixels is not None and pixels.shape[0] == 3:
                         pixels = pixels.transpose(1, 2, 0)
+                    # Pad undersized images up to crop_size: the residual U-Net
+                    # needs spatially uniform, pooling-divisible inputs — a
+                    # variable-size full image breaks the residual add.
+                    if pixels is not None and crop_size > 0 and (h < crop_size or w < crop_size):
+                        pad_h, pad_w = crop_size - h, crop_size - w
+                        pad_mode = "reflect" if (h > pad_h and w > pad_w) else "edge"
+                        pixels = np.pad(pixels, ((0, pad_h), (0, pad_w), (0, 0)), mode=pad_mode)
                 
                 buf_input.close()
                 

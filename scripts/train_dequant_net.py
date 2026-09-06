@@ -781,6 +781,27 @@ def main(cfg: DictConfig) -> None:
         name="",
         version="",
     )
+
+    # Optional MLflow logging, enabled by MLFLOW_TRACKING_URI (env var) or the
+    # mlflow_tracking_uri config key. Machines that can reach the central
+    # server (eos-ext, via tunnel) log directly with an http:// URI; HPC jobs
+    # use a local file: store that gets synced to the server after the run.
+    loggers = [logger_tb]
+    mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI") or cfg.get("mlflow_tracking_uri") or None
+    if mlflow_uri:
+        try:
+            from pytorch_lightning.loggers import MLFlowLogger
+            mlflow_experiment = cfg.get("mlflow_experiment_name", "LuminaScale")
+            logger_mlflow = MLFlowLogger(
+                experiment_name=mlflow_experiment,
+                tracking_uri=mlflow_uri,
+                run_name=run_dir.name,
+            )
+            logger_mlflow.log_hyperparams(OmegaConf.to_container(cfg, resolve=True))
+            loggers.append(logger_mlflow)
+            logger.info(f"MLflow logging enabled -> {mlflow_uri} (experiment: {mlflow_experiment})")
+        except Exception as e:
+            logger.warning(f"MLflow logging requested but unavailable ({e}); continuing without it")
     
     # Task-specific checkpoint naming
     task_label = cfg.get("task_name", "model")
@@ -837,7 +858,7 @@ def main(cfg: DictConfig) -> None:
         devices=cfg.devices,
         max_epochs=cfg.epochs,
         num_sanity_val_steps=0,  # Skip sanity check for faster startup
-        logger=logger_tb,
+        logger=loggers,
         callbacks=[
             checkpoint_callback,
             RichModelSummary(max_depth=2),

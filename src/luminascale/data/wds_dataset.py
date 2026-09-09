@@ -241,6 +241,38 @@ class _DecoderFn:
 
 
 
+class _RankRoundRobin:
+    """Sample-level DDP splitter: keeps every world_size-th sample for one rank.
+
+    webdataset's default shard-level node splitter (single_node_only) rejects
+    world_size > 1 outright, and shard-level splitting cannot balance a small
+    shard list (the dev set is a single shard). This filter round-robins the
+    *sample* stream by rank instead, so each DDP rank sees a disjoint,
+    equal-sized slice. Rank/world are resolved in the main rank process (where
+    torch.distributed is initialised) and frozen into the instance — the filter
+    itself is pickle-safe for spawned dataloader workers.
+
+    NB: this means every rank streams every shard (N× read amplification).
+    Fine for dev-scale; full-set multi-GPU should move to shard-level
+    split_by_node once the shard count >= world size.
+    """
+
+    def __init__(self, rank: int, world_size: int):
+        self.rank = rank
+        self.world_size = world_size
+        self._count = 0
+
+    def __call__(self, _sample) -> bool:
+        keep = self._count % self.world_size == self.rank
+        self._count += 1
+        return keep
+
+
+def _no_split(src):
+    """Identity node splitter: don't split the shard list across DDP ranks."""
+    yield from src
+
+
 class LuminaScaleWebDataset:
     """WebDataset wrapper for streaming training data on HPC."""
     
@@ -340,8 +372,31 @@ class LuminaScaleWebDataset:
         # Shuffle shards with buffer during training for distributed randomness; deterministic for validation
         # shardshuffle expects integer buffer size (not boolean)
         shardshuffle_buffer = 100 if is_training else False
-        dataset = wds.WebDataset(self.shard_path, resampled=False, empty_check=False, shardshuffle=shardshuffle_buffer)
-        
+        # DDP: the default shard-level node splitter (single_node_only)
+        # raises at iteration time when world_size > 1, so swap in an identity
+        # splitter and split the *sample* stream by rank instead (see
+        # _RankRoundRobin — shard-level splitting cannot balance a small
+        # shard list, e.g. dev = a single shard).
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            _rank = torch.distributed.get_rank()
+            _world = torch.distributed.get_world_size()
+        else:
+            _rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")) or 0)
+            _world = int(os.environ.get("WORLD_SIZE", os.environ.get("LOCAL_WORLD_SIZE", "1")) or 1)
+        nodesplitter_kwargs = {"nodesplitter": _no_split} if _world > 1 else {}
+
+        dataset = wds.WebDataset(self.shard_path, resampled=False, empty_check=False,
+                                 shardshuffle=shardshuffle_buffer, **nodesplitter_kwargs)
+
+        if _world > 1 and is_training:
+            # Rank-split the TRAIN stream only. Validation keeps the full
+            # stream on every rank: dev val = 5 samples, which a round-robin
+            # would divide 2/1/1/1 — unequal val batch counts deadlock DDP on
+            # the synced metrics during sanity check / epoch-end val.
+            # Duplicated val compute per rank is negligible at dev scale.
+            logger.info(f"DDP sample-splitter active (train only): rank {_rank}/{_world}")
+            dataset = dataset.select(_RankRoundRobin(_rank, _world))
+
         # Split by worker (instead of .shardselection method)
         dataset = dataset.select(wds.shardlists.split_by_worker)
         

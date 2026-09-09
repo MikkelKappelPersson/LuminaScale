@@ -174,7 +174,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
         temp_checkpoint: Path | None = None
         try:
             # Save temporary checkpoint for run_dequant_inference.py
-            temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_{epoch_label}.pt"
+            temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_{epoch_label}_r{trainer.global_rank}.pt"
             # Cast model as nn.Module to access state_dict
             model = cast(nn.Module, pl_module.model)
             
@@ -214,7 +214,10 @@ class SyntheticInferenceVisualizerCallback(Callback):
                 cmd.extend(["--target-blur-sigma", str(pl_module.current_target_blur_sigma)])
             
             logger.debug(f"Running inference: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root),
+                                        env={k: v for k, v in os.environ.items()
+                                             if k not in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE",
+                                                          "MASTER_ADDR", "MASTER_PORT", "TORCH_DISTRIBUTED_DEBUG")})
             
             if result.returncode != 0:
                 logger.error(f"Inference failed with return code {result.returncode}")
@@ -305,7 +308,6 @@ class SyntheticInferenceVisualizerCallback(Callback):
         """
         if trainer.logger is None or not hasattr(trainer.logger, "experiment"):
             return
-        
         if trainer.log_dir is None:
             logger.error("Trainer log_dir is None, cannot run real image inference")
             return
@@ -319,7 +321,7 @@ class SyntheticInferenceVisualizerCallback(Callback):
         temp_checkpoint: Path | None = None
         try:
             # Save temporary checkpoint for run_dequant_inference.py (reuse for all images)
-            temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_real_{epoch_label}.pt"
+            temp_checkpoint = Path(trainer.log_dir) / f".temp_checkpoint_real_{epoch_label}_r{trainer.global_rank}.pt"
             model = cast(nn.Module, pl_module.model)
             
             # Unwrap torch.compile wrapper if present (torch.compile adds "_orig_mod" layer)
@@ -359,7 +361,10 @@ class SyntheticInferenceVisualizerCallback(Callback):
                     cmd.extend(["--target-blur-sigma", str(pl_module.current_target_blur_sigma)])
                 
                 logger.debug(f"Running real image inference on {image_name}: {' '.join(cmd)}")
-                result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root))
+                result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(project_root),
+                                        env={k: v for k, v in os.environ.items()
+                                             if k not in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE",
+                                                          "MASTER_ADDR", "MASTER_PORT", "TORCH_DISTRIBUTED_DEBUG")})
                 
                 if result.returncode != 0:
                     logger.error(f"Real image inference on {image_name} failed with return code {result.returncode}")

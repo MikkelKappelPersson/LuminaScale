@@ -154,9 +154,13 @@ class DequantTrainer(L.LightningModule):
     def _get_device(self) -> torch.device:
         """Get the device for tensor operations.
         
-        Always returns CUDA since we only train on GPUs.
+        Resolves to the module's *actual* device (device of its parameters).
+        Under DDP each rank process sees all GPUs and its module lives on
+        cuda:<rank>, so a hardcoded torch.device("cuda") (= cuda:0) breaks
+        every rank >= 1 — e.g. the DatasetPairGenerator's ACESColorTransformer
+        landed on cuda:0 while its inputs arrived on the rank device.
         """
-        return self.device_cuda
+        return self.device
 
     # V1.5 diagnostic: accumulate wall time spent in transfer_batch_to_device
     # (pin_memory copy + H2D). Enabled with LUMINA_PHASE_TIMING=1; totals are

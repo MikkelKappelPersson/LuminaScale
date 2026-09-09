@@ -176,8 +176,16 @@ class DequantTrainer(L.LightningModule):
             )
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        if self._PHASE_TIMING:
-            _t0 = time.perf_counter()
+        """Timing wrapper — see _transfer_batch_to_device_impl."""
+        if not self._PHASE_TIMING:
+            return self._transfer_batch_to_device_impl(batch, device, dataloader_idx)
+        _t0 = time.perf_counter()
+        out = self._transfer_batch_to_device_impl(batch, device, dataloader_idx)
+        self._PHASE_TOTALS["transfer_s"] += time.perf_counter() - _t0
+        self._PHASE_TOTALS["transfer_calls"] += 1
+        return out
+
+    def _transfer_batch_to_device_impl(self, batch, device, dataloader_idx):
         """Override batch transfer for WebDataset batches.
 
         Two batch formats arrive here:
@@ -196,9 +204,6 @@ class DequantTrainer(L.LightningModule):
                     # Raw byte batch - skip device transfer (decoded in-step)
                     return batch
                 if isinstance(first_elem[0], ExrDecodeResult):
-                    if self._PHASE_TIMING:
-                        self._PHASE_TOTALS["transfer_s"] += time.perf_counter() - _t0
-                        self._PHASE_TOTALS["transfer_calls"] += 1
                     tensored = []
                     for res in first_elem:
                         px_t = None

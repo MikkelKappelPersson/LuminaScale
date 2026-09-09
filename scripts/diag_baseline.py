@@ -52,9 +52,13 @@ for lo, hi, label in [(0, 39, "epoch1-cold"), (41, 79, "epoch2-warm")]:
     g = [d for s, d in gaps if lo < s <= hi][5:]
     if g:
         print(f"{label}: n={len(g)} mean {sum(g)/len(g):.3f} median {statistics.median(g):.3f} s/batch; min {min(g):.2f} max {max(g):.2f}", flush=True)
-for line in r.stdout.splitlines():
-    if "[PHASE]" in line:
-        print(line, flush=True)
+if "[PHASE]" in r.stdout:
+    for line in r.stdout.splitlines():
+        if "[PHASE]" in line:
+            print(line, flush=True)
+if "profiler table" in r.stdout:
+    i = r.stdout.index("===== torch profiler table")
+    print(r.stdout[i:], flush=True)
 profs = sorted(glob.glob(out_dir + "/**/fit-training_profile*", recursive=True), key=os.path.getmtime)
 for line in open(profs[-1]):
     if "run_training_batch" in line:

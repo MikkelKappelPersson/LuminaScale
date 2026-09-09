@@ -371,6 +371,15 @@ class LuminaScaleWebDataset:
             "pin_memory": True,
             "persistent_workers": True if num_workers > 0 else False,
         }
+        # Decode-in-workers mode MUST use the spawn context: forked workers
+        # inherit the parent's libgomp/OpenMP team state (initialised by CPU
+        # side torch work like parameter init) and then deadlock forever
+        # inside OIIO's first parallel read (observed on AI-Cloud L40S,
+        # 2026-09-09). Spawned workers start a fresh interpreter instead.
+        # Requires a picklable map fn (_DecoderFn) and a __main__ guard in
+        # the entry script — both in place.
+        if self.decode_in_workers and num_workers > 0:
+            loader_kwargs["multiprocessing_context"] = "spawn"
         # Debug: LUMINA_WORKER_DUMP=<seconds> makes each worker dump its stack
         # (and exit) after that many seconds — deadlock diagnosis only.
         if os.environ.get("LUMINA_WORKER_DUMP"):

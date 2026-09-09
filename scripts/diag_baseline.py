@@ -28,6 +28,8 @@ cmd = [sys.executable, "-u", "scripts/train_dequant_net.py", "--config-name=dequ
        "shard_path=dataset/shards/ACEScct/dev/shards/train",
        "val_shard_path=dataset/shards/ACEScct/dev/shards/val",
        "metadata_parquet=dataset/shards/ACEScct/dev/training_metadata.parquet"]
+if os.environ.get("V3") == "1":
+    cmd.append("decode_in_workers=True")
 t0 = time.time()
 r = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
 print("wall", round(time.time()-t0), "s rc=", r.returncode, flush=True)

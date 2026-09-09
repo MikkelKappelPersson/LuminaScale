@@ -14,7 +14,7 @@ ROOT = H + "/projects/LuminaScale"
 sys.path.insert(0, ROOT + "/src")
 NODE = socket.gethostname()
 NW = os.environ.get("NW", "1")
-LABEL = os.environ.get("V3") and "v3" or "before"
+LABEL = "v3" if os.environ.get("V3") == "1" else "before"
 gpu = subprocess.run(["nvidia-smi","--query-gpu=name","--format=csv,noheader"],capture_output=True,text=True).stdout.strip()
 print(f"node: {NODE} gpu: {gpu} nw: {NW} label: {LABEL}", flush=True)
 

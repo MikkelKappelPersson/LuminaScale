@@ -263,3 +263,7 @@ checkpoints/
 
 # Apptainer/Singularity local build artifacts
 .apptainer-build/
+
+# MLflow runtime stores (HPC local sqlite sync path)
+mlruns.db
+mlruns/

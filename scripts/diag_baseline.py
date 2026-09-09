@@ -30,6 +30,9 @@ cmd = [sys.executable, "-u", "scripts/train_dequant_net.py", "--config-name=dequ
        "metadata_parquet=dataset/shards/ACEScct/dev/training_metadata.parquet"]
 if os.environ.get("V3") == "1":
     cmd.append("decode_in_workers=True")
+if os.environ.get("PROF") == "1":
+    cmd.append("torch_profile=True")
+    env["LUMINA_PHASE_TIMING"] = "1"
 t0 = time.time()
 r = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
 print("wall", round(time.time()-t0), "s rc=", r.returncode, flush=True)
@@ -49,6 +52,9 @@ for lo, hi, label in [(0, 39, "epoch1-cold"), (41, 79, "epoch2-warm")]:
     g = [d for s, d in gaps if lo < s <= hi][5:]
     if g:
         print(f"{label}: n={len(g)} mean {sum(g)/len(g):.3f} median {statistics.median(g):.3f} s/batch; min {min(g):.2f} max {max(g):.2f}", flush=True)
+for line in r.stdout.splitlines():
+    if "[PHASE]" in line:
+        print(line, flush=True)
 profs = sorted(glob.glob(out_dir + "/**/fit-training_profile*", recursive=True), key=os.path.getmtime)
 for line in open(profs[-1]):
     if "run_training_batch" in line:

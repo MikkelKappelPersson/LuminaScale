@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -157,7 +158,26 @@ class DequantTrainer(L.LightningModule):
         """
         return self.device_cuda
 
+    # V1.5 diagnostic: accumulate wall time spent in transfer_batch_to_device
+    # (pin_memory copy + H2D). Enabled with LUMINA_PHASE_TIMING=1; totals are
+    # printed once at train end.
+    _PHASE_TIMING = os.environ.get("LUMINA_PHASE_TIMING") == "1"
+    _PHASE_TOTALS: dict = {"transfer_s": 0.0, "transfer_calls": 0}
+
+    def on_train_end(self) -> None:
+        """V1.5 diagnostic: report accumulated phase timings when enabled."""
+        if self._PHASE_TIMING and self._PHASE_TOTALS["transfer_calls"]:
+            tot = self._PHASE_TOTALS
+            n = tot["transfer_calls"]
+            print(
+                f"[PHASE] transfer_batch_to_device: {tot['transfer_s']:.2f} s total "
+                f"over {n} calls = {tot['transfer_s'] / n * 1000:.1f} ms/call",
+                flush=True,
+            )
+
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
+        if self._PHASE_TIMING:
+            _t0 = time.perf_counter()
         """Override batch transfer for WebDataset batches.
 
         Two batch formats arrive here:
@@ -176,6 +196,9 @@ class DequantTrainer(L.LightningModule):
                     # Raw byte batch - skip device transfer (decoded in-step)
                     return batch
                 if isinstance(first_elem[0], ExrDecodeResult):
+                    if self._PHASE_TIMING:
+                        self._PHASE_TOTALS["transfer_s"] += time.perf_counter() - _t0
+                        self._PHASE_TOTALS["transfer_calls"] += 1
                     tensored = []
                     for res in first_elem:
                         px_t = None

@@ -396,6 +396,52 @@ class SyntheticInferenceVisualizerCallback(Callback):
                     pass
 
 
+class TorchProfileCallback(Callback):
+    """V1.5: itemise main-process per-batch cost with torch.profiler.
+
+    Uses a wait/warmup/active schedule so the profiled window sits after
+    warm-up while un-profiled steps stay overhead-free. On completion it
+    prints key-averages tables (GPU-sorted, CPU-sorted) and writes a chrome
+    trace into output_dir.
+    """
+
+    def __init__(self, output_dir: str, wait: int = 8, warmup: int = 2, active: int = 20):
+        super().__init__()
+        self._dir = Path(output_dir)
+        self._prof = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=1),
+            on_trace_ready=self._on_trace_ready,
+            record_shapes=False,
+        )
+        self._started = False
+
+    def _on_trace_ready(self, prof) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        for sort_key, rows in (("self_cuda_time_total", 25), ("self_cpu_time_total", 45)):
+            print(f"\n===== torch profiler table (sort={sort_key}) =====", flush=True)
+            print(prof.key_averages().table(sort_by=sort_key, row_limit=rows), flush=True)
+        trace = self._dir / "torch_trace.json"
+        prof.export_chrome_trace(str(trace))
+        print(f"[TorchProfileCallback] chrome trace -> {trace}", flush=True)
+
+    def on_train_start(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        self._prof.start()
+        self._started = True
+
+    def on_train_batch_end(self, trainer: L.Trainer, pl_module: L.LightningModule,
+                           outputs: Any, batch: Any, batch_idx: int) -> None:
+        if self._started:
+            self._prof.step()
+
+    def on_train_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        if self._started:
+            self._prof.stop()
+
+
 class TensorBoardFlushCallback(Callback):
     """Callback to explicitly flush TensorBoard logger after each batch and epoch."""
     
@@ -870,6 +916,8 @@ def main(cfg: DictConfig) -> None:
             TensorBoardFlushCallback(),
             LearningRateMonitor(logging_interval="epoch"),
             HparamsMetricsCallback(hparams_dict),
+            *([TorchProfileCallback(output_dir=str(cfg.output_dir))]
+              if cfg.get("torch_profile", False) else []),
             SyntheticInferenceVisualizerCallback(
                 width=cfg.get("inference_width", 128),
                 height=cfg.get("inference_height", 64),

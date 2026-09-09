@@ -655,6 +655,8 @@ def main(cfg: DictConfig) -> None:
         shuffle_buffer=cfg.get("shuffle_buffer", 1000),
         is_training=True,
         metadata_parquet=cfg.get("metadata_parquet"),
+        decode_in_workers=cfg.get("decode_in_workers", False),
+        crop_size=cfg.get("crop_size", 512),
     )
     print(f"[MAIN] ✓ WebDataset created")
     
@@ -682,6 +684,8 @@ def main(cfg: DictConfig) -> None:
             shuffle_buffer=cfg.get("shuffle_buffer", 1000),
             is_training=False,  # No shuffling for validation
             metadata_parquet=cfg.get("metadata_parquet"),
+            decode_in_workers=cfg.get("decode_in_workers", False),
+            crop_size=cfg.get("val_crop_size", cfg.get("crop_size", 512)),
         )
         print(f"[MAIN] ✓ Validation WebDataset created")
         

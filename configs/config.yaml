@@ -17,6 +17,9 @@ metadata_parquet: "dataset/shards/ACEScct/full/training_metadata.parquet"
 prefetch_size: 2
 num_workers: 1
 shuffle_buffer: 50  # Buffer size for shuffling individual samples (shardshuffle is automatic based on is_training)
+# Decode EXR in the dataloader worker processes (CPU-only, float32 crops
+# shipped to the step) instead of in-step. See experiments/training-loop-throughput V3.
+decode_in_workers: false
 
 # Hardware
 device: cuda

@@ -7,84 +7,197 @@ import json
 import io
 import time
 import logging
-import torch.nn.functional as F
+import os
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
+import numpy as np
+import torch.nn.functional as F
 from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
-def decode_exr_and_json(sample: dict) -> tuple[bytes, dict]:
-    """Custom decoder for LuminaScale Shards.
-    
-    Transforms:
-    - .exr -> Raw bytes (passed to GPU for OIIO/CUDA decoding)
-    - .json -> Decoded metadata dictionary
-    
-    Note: The actual EXR decoding happens on GPU via OIIO/CUDA, not CPU.
-    With num_workers=2 and persistent_workers=True, we minimize GIL contention.
-    
-    Returns:
-        (exr_bytes, metadata_dict) tuple
+
+@dataclass
+class ExrDecodeResult:
+    """A decoded EXR sample for the decode-in-workers path.
+
+    pixels is the cropped/padded float32 array [H, W, C] ready for a GPU
+    transfer; meta is the original shard metadata dict (with the worker-side
+    decode timing appended under "decode_ms").
     """
-    # .exr is raw bytes at this stage
+
+    pixels: np.ndarray | None
+    meta: dict
+
+
+def decode_exr_to_pixels(exr_file_path: str, metadata: dict, crop_size: int) -> np.ndarray | None:
+    """OIIO-decode an EXR file to a cropped + padded float32 array.
+
+    This is the shared CPU-side decode used by BOTH the in-step path
+    (DatasetPairGenerator, which calls it per sample from temp files it
+    writes itself) and the worker path (decode_in_workers, which calls it
+    inside the dataloader worker processes). Keeping one implementation
+    guarantees identical pixels for both.
+
+    Crop policy mirrors the historical generator behaviour: centre crop to
+    crop_size when the image is larger, otherwise a full read with
+    in-memory crop of the residual, then reflect/edge padding back up to
+    crop_size (the residual net needs spatially uniform, pooling-divisible
+    inputs).
+
+    Args:
+        exr_file_path: Path of a readable .exr file (temp files expected).
+        metadata: Shard metadata dict (reserved; the authoritative crop_size
+            is the explicit keyword).
+        crop_size: Target square crop side (<= 0 disables cropping).
+
+    Returns:
+        float32 ndarray [H, W, C] or None when OIIO cannot open/read it.
+    """
+    import OpenImageIO as oiio
+
+    buf_input = oiio.ImageInput.open(exr_file_path)
+    if not buf_input:
+        logger.debug(f"OIIO failed to open EXR: {exr_file_path}")
+        return None
+
+    try:
+        spec = buf_input.spec()
+        h, w, c = spec.height, spec.width, spec.nchannels
+        crop = int(crop_size)
+
+        if crop > 0 and (h > crop or w > crop):
+            top = max(0, (h - crop) // 2)
+            left = max(0, (w - crop) // 2)
+            try:
+                # OIIO read_region: (xbegin, xend, ybegin, yend) — reads only the ROI
+                pixels = buf_input.read_region("float", left, left + crop, top, top + crop)
+                if pixels is not None:
+                    pixels = pixels.reshape((crop, crop, c))
+            except Exception as e:
+                logger.debug(f"OIIO ROI read failed ({e}), falling back to full read")
+                pixels = buf_input.read_image("float")
+                if pixels is not None and pixels.ndim == 1:
+                    pixels = pixels.reshape((h, w, c))
+                elif pixels is not None and pixels.shape[0] == 3:
+                    pixels = pixels.transpose(1, 2, 0)
+                if pixels is not None:
+                    pixels = pixels[top: top + crop, left: left + crop, :]
+        else:
+            pixels = buf_input.read_image("float")
+            if pixels is not None and pixels.ndim == 1:
+                pixels = pixels.reshape((h, w, c))
+            elif pixels is not None and pixels.shape[0] == 3:
+                pixels = pixels.transpose(1, 2, 0)
+    finally:
+        buf_input.close()
+
+    if pixels is None or len(pixels) == 0:
+        logger.debug(f"OIIO read returned None/empty: {exr_file_path}")
+        return None
+
+    pixels = pixels.astype(np.float32, copy=False)
+    if crop > 0 and (pixels.shape[0] < crop or pixels.shape[1] < crop):
+        pad_h = max(0, crop - pixels.shape[0])
+        pad_w = max(0, crop - pixels.shape[1])
+        pad_mode = "reflect" if (pixels.shape[0] > pad_h and pixels.shape[1] > pad_w) else "edge"
+        pixels = np.pad(pixels, ((0, pad_h), (0, pad_w), (0, 0)), mode=pad_mode)
+    return pixels
+
+
+def decode_exr_bytes_to_result(exr_bytes: bytes, metadata: dict, crop_size: int) -> ExrDecodeResult:
+    """Worker-side decode: EXR bytes -> ExrDecodeResult (float32 pixels, meta).
+
+    Used inside webdataset worker processes (CPU-only; never initialises
+    CUDA). Temp files are written to the OS temp dir (node-local /tmp under
+    singularity binds) and removed immediately.
+    """
+    t0 = time.perf_counter()
+    temp_file = None
+    pixels = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".exr", delete=False) as tmp:
+            tmp.write(exr_bytes)
+            temp_file = tmp.name
+        pixels = decode_exr_to_pixels(temp_file, metadata, crop_size)
+    finally:
+        if temp_file and os.path.exists(temp_file):
+            os.remove(temp_file)
+    decode_ms = (time.perf_counter() - t0) * 1000.0
+    meta = dict(metadata or {})
+    meta["decode_ms"] = decode_ms
+    if pixels is None:
+        meta["decode_ok"] = False
+    return ExrDecodeResult(pixels=pixels, meta=meta)
+
+
+def decode_exr_and_json(sample: dict, decode_in_workers: bool = False, crop_size: int = 512) -> tuple[bytes | ExrDecodeResult, dict]:
+    """Decoder for LuminaScale shards.
+
+    Two modes:
+    - decode_in_workers=False (historical): pass raw EXR bytes through; the
+      trainer decodes them OIIO-side inside training_step.
+    - decode_in_workers=True: decode here, in the dataloader worker process
+      (CPU-only) and ship the float32 crop instead of the bytes, so the
+      step only pays for the GPU-side colour ops.
+
+    Returns:
+        (exr_bytes_or_result, metadata_dict)
+    """
     exr_data = sample.get("exr")
-    # .json is also raw bytes
     json_data = sample.get("json")
-    
-    if json_data:
-        metadata = json.loads(json_data.decode("utf-8"))
-    else:
-        metadata = {}
-        
-    # We pass the raw EXR bytes to the GPU for decoding via OIIO/Cuda
-    # This avoids expensive CPU-side EXR decoding
-    return exr_data, metadata
-    
+
+    metadata = json.loads(json_data.decode("utf-8")) if json_data else {}
+
+    if decode_in_workers:
+        return decode_exr_bytes_to_result(exr_data, metadata, crop_size), metadata
     return exr_data, metadata
 
 
-def collate_wds_batch(batch) -> tuple[list[bytes], list[dict]]:
+def collate_wds_batch(batch) -> tuple[list, list]:
     """Custom collate function for WebDataset batches.
-    
+
     WebDataset.batched() already groups items, so it returns tuples of lists.
     Input format from .batched(): ([item1, item2, ...], [item1, item2, ...])
-    where each item is a (exr_bytes, metadata) tuple.
-    
+    where each item is either a (bytes, dict) pair (raw mode) or an
+    (ExrDecodeResult, dict) pair (decode-in-workers mode).
+
     This collate function flattens the nested structure into separate lists.
-    
+
     Args:
         batch: Tuple of (batched_items_list, batched_items_list) where each batch
                has gotten pre-batched by .batched()
-        
+
     Returns:
-        (exr_bytes_list, metadata_list) tuple suitable for GPU processing
+        (exr_list, metadata_list) suitable for the trainer (bytes in raw
+        mode, ExrDecodeResult objects in decode-in-workers mode)
     """
     if not batch or (isinstance(batch, (tuple, list)) and len(batch) == 0):
         return [], []
-    
+
     # Handle the case where .batched() returns a tuple of (list_of_items, list_of_items)
     if isinstance(batch, (tuple, list)) and len(batch) >= 2:
         # If first element is a list of tuples (items), unpack here
         if isinstance(batch[0], list) and isinstance(batch[1], list):
             # .batched() format: tuple of two lists containing items
-            exr_bytes_list = []
+            exr_list = []
             metadata_list = []
-            
-            items_list = batch[0]  # List of exr bytes
+
+            items_list = batch[0]  # List of exr items (bytes or ExrDecodeResult)
             metadata_list_raw = batch[1]  # List of metadata
-            
+
             # The items are already separated by .batched()
             # Just return both lists directly
-            
+
             # Handle case where items are themselves lists (nested batching)
             for idx, item in enumerate(items_list):
                 if isinstance(item, list) and len(item) > 0:
                     # Flatten nested list
-                    exr_data = item[0] if isinstance(item[0], bytes) else item
-                    exr_bytes_list.append(exr_data)
+                    exr_list.append(item[0])
                 else:
-                    exr_bytes_list.append(item)
-            
+                    exr_list.append(item)
+
             # Similar for metadata
             for idx, item in enumerate(metadata_list_raw):
                 if isinstance(item, list) and len(item) > 0:
@@ -92,9 +205,9 @@ def collate_wds_batch(batch) -> tuple[list[bytes], list[dict]]:
                     metadata_list.append(item[0] if isinstance(item[0], dict) else item)
                 else:
                     metadata_list.append(item)
-            
-            return exr_bytes_list, metadata_list
-    
+
+            return exr_list, metadata_list
+
     # Fallback for other formats
     return batch if isinstance(batch, tuple) else (batch, [])
 
@@ -110,6 +223,8 @@ class LuminaScaleWebDataset:
         metadata_parquet: str | Path | None = None,
         split: str = "train",
         patches_per_image: int = 1,
+        decode_in_workers: bool = False,
+        crop_size: int = 512,
     ):
         # Handle shard_path: can be a string, list, or string representation of a list
         import ast
@@ -165,6 +280,8 @@ class LuminaScaleWebDataset:
         self.batch_size = batch_size
         self.split = split
         self.patches_per_image = max(1, patches_per_image)  # Ensure at least 1
+        self.decode_in_workers = decode_in_workers
+        self.crop_size = crop_size
         
         # Try to load total samples from parquet metadata
         self.total_samples = None
@@ -211,8 +328,10 @@ class LuminaScaleWebDataset:
             dataset = dataset.repeat(self.patches_per_image)
             logger.debug(f"Configured dataset to repeat {self.patches_per_image} times for on-the-fly patch generation")
             
-        # Map our custom decoder
-        dataset = dataset.map(decode_exr_and_json)
+        # Map our custom decoder (worker-side decode when enabled)
+        dataset = dataset.map(
+            lambda s: decode_exr_and_json(s, decode_in_workers=self.decode_in_workers, crop_size=self.crop_size)
+        )
         
         # Batching
         dataset = dataset.batched(batch_size)

@@ -26,7 +26,7 @@ from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
 
 console = Console()
 
-from ..data.wds_dataset import LuminaScaleWebDataset
+from ..data.wds_dataset import LuminaScaleWebDataset, ExrDecodeResult
 from ..utils.dataset_pair_generator import DatasetPairGenerator
 from ..utils.image_generator import create_primary_gradients, quantize_to_8bit, apply_s_curve_contrast_torch
 from ..utils.metrics import DeltaEACES
@@ -158,19 +158,32 @@ class DequantTrainer(L.LightningModule):
         return self.device_cuda
 
     def transfer_batch_to_device(self, batch, device, dataloader_idx):
-        """Override batch transfer to handle WebDataset raw byte batches.
-        
-        WebDataset batches are (list[bytes], list[dict]) tuples.
-        We skip device transfer for raw bytes since they're decoded on GPU in training_step.
+        """Override batch transfer for WebDataset batches.
+
+        Two batch formats arrive here:
+        - (list[bytes], list[dict]) — historical raw path: skipped, the step
+          decodes on CPU and moves to GPU itself.
+        - (list[ExrDecodeResult], list[dict]) — decode-in-workers path: the
+          worker produced float32 pixel arrays on CPU; convert them to
+          pinned-CPU tensors here so the step's .to(device) is an async
+          pinned H2D copy instead of a pageable memcpy.
         """
-        # Check if this is a WebDataset batch: (list[bytes], list[dict])
+        # Check if this is a WebDataset batch: (exr_list, metadata_list)
         if isinstance(batch, (tuple, list)) and len(batch) == 2:
             first_elem = batch[0]
             if isinstance(first_elem, list) and len(first_elem) > 0:
                 if isinstance(first_elem[0], bytes):
-                    # This is a WebDataset batch - skip device transfer
+                    # Raw byte batch - skip device transfer (decoded in-step)
                     return batch
-        
+                if isinstance(first_elem[0], ExrDecodeResult):
+                    tensored = []
+                    for res in first_elem:
+                        px_t = None
+                        if res.pixels is not None:
+                            px_t = torch.from_numpy(np.ascontiguousarray(res.pixels)).pin_memory()
+                        tensored.append(ExrDecodeResult(pixels=px_t, meta=res.meta))
+                    return tensored, list(batch[1])
+
         # Standard tensor batch: use default movement logic
         # For tensor batches, Lightning handles the device transfer automatically
         # Just return the batch as-is for tensors; Lightning will move them
@@ -444,8 +457,10 @@ class DequantTrainer(L.LightningModule):
                     if isinstance(batch[0], torch.Tensor) and isinstance(batch[1], torch.Tensor):
                         # Tensors already on device, measure zero-copy time
                         x, y = batch
-                    # WebDataset case: batch is (exr_bytes_list, metadata_list)
-                    elif isinstance(batch[0], list) and len(batch[0]) > 0 and isinstance(batch[0][0], bytes):
+                    # WebDataset case: batch is (exr_list, metadata_list).
+                    # exr_list[0] is bytes (in-step decode path) or
+                    # ExrDecodeResult (decode-in-workers path).
+                    elif isinstance(batch[0], list) and len(batch[0]) > 0 and isinstance(batch[0][0], (bytes, ExrDecodeResult)):
                         t_process_batch_start = time.perf_counter()
                         x, y, batch_timing_breakdown = self._process_batch(batch)
                         process_batch_ms = (time.perf_counter() - t_process_batch_start) * 1000
@@ -626,11 +641,12 @@ class DequantTrainer(L.LightningModule):
         Handles both WebDataset format (tuple/list) and dictionary format.
         Uses val_crop_size which can differ from training crop_size for speed.
         """
-        # Handle WebDataset format: batch is (exr_bytes_list, metadata_list)
+        # Handle WebDataset format: batch is (exr_list, metadata_list)
         if isinstance(batch, (tuple, list)):
             if len(batch) == 2:
-                # WebDataset case: decode batch
-                if isinstance(batch[0], list) and len(batch[0]) > 0 and isinstance(batch[0][0], bytes):
+                # WebDataset case: decode/grade batch; exr_list[0] is bytes
+                # (in-step decode) or ExrDecodeResult (decode-in-workers)
+                if isinstance(batch[0], list) and len(batch[0]) > 0 and isinstance(batch[0][0], (bytes, ExrDecodeResult)):
                     # Use val_crop_size for validation crops (can be smaller for speed)
                     # Use is_validation=True to disable contrast augmentation
                     x, y, _ = self._process_batch(batch, crop_size=self.val_crop_size, is_validation=True)

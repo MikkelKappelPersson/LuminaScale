@@ -2,16 +2,21 @@
 
 Provides GPU-accelerated ACES loading, CDL grading, and color transformation.
 Designed for WebDataset pipeline: raw EXR bytes → GPU processing → sRGB pairs.
+The CPU-side EXR decode itself is shared with the dataloader worker path
+(wds_dataset.decode_exr_to_pixels) so both produce identical pixels.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+import os
+import tempfile
+from typing import Any, Union
 
 import numpy as np
 import torch
 
+from ..data.wds_dataset import ExrDecodeResult, decode_exr_to_pixels
 from .gpu_cdl_processor import GPUCDLProcessor
 from .image_generator import apply_s_curve_contrast_torch
 
@@ -52,17 +57,20 @@ class DatasetPairGenerator:
 
     def generate_srgb_8u_32f_from_bytes(
         self,
-        exr_bytes_list: list[bytes],
+        exr_items: list[Union[bytes, ExrDecodeResult]],
         crop_size: int = 512,
         bit_crunch_contrast_min: float = 1.0,
         bit_crunch_contrast_max: float = 1.0,
         target_blur_sigma: float = 0.0,
         color_spaces: list[str] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict]:
-        """Process a list of raw EXR bytes into graded sRGB 8u/32f pairs on GPU.
+        """Process decoded/EXR samples into graded sRGB 8u/32f pairs on GPU.
 
         Args:
-            exr_bytes_list: List of raw EXR bytes to process
+            exr_items: Per sample either raw EXR bytes (historical path:
+                temp-file write + OIIO ROI decode happen here, in-step) or an
+                ExrDecodeResult (decode-in-workers path: pixels already on
+                CPU, step only pays for the GPU transfer + colour ops).
             crop_size: Size of square crop to extract (512 default)
             bit_crunch_contrast_min: Minimum bit-crunching factor (1.0=no crunch, >1=aggressive)
             bit_crunch_contrast_max: Maximum bit-crunching factor
@@ -79,16 +87,16 @@ class DatasetPairGenerator:
         OPTIMIZED: Single-pass decode (eliminates validation pass).
         Pre-allocates output tensors and writes directly.
         """
-        import OpenImageIO as oiio
         import time
-        import tempfile
-        import os
         
         t0 = time.perf_counter()
         
         # Detailed timing buckets
         decode_times, gpu_times, cdl_times, aces_times, quant_times = [], [], [], [], []
         temp_io_times, oiio_open_times, look_gen_times, permute_times = [], [], [], []
+        # Worker-side decode total (decode-in-workers path; the per-sample
+        # breakdown lives in each ExrDecodeResult.meta["decode_ms"])
+        worker_decode_ms_total = 0.0
         
         # SINGLE PASS: Process all samples, collect valid results
         # Eliminates validation pass which was opening files twice per sample!
@@ -97,7 +105,7 @@ class DatasetPairGenerator:
         tensors_32f = []
         crunch_factors_used = []  # Track factors per image for validation
         
-        for idx, exr_bytes in enumerate(exr_bytes_list):
+        for idx, exr_item in enumerate(exr_items):
             # Randomize bit-crunching factor PER IMAGE for data augmentation
             if bit_crunch_contrast_min != bit_crunch_contrast_max:
                 bit_crunch_factor = np.random.uniform(bit_crunch_contrast_min, bit_crunch_contrast_max)
@@ -111,83 +119,43 @@ class DatasetPairGenerator:
             try:
                 t_sample = time.perf_counter()
                 
-                # === TEMP FILE I/O ===
-                t_io_start = time.perf_counter()
-                with tempfile.NamedTemporaryFile(suffix='.exr', delete=False) as tmp:
-                    tmp.write(exr_bytes)
-                    temp_file = tmp.name
-                t_io = time.perf_counter()
-                temp_io_times.append((t_io - t_io_start) * 1000)
-                
-                # === OIIO OPEN ===
-                t_open_start = time.perf_counter()
-                buf_input = oiio.ImageInput.open(temp_file)
-                t_open = time.perf_counter()
-                oiio_open_times.append((t_open - t_open_start) * 1000)
-                
-                if not buf_input:
-                    logger.debug(f"OIIO failed to open EXR for sample {idx}")
-                    continue
-                
-                # Get image spec for ROI calculation (fast, no decode yet)
-                spec = buf_input.spec()
-                h, w, c = spec.height, spec.width, spec.nchannels
-                
-                # Calculate crop region to minimize OIIO decode overhead
-                # Instead of reading full image and cropping, read only the ROI
-                if crop_size > 0 and (h > crop_size or w > crop_size):
-                    top = max(0, (h - crop_size) // 2)
-                    left = max(0, (w - crop_size) // 2)
-                    # ROI decode: only read the crop region from disk
-                    # This avoids decoding and loading full image data
-                    try:
-                        # OIIO read_region: (xbegin, xend, ybegin, yend)
-                        pixels = buf_input.read_region("float", left, left + crop_size, top, top + crop_size)
-                        if pixels is not None:
-                            # Returned shape is (crop_size, crop_size, nchannels)
-                            pixels = pixels.reshape((crop_size, crop_size, c))
-                    except Exception as e:
-                        logger.debug(f"OIIO ROI read failed, falling back to full read: {e}")
-                        # Fallback: read full image if ROI fails
-                        pixels = buf_input.read_image("float")
-                        if pixels is not None and pixels.ndim == 1:
-                            pixels = pixels.reshape((h, w, c))
-                        elif pixels is not None and pixels.shape[0] == 3:
-                            pixels = pixels.transpose(1, 2, 0)
-                        # Crop in memory
-                        if pixels is not None:
-                            pixels = pixels[top:top+crop_size, left:left+crop_size, :]
+                if isinstance(exr_item, ExrDecodeResult):
+                    # === DECODE-IN-WORKERS PATH: pixels already decoded on CPU ===
+                    if exr_item.pixels is None or exr_item.meta.get("decode_ok", True) is False:
+                        logger.warning(f"Sample {idx} failed worker-side decode; skipped")
+                        continue
+                    worker_decode_ms_total += exr_item.meta.get("decode_ms", 0.0)
+                    pixels = exr_item.pixels
+                    t_decode = time.perf_counter()
+                    decode_times.append((t_decode - t_sample) * 1000)
                 else:
-                    # Image smaller than crop size or no crop needed - read full
-                    pixels = buf_input.read_image("float")
-                    if pixels is not None and pixels.ndim == 1:
-                        pixels = pixels.reshape((h, w, c))
-                    elif pixels is not None and pixels.shape[0] == 3:
-                        pixels = pixels.transpose(1, 2, 0)
-
-                buf_input.close()
-
-                # Pad undersized images up to crop_size (applies after all crop
-                # paths — e.g. a 3040x2014 image requested at 2048 crops to
-                # 2014x2048 via the in-memory fallback): the residual U-Net
-                # needs spatially uniform, pooling-divisible inputs, so a
-                # variable-size image would break the residual add downstream.
-                if pixels is not None and crop_size > 0 and (pixels.shape[0] < crop_size or pixels.shape[1] < crop_size):
-                    pad_h = max(0, crop_size - pixels.shape[0])
-                    pad_w = max(0, crop_size - pixels.shape[1])
-                    pad_mode = "reflect" if (pixels.shape[0] > pad_h and pixels.shape[1] > pad_w) else "edge"
-                    pixels = np.pad(pixels, ((0, pad_h), (0, pad_w), (0, 0)), mode=pad_mode)
-                
-                t_decode = time.perf_counter()
-                decode_times.append((t_decode - t_open) * 1000)
+                    # === RAW-BYTES PATH: temp file + OIIO ROI decode in-step ===
+                    t_io_start = time.perf_counter()
+                    with tempfile.NamedTemporaryFile(suffix='.exr', delete=False) as tmp:
+                        tmp.write(exr_item)
+                        temp_file = tmp.name
+                    t_io = time.perf_counter()
+                    temp_io_times.append((t_io - t_io_start) * 1000)
+                    
+                    t_open_start = time.perf_counter()
+                    pixels = decode_exr_to_pixels(temp_file, {}, crop_size)
+                    t_open = time.perf_counter()
+                    oiio_open_times.append((t_open - t_open_start) * 1000)
+                    t_decode = time.perf_counter()
+                    decode_times.append((t_decode - t_open) * 1000)
                 
                 if pixels is None or len(pixels) == 0:
-                    logger.debug(f"OIIO read returned None/empty for sample {idx}")
+                    logger.debug(f"Decode returned None/empty for sample {idx}")
                     continue
                 
                 # === GPU TRANSFER ===
                 t_gpu_start = time.perf_counter()
-                aces_tensor = torch.from_numpy(pixels.copy()).to(self.device)
+                if isinstance(pixels, torch.Tensor):
+                    # Pinned-CPU tensor from the decode-in-workers path:
+                    # async pinned H2D copy (no pageable memcpy stall)
+                    aces_tensor = pixels.to(self.device, dtype=torch.float32).contiguous()
+                else:
+                    aces_tensor = torch.from_numpy(pixels.copy()).to(self.device)
                 t_gpu = time.perf_counter()
                 gpu_times.append((t_gpu - t_gpu_start) * 1000)
                 
@@ -223,7 +191,7 @@ class DatasetPairGenerator:
                 # === POST-QUANTIZATION BIT CRUNCHING CONTRAST ===
                 srgb_8u = apply_s_curve_contrast_torch(srgb_8u, strength=post_quant_contrast) # expand/enhance the quantized data
                 srgb_32f = apply_s_curve_contrast_torch(srgb_32f, strength=post_quant_contrast) # also apply to 32f target for consistency
-
+                
                 # === OPTIONAL TARGET BLURRING (CLEAN GRADIENTS) ===
                 if target_blur_sigma > 0:
                     from torchvision.transforms.functional import gaussian_blur
@@ -243,7 +211,7 @@ class DatasetPairGenerator:
                     kernel_size = int(2 * np.ceil(2 * target_blur_sigma) + 1)
                     if kernel_size % 2 == 0: kernel_size += 1
                     srgb_32f_p = gaussian_blur(srgb_32f_p, kernel_size=[kernel_size, kernel_size], sigma=[target_blur_sigma, target_blur_sigma])
-
+                
                 tensors_8u.append(srgb_8u_p)
                 tensors_32f.append(srgb_32f_p)
                 crunch_factors_used.append(bit_crunch_factor)
@@ -265,7 +233,7 @@ class DatasetPairGenerator:
             # All samples failed — an empty batch would crash the trainer far
             # from the real cause, so fail loudly here instead.
             raise RuntimeError(
-                f"All {len(exr_bytes_list)} sample(s) failed to decode/grade. "
+                f"All {len(exr_items)} sample(s) failed to decode/grade. "
                 "Run with DEBUG logging on luminascale.utils.dataset_pair_generator "
                 "for per-sample errors."
             )
@@ -290,6 +258,7 @@ class DatasetPairGenerator:
             "permute_ms": np.mean(permute_times) if permute_times else 0,
             "stack_batch_ms": stack_time_ms,
             "total_decode_batch_ms": total_time,
+            "worker_decode_ms": worker_decode_ms_total,
             "crunch_factors": crunch_factors_used,  # Per-image bit-crunching factors for validation
         }
         

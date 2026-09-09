@@ -20,6 +20,9 @@ shuffle_buffer: 50  # Buffer size for shuffling individual samples (shardshuffle
 # Decode EXR in the dataloader worker processes (CPU-only, float32 crops
 # shipped to the step) instead of in-step. See experiments/training-loop-throughput V3.
 decode_in_workers: false
+# V1.5 diagnostic: attach torch.profiler to the main process (waits 8,
+# warms 2, profiles 20 steps, dumps tables + chrome trace to output_dir)
+torch_profile: false
 
 # Hardware
 device: cuda

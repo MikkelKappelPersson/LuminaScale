@@ -180,7 +180,10 @@ class DequantTrainer(L.LightningModule):
                     for res in first_elem:
                         px_t = None
                         if res.pixels is not None:
-                            px_t = torch.from_numpy(np.ascontiguousarray(res.pixels)).pin_memory()
+                            if isinstance(res.pixels, torch.Tensor):
+                                px_t = res.pixels.pin_memory()
+                            else:
+                                px_t = torch.from_numpy(np.ascontiguousarray(res.pixels)).pin_memory()
                         tensored.append(ExrDecodeResult(pixels=px_t, meta=res.meta))
                     return tensored, list(batch[1])
 

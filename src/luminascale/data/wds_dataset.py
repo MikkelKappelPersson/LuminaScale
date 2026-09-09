@@ -22,9 +22,10 @@ logger = logging.getLogger(__name__)
 class ExrDecodeResult:
     """A decoded EXR sample for the decode-in-workers path.
 
-    pixels is the cropped/padded float32 array [H, W, C] ready for a GPU
-    transfer; meta is the original shard metadata dict (with the worker-side
-    decode timing appended under "decode_ms").
+    pixels is the cropped/padded float32 field ready for a GPU transfer —
+    a contiguous CPU torch tensor (shared-memory IPC, V3.5) or, historically,
+    a numpy array; meta is the original shard metadata dict (with the
+    worker-side decode timing appended under "decode_ms").
     """
 
     pixels: np.ndarray | None
@@ -129,7 +130,12 @@ def decode_exr_bytes_to_result(exr_bytes: bytes, metadata: dict, crop_size: int)
     meta["decode_ms"] = decode_ms
     if pixels is None:
         meta["decode_ok"] = False
-    return ExrDecodeResult(pixels=pixels, meta=meta)
+        return ExrDecodeResult(pixels=None, meta=meta)
+    # V3.5: ship a contiguous CPU tensor instead of numpy — torch's pickler
+    # moves tensors through shared memory (no per-batch pipe copy of ~50 MB,
+    # which was the measured serial floor after V3).
+    pixels_t = torch.from_numpy(pixels).contiguous()
+    return ExrDecodeResult(pixels=pixels_t, meta=meta)
 
 
 def decode_exr_and_json(sample: dict, decode_in_workers: bool = False, crop_size: int = 512) -> tuple[bytes | ExrDecodeResult, dict]:

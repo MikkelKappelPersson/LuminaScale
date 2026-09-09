@@ -211,6 +211,15 @@ def collate_wds_batch(batch) -> tuple[list, list]:
     # Fallback for other formats
     return batch if isinstance(batch, tuple) else (batch, [])
 
+def _worker_dump_init(worker_id: int) -> None:
+    """Debug helper (module level so it pickles under spawn): each worker dumps
+    its stack and exits after LUMINA_WORKER_DUMP seconds — deadlock diagnosis."""
+    import faulthandler
+
+    if os.environ.get("LUMINA_WORKER_DUMP"):
+        faulthandler.dump_traceback_later(float(os.environ["LUMINA_WORKER_DUMP"]), exit=True)
+
+
 class _DecoderFn:
     """Picklable decoder callable (spawn-safe): wraps decode_exr_and_json with
     the dataset's decode_in_workers / crop_size settings."""
@@ -383,12 +392,7 @@ class LuminaScaleWebDataset:
         # Debug: LUMINA_WORKER_DUMP=<seconds> makes each worker dump its stack
         # (and exit) after that many seconds — deadlock diagnosis only.
         if os.environ.get("LUMINA_WORKER_DUMP"):
-            import faulthandler
-
-            def _worker_dump(worker_id: int) -> None:
-                faulthandler.dump_traceback_later(float(os.environ["LUMINA_WORKER_DUMP"]), exit=True)
-
-            loader_kwargs["worker_init_fn"] = _worker_dump
+            loader_kwargs["worker_init_fn"] = _worker_dump_init
         
         # Add prefetch_factor if num_workers > 0 (only meaningful with multiprocessing)
         # PyTorch requires prefetch_factor >= 1 when num_workers > 0

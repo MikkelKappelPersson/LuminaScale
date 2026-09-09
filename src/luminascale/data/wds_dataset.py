@@ -211,6 +211,21 @@ def collate_wds_batch(batch) -> tuple[list, list]:
     # Fallback for other formats
     return batch if isinstance(batch, tuple) else (batch, [])
 
+class _DecoderFn:
+    """Picklable decoder callable (spawn-safe): wraps decode_exr_and_json with
+    the dataset's decode_in_workers / crop_size settings."""
+
+    def __init__(self, decode_in_workers: bool, crop_size: int) -> None:
+        self.decode_in_workers = decode_in_workers
+        self.crop_size = crop_size
+
+    def __call__(self, sample: dict):
+        return decode_exr_and_json(
+            sample, decode_in_workers=self.decode_in_workers, crop_size=self.crop_size
+        )
+
+
+
 class LuminaScaleWebDataset:
     """WebDataset wrapper for streaming training data on HPC."""
     
@@ -329,9 +344,7 @@ class LuminaScaleWebDataset:
             logger.debug(f"Configured dataset to repeat {self.patches_per_image} times for on-the-fly patch generation")
             
         # Map our custom decoder (worker-side decode when enabled)
-        dataset = dataset.map(
-            lambda s: decode_exr_and_json(s, decode_in_workers=self.decode_in_workers, crop_size=self.crop_size)
-        )
+        dataset = dataset.map(_DecoderFn(self.decode_in_workers, self.crop_size))
         
         # Batching
         dataset = dataset.batched(batch_size)
@@ -358,6 +371,15 @@ class LuminaScaleWebDataset:
             "pin_memory": True,
             "persistent_workers": True if num_workers > 0 else False,
         }
+        # Debug: LUMINA_WORKER_DUMP=<seconds> makes each worker dump its stack
+        # (and exit) after that many seconds — deadlock diagnosis only.
+        if os.environ.get("LUMINA_WORKER_DUMP"):
+            import faulthandler
+
+            def _worker_dump(worker_id: int) -> None:
+                faulthandler.dump_traceback_later(float(os.environ["LUMINA_WORKER_DUMP"]), exit=True)
+
+            loader_kwargs["worker_init_fn"] = _worker_dump
         
         # Add prefetch_factor if num_workers > 0 (only meaningful with multiprocessing)
         # PyTorch requires prefetch_factor >= 1 when num_workers > 0
